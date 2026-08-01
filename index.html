@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=15">
+  <link rel="stylesheet" href="styles.css?v=16">
 </head>
 <body>
   <div class="app-shell">
@@ -395,7 +395,7 @@
     </form>
   </dialog>
 
-  <dialog id="aiConfigDialog" class="settings-dialog">
+  <dialog id="aiConfigDialog" class="settings-dialog ai-config-dialog">
     <form id="aiConfigForm">
       <div class="dialog-header">
         <div>
@@ -406,49 +406,83 @@
           <i data-lucide="x" aria-hidden="true"></i>
         </button>
       </div>
-      <div class="settings-fields">
-        <label class="settings-field full-field">
-          <span>Base URL</span>
-          <input id="aiBaseUrl" type="url" required placeholder="https://example.com/v1" autocomplete="url">
-        </label>
-        <label class="settings-field full-field">
-          <span>API Key</span>
-          <input id="aiApiKey" type="password" maxlength="500" autocomplete="new-password">
-        </label>
-        <div class="settings-field full-field model-settings-field">
-          <div class="settings-field-heading">
-            <label for="aiCustomModel">模型白名单</label>
-            <button class="secondary-button model-sync-button" type="button" id="fetchAiModelsButton">
-              <i data-lucide="refresh-cw" aria-hidden="true"></i>获取上游模型
-            </button>
+      <div class="ai-routing-settings">
+        <div class="settings-field">
+          <span>调用方式</span>
+          <div class="segmented-control ai-routing-control" role="radiogroup" aria-label="AI 调用方式">
+            <button class="segment" type="button" data-ai-routing-mode="manual" role="radio">手动固定</button>
+            <button class="segment" type="button" data-ai-routing-mode="auto" role="radio">自动轮换</button>
           </div>
-          <div class="model-list" id="aiModelList" role="list" aria-label="已选择的模型"></div>
-          <div class="model-list-meta">
-            <span id="aiModelCount" aria-live="polite">0 个模型</span>
-            <span>可移除不需要的模型</span>
-          </div>
-          <div class="model-add-row">
-            <input id="aiCustomModel" type="text" maxlength="120" placeholder="输入自定义模型名称" autocomplete="off">
-            <button class="secondary-button" type="button" id="addAiModelButton"><i data-lucide="plus" aria-hidden="true"></i>添加</button>
-          </div>
-          <textarea id="aiModels" hidden aria-hidden="true"></textarea>
         </div>
-        <label class="settings-field full-field">
-          <span>默认模型</span>
-          <select id="aiDefaultModel" required></select>
+        <label class="settings-field" id="aiManualProviderField">
+          <span>当前供应商</span>
+          <select id="aiManualProvider"></select>
         </label>
         <label class="settings-field">
-          <span>超时</span>
-          <div class="number-field"><input id="aiTimeout" type="number" min="1000" max="120000" step="1000" value="30000" required><span>毫秒</span></div>
+          <span>默认模型</span>
+          <select id="aiDefaultModel" required></select>
         </label>
         <label class="settings-field">
           <span>每分钟上限</span>
           <div class="number-field"><input id="aiRateLimit" type="number" min="1" max="60" step="1" value="20" required><span>次</span></div>
         </label>
       </div>
+      <div class="ai-provider-workspace">
+        <aside class="ai-provider-panel" aria-label="AI 供应商列表">
+          <div class="ai-provider-panel-heading">
+            <span>供应商</span>
+            <button class="icon-button" type="button" id="addAiProviderButton" aria-label="添加供应商" data-tooltip="添加供应商">
+              <i data-lucide="plus" aria-hidden="true"></i>
+            </button>
+          </div>
+          <div class="ai-provider-list" id="aiProviderList"></div>
+        </aside>
+        <section class="ai-provider-editor" id="aiProviderEditor" aria-label="编辑供应商">
+          <div class="settings-fields provider-settings-fields">
+            <label class="settings-field">
+              <span>名称</span>
+              <input id="aiProviderName" type="text" maxlength="60" required autocomplete="off">
+            </label>
+            <label class="provider-enabled-field">
+              <input id="aiProviderEnabled" type="checkbox">
+              <span>启用此供应商</span>
+            </label>
+            <label class="settings-field full-field">
+              <span>Base URL</span>
+              <input id="aiBaseUrl" type="url" required placeholder="https://example.com/v1" autocomplete="url">
+            </label>
+            <label class="settings-field full-field">
+              <span>API Key</span>
+              <input id="aiApiKey" type="password" maxlength="500" autocomplete="new-password">
+            </label>
+            <label class="settings-field">
+              <span>超时</span>
+              <div class="number-field"><input id="aiTimeout" type="number" min="1000" max="120000" step="1000" value="30000" required><span>毫秒</span></div>
+            </label>
+            <div class="settings-field full-field model-settings-field">
+              <div class="settings-field-heading">
+                <label for="aiCustomModel">可用模型</label>
+                <button class="secondary-button model-sync-button" type="button" id="fetchAiModelsButton">
+                  <i data-lucide="refresh-cw" aria-hidden="true"></i>获取模型
+                </button>
+              </div>
+              <div class="model-list" id="aiModelList" role="list" aria-label="当前供应商的模型"></div>
+              <div class="model-list-meta">
+                <span id="aiModelCount" aria-live="polite">0 个模型</span>
+                <span>当前供应商</span>
+              </div>
+              <div class="model-add-row">
+                <input id="aiCustomModel" type="text" maxlength="120" placeholder="输入自定义模型名称" autocomplete="off">
+                <button class="secondary-button" type="button" id="addAiModelButton"><i data-lucide="plus" aria-hidden="true"></i>添加</button>
+              </div>
+              <textarea id="aiModels" hidden aria-hidden="true"></textarea>
+            </div>
+          </div>
+        </section>
+      </div>
       <p class="settings-feedback" id="aiConfigFeedback" aria-live="polite" hidden></p>
       <div class="dialog-actions settings-actions">
-        <button class="secondary-button" type="button" id="testAiConfigButton"><i data-lucide="plug-zap" aria-hidden="true"></i>保存并测试</button>
+        <button class="secondary-button" type="button" id="testAiConfigButton"><i data-lucide="plug-zap" aria-hidden="true"></i>保存并测试本套</button>
         <button class="primary-button" type="submit"><i data-lucide="save" aria-hidden="true"></i>保存</button>
       </div>
     </form>
@@ -456,9 +490,9 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=15"></script>
-  <script src="data.js?v=15"></script>
-  <script src="answer-utils.js?v=15"></script>
+  <script src="vendor/lucide.min.js?v=16"></script>
+  <script src="data.js?v=16"></script>
+  <script src="answer-utils.js?v=16"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -474,7 +508,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=15";
+      appScript.src = "app.js?v=16";
       document.body.appendChild(appScript);
     })();
   </script>

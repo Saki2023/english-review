@@ -70,6 +70,8 @@ test("AI configuration builds OpenAI-compatible chat, responses, and model endpo
 test("upstream model lists accept OpenAI and common proxy response shapes", () => {
   assert.deepEqual(parseModelList({ data: [{ id: "model-10" }, { id: "model-2" }, { id: "model-2" }] }), ["model-2", "model-10"]);
   assert.deepEqual(parseModelList({ models: ["model-b", { name: "model-a" }] }), ["model-a", "model-b"]);
+  assert.deepEqual(parseModelList({ success: true, data: { items: [{ model: "proxy-model" }, { model_name: "relay-model" }] } }), ["proxy-model", "relay-model"]);
+  assert.deepEqual(parseModelList({ result: { data: [{ slug: "nested-model" }] } }), ["nested-model"]);
   assert.throws(() => parseModelList({ data: [{ object: "model" }] }), /no models/);
 });
 

@@ -167,6 +167,6 @@ journalctl -u english-review-update.service -n 100 --no-pager
 sudo systemctl start english-review-update.service
 ```
 
-## 十一、配置 sub2api AI 判题
+## 十一、配置多套 AI 连接
 
-登录管理员账号后，在“AI 出题”页面右上角打开设置，直接填写 Base URL、API Key 和模型列表，不需要通过 SSH 修改 `.env`。完整说明见 [AI判题配置.md](AI判题配置.md)。
+登录管理员账号后，在“AI 出题”页面右上角打开设置，可以添加 sub2api、NewAPI、DeepSeek、OneAPI 或其他 OpenAI 兼容连接，并选择手动固定或自动轮换，不需要通过 SSH 修改 `.env`。完整说明见 [AI判题配置.md](AI判题配置.md)。

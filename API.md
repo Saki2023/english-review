@@ -196,17 +196,17 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 }
 ```
 
-服务端 sub2api 设置见 [AI判题配置.md](AI判题配置.md)。不要向判题或出题接口发送 `API Key`。
+服务端多供应商设置见 [AI判题配置.md](AI判题配置.md)。不要向判题或出题接口发送 `API Key`。
 
 ## AI 配置与出题接口
 
 | 方法 | 路径 | 权限 | 用途 |
 |---|---|---|---|
 | GET | `/api/ai/options` | 已登录 | 获取允许使用的模型、强度和当前账号选择 |
-| PUT | `/api/admin/ai-config` | 管理员 | 保存 Base URL、Key、模型和调用限制 |
+| PUT | `/api/admin/ai-config` | 管理员 | 保存多套供应商、手动/自动模式和调用限制 |
 | GET | `/api/admin/ai-config` | 管理员 | 获取脱敏后的配置；响应永远不包含 Key |
 | POST | `/api/admin/ai-config/models` | 管理员 | 使用当前或已保存的连接信息获取上游模型列表，不保存配置 |
-| POST | `/api/admin/ai-config/test` | 管理员 | 使用已保存配置测试模型连接 |
+| POST | `/api/admin/ai-config/test` | 管理员 | 测试指定供应商和模型，不触发轮换 |
 | POST | `/api/ai/questions/generate` | 已登录 | 根据当前账号进度生成 5 或 10 道题 |
 | POST | `/api/ai/questions/ask` | 已登录 | 询问当前 AI 题目并保存该题的简短问答记录 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
@@ -237,6 +237,31 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 
 服务端从当前账号状态读取题目，不接受客户端伪造的参考答案。每个当前题目最多保留最近 12 条问答消息。
 
-获取上游模型时可发送 `baseUrl`、`apiKey` 和 `timeoutMs`。`apiKey` 留空时使用服务器已保存的 Key；响应只包含模型 ID 和数量，不返回 Key。服务端请求 OpenAI 兼容的 `GET /v1/models`。
+保存多供应商配置的请求结构：
+
+```json
+{
+  "schema": 2,
+  "mode": "manual",
+  "manualProviderId": "sub2api-main",
+  "providers": [
+    {
+      "id": "sub2api-main",
+      "name": "sub2api",
+      "enabled": true,
+      "baseUrl": "https://api.example.com/v1",
+      "apiKey": "仅写入时发送；留空保留旧 Key",
+      "models": ["model-a"],
+      "timeoutMs": 30000
+    }
+  ],
+  "defaultModel": "model-a",
+  "rateLimitPerMinute": 20
+}
+```
+
+`mode` 允许 `manual` 和 `auto`。手动模式只调用 `manualProviderId` 指定的已启用供应商，不进行跨供应商故障切换；自动模式在支持所选模型的已启用供应商间轮询，失败时尝试下一套。旧版单供应商配置会自动迁移为 schema 2 的手动模式。
+
+读取配置时，`providers` 中只返回 `hasApiKey`，永远不返回 `apiKey`。获取上游模型时可发送 `providerId`、`providerName`、`baseUrl`、`apiKey` 和 `timeoutMs`；`apiKey` 留空时按 `providerId` 使用服务器已保存的 Key。响应只包含模型 ID 和数量。测试连接时发送 `providerId`、`model` 和 `reasoningEffort`。
 
 出题和判题默认调用 OpenAI 兼容的 `POST /v1/chat/completions`。当该接口返回 `400`、`404`、`405`、`422` 或 `501` 且兼容参数重试仍失败时，服务端自动改试 `POST /v1/responses`。上游鉴权、限流、超时、接口不兼容和返回格式错误会转换为不包含 Key 的中文错误响应。

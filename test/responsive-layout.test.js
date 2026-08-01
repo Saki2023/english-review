@@ -18,5 +18,8 @@ test("mobile styles keep new AI and notes controls within a narrow viewport", ()
   assert.match(mobile, /\.ai-history-heading\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(mobile, /\.ai-history-answers\s*>\s*div\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.notes-columns\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(tablet, /\.ai-provider-workspace\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(mobile, /\.ai-routing-settings\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(mobile, /\.ai-provider-list\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(css, /\.table-wrap\s*\{[^}]*overflow-x:\s*auto/s);
 });

@@ -34,6 +34,8 @@
   let aiTutorTarget = null;
   let aiStatusMessage = "";
   let aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
+  let aiConfigDraft = null;
+  let activeAiProviderId = "";
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -588,6 +590,7 @@
           id: setId,
           createdAt: item.setCreatedAt || item.answeredAt || item.date || "",
           latestAt: item.answeredAt || item.setCreatedAt || item.date || "",
+          providerName: item.providerName || "",
           model: item.model || "",
           reasoningEffort: item.reasoningEffort || "",
           expectedCount: Number(item.questionCount) || 0,
@@ -599,6 +602,7 @@
       group.questions.push(item);
       if (String(item.answeredAt || "") > String(group.latestAt || "")) group.latestAt = item.answeredAt;
       group.latestOrder = Math.max(group.latestOrder, index);
+      if (!group.providerName && item.providerName) group.providerName = item.providerName;
       if (!group.model && item.model) group.model = item.model;
       if (!group.reasoningEffort && item.reasoningEffort) group.reasoningEffort = item.reasoningEffort;
       group.expectedCount = Math.max(group.expectedCount, Number(item.questionCount) || 0);
@@ -606,6 +610,7 @@
     return Array.from(groups.values()).map(group => {
       if (currentSet && currentSet.id === group.id) {
         group.createdAt ||= currentSet.createdAt;
+        group.providerName ||= currentSet.providerName;
         group.model ||= currentSet.model;
         group.reasoningEffort ||= currentSet.reasoningEffort;
         group.expectedCount = Math.max(group.expectedCount, currentSet.questions.length);
@@ -632,7 +637,7 @@
     list.innerHTML = groups.map(group => {
       const groupCorrect = group.questions.filter(item => item.correct === true).length;
       const complete = group.questions.length >= group.expectedCount;
-      const modelLabel = [group.model, AI_EFFORT_LABELS[group.reasoningEffort]].filter(Boolean).join(" · ") || "历史题组";
+      const modelLabel = [group.providerName, group.model, AI_EFFORT_LABELS[group.reasoningEffort]].filter(Boolean).join(" · ") || "历史题组";
       const questionRows = group.questions.map((item, index) => {
         const number = Number(item.questionNumber) || index + 1;
         return `<article class="ai-history-question">
@@ -710,7 +715,7 @@
     }
     empty.hidden = true; panel.hidden = false; complete.hidden = true;
     $("#aiFocusBadge").textContent = question.focus || "巩固练习";
-    $("#aiModelReadout").textContent = `${set.model} · ${AI_EFFORT_LABELS[set.reasoningEffort] || "中"}`;
+    $("#aiModelReadout").textContent = [set.providerName, set.model, AI_EFFORT_LABELS[set.reasoningEffort] || "中"].filter(Boolean).join(" · ");
     $("#aiQuestionProgress").textContent = `${Number(set.index) + 1} / ${set.questions.length}`;
     $("#aiDirectionLabel").textContent = formatDirection(question.direction);
     $("#aiPromptText").textContent = question.direction === "en-zh" ? question.english : question.chinese;
@@ -830,8 +835,54 @@
     renderAiView();
   }
 
+  function normalizeConfigModels(models) {
+    return Array.from(new Set((Array.isArray(models) ? models : []).map(value => String(value || "").trim()).filter(value => value && value.length <= 120))).slice(0, 200);
+  }
+
+  function newAiProviderId() {
+    const suffix = globalThis.crypto && typeof globalThis.crypto.randomUUID === "function" ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    return `provider-${suffix}`.slice(0, 64);
+  }
+
+  function createAiProviderDraft(value = {}, index = 0) {
+    return {
+      id: String(value.id || newAiProviderId()),
+      name: String(value.name || `供应商 ${index + 1}`),
+      enabled: value.enabled !== false,
+      baseUrl: String(value.baseUrl || ""),
+      apiKey: "",
+      hasApiKey: Boolean(value.hasApiKey),
+      models: normalizeConfigModels(value.models),
+      timeoutMs: Number(value.timeoutMs) || DEFAULT_AI_TIMEOUT_MS
+    };
+  }
+
+  function createAiConfigDraft(config = {}) {
+    const sourceProviders = Array.isArray(config.providers) && config.providers.length
+      ? config.providers
+      : config.baseUrl
+        ? [{ id: "legacy-primary", name: "默认供应商", enabled: true, baseUrl: config.baseUrl, hasApiKey: config.hasApiKey, models: config.models, timeoutMs: config.timeoutMs }]
+        : [{}];
+    const providers = sourceProviders.map(createAiProviderDraft);
+    const enabled = providers.filter(provider => provider.enabled);
+    const requestedManualId = String(config.manualProviderId || "");
+    const manualProviderId = (enabled.find(provider => provider.id === requestedManualId) || enabled[0] || providers[0]).id;
+    return {
+      mode: config.mode === "auto" ? "auto" : "manual",
+      manualProviderId,
+      providers,
+      defaultModel: String(config.defaultModel || ""),
+      rateLimitPerMinute: Number(config.rateLimitPerMinute) || 20
+    };
+  }
+
+  function activeAiProvider() {
+    return aiConfigDraft && aiConfigDraft.providers.find(provider => provider.id === activeAiProviderId) || null;
+  }
+
   function configModelNames() {
-    return Array.from(new Set($("#aiModels").value.split(/[\n,]/).map(value => value.trim()).filter(value => value && value.length <= 120))).slice(0, 200);
+    const provider = activeAiProvider();
+    return provider ? [...provider.models] : [];
   }
 
   function renderConfigModelList() {
@@ -868,24 +919,172 @@
   }
 
   function setConfigModels(models, preferred = "") {
-    const normalized = Array.from(new Set((Array.isArray(models) ? models : []).map(value => String(value || "").trim()).filter(value => value && value.length <= 120))).slice(0, 200);
+    const normalized = normalizeConfigModels(models);
+    const provider = activeAiProvider();
+    if (provider) provider.models = normalized;
     $("#aiModels").value = normalized.join("\n");
     renderConfigModelList();
-    syncDefaultModelOptions(preferred);
+    renderAiProviderList();
+    syncAiRoutingControls(preferred);
   }
 
-  function syncDefaultModelOptions(preferred = "") {
+  function availableAiConfigModels() {
+    if (!aiConfigDraft) return [];
+    const providers = aiConfigDraft.mode === "auto"
+      ? aiConfigDraft.providers.filter(provider => provider.enabled)
+      : aiConfigDraft.providers.filter(provider => provider.enabled && provider.id === aiConfigDraft.manualProviderId);
+    return normalizeConfigModels(providers.flatMap(provider => provider.models)).sort((left, right) => left.localeCompare(right, "en", { numeric: true, sensitivity: "base" }));
+  }
+
+  function syncAiRoutingControls(preferred = "") {
+    if (!aiConfigDraft) return;
+    $$('[data-ai-routing-mode]').forEach(button => {
+      const selected = button.dataset.aiRoutingMode === aiConfigDraft.mode;
+      button.classList.toggle("is-selected", selected);
+      button.setAttribute("aria-checked", String(selected));
+    });
+    const enabled = aiConfigDraft.providers.filter(provider => provider.enabled);
+    if (!enabled.some(provider => provider.id === aiConfigDraft.manualProviderId)) {
+      aiConfigDraft.manualProviderId = (enabled[0] || aiConfigDraft.providers[0] || {}).id || "";
+    }
+    const manualSelect = $("#aiManualProvider");
+    const choices = enabled.length ? enabled : aiConfigDraft.providers;
+    manualSelect.replaceChildren(...choices.map(provider => {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = `${provider.name || "未命名供应商"}${provider.enabled ? "" : "（已停用）"}`;
+      return option;
+    }));
+    manualSelect.value = aiConfigDraft.manualProviderId;
+    manualSelect.disabled = !choices.length;
+    $("#aiManualProviderField").hidden = aiConfigDraft.mode === "auto";
+
     const select = $("#aiDefaultModel");
-    const current = preferred || select.value;
-    const models = configModelNames();
+    const current = preferred || select.value || aiConfigDraft.defaultModel;
+    const models = availableAiConfigModels();
     select.replaceChildren(...models.map(modelName => {
       const option = document.createElement("option");
       option.value = modelName;
       option.textContent = modelName;
       return option;
     }));
-    if (models.includes(current)) select.value = current;
+    aiConfigDraft.defaultModel = models.includes(current) ? current : (models[0] || "");
+    select.value = aiConfigDraft.defaultModel;
     select.disabled = !models.length;
+  }
+
+  function renderAiProviderList() {
+    const list = $("#aiProviderList");
+    if (!aiConfigDraft) return list.replaceChildren();
+    list.replaceChildren(...aiConfigDraft.providers.map(provider => {
+      const row = document.createElement("div");
+      row.className = `ai-provider-row${provider.id === activeAiProviderId ? " is-selected" : ""}${provider.enabled ? "" : " is-disabled"}`;
+      const select = document.createElement("button");
+      select.type = "button";
+      select.className = "ai-provider-select";
+      select.dataset.aiProviderSelect = provider.id;
+      select.setAttribute("aria-pressed", String(provider.id === activeAiProviderId));
+      const name = document.createElement("span");
+      name.className = "ai-provider-name";
+      name.textContent = provider.name || "未命名供应商";
+      const meta = document.createElement("span");
+      meta.className = "ai-provider-meta";
+      meta.textContent = `${provider.enabled ? "已启用" : "已停用"} · ${provider.models.length} 个模型`;
+      select.append(name, meta);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "ai-provider-delete";
+      remove.dataset.aiProviderDelete = provider.id;
+      remove.disabled = aiConfigDraft.providers.length <= 1;
+      remove.setAttribute("aria-label", `删除 ${provider.name || "供应商"}`);
+      const icon = document.createElement("i");
+      icon.dataset.lucide = "trash-2";
+      icon.setAttribute("aria-hidden", "true");
+      remove.append(icon);
+      row.append(select, remove);
+      return row;
+    }));
+    refreshIcons();
+  }
+
+  function renderAiProviderEditor() {
+    const provider = activeAiProvider();
+    $("#aiProviderEditor").hidden = !provider;
+    if (!provider) return;
+    $("#aiProviderName").value = provider.name;
+    $("#aiProviderEnabled").checked = provider.enabled;
+    $("#aiBaseUrl").value = provider.baseUrl;
+    $("#aiApiKey").value = provider.apiKey;
+    $("#aiApiKey").required = !provider.hasApiKey && !provider.apiKey;
+    $("#aiApiKey").placeholder = provider.hasApiKey ? "已保存，留空则不修改" : "输入 API Key";
+    $("#aiTimeout").value = String(provider.timeoutMs || DEFAULT_AI_TIMEOUT_MS);
+    $("#aiModels").value = provider.models.join("\n");
+    $("#aiCustomModel").value = "";
+    renderConfigModelList();
+  }
+
+  function renderAiConfiguration(preferredModel = "") {
+    renderAiProviderList();
+    renderAiProviderEditor();
+    syncAiRoutingControls(preferredModel);
+    $("#aiRateLimit").value = String(aiConfigDraft ? aiConfigDraft.rateLimitPerMinute : 20);
+    refreshIcons();
+  }
+
+  function syncActiveAiProviderEditor() {
+    const provider = activeAiProvider();
+    if (!provider) return;
+    provider.name = $("#aiProviderName").value.trim();
+    provider.enabled = $("#aiProviderEnabled").checked;
+    provider.baseUrl = $("#aiBaseUrl").value.trim();
+    provider.apiKey = $("#aiApiKey").value.trim();
+    provider.timeoutMs = Number($("#aiTimeout").value) || DEFAULT_AI_TIMEOUT_MS;
+  }
+
+  function updateActiveAiProvider(event) {
+    syncActiveAiProviderEditor();
+    const provider = activeAiProvider();
+    if (!provider) return;
+    $("#aiApiKey").required = !provider.hasApiKey && !provider.apiKey;
+    if (["aiProviderName", "aiProviderEnabled"].includes(event.target.id)) {
+      renderAiProviderList();
+      syncAiRoutingControls();
+    }
+  }
+
+  function selectAiProvider(providerId) {
+    syncActiveAiProviderEditor();
+    if (!aiConfigDraft || !aiConfigDraft.providers.some(provider => provider.id === providerId)) return;
+    activeAiProviderId = providerId;
+    renderAiConfiguration();
+  }
+
+  function addAiProvider() {
+    syncActiveAiProviderEditor();
+    if (!aiConfigDraft || aiConfigDraft.providers.length >= 20) return setAiConfigFeedback("最多可以保存 20 套供应商", true);
+    const provider = createAiProviderDraft({ name: `供应商 ${aiConfigDraft.providers.length + 1}` }, aiConfigDraft.providers.length);
+    aiConfigDraft.providers.push(provider);
+    activeAiProviderId = provider.id;
+    renderAiConfiguration();
+    setAiConfigFeedback("已添加供应商，保存后生效");
+    $("#aiProviderName").select();
+  }
+
+  function deleteAiProvider(providerId) {
+    syncActiveAiProviderEditor();
+    if (!aiConfigDraft || aiConfigDraft.providers.length <= 1) return;
+    const removed = aiConfigDraft.providers.find(provider => provider.id === providerId);
+    aiConfigDraft.providers = aiConfigDraft.providers.filter(provider => provider.id !== providerId);
+    if (aiConfigDraft.manualProviderId === providerId) aiConfigDraft.manualProviderId = (aiConfigDraft.providers.find(provider => provider.enabled) || aiConfigDraft.providers[0]).id;
+    if (activeAiProviderId === providerId) activeAiProviderId = aiConfigDraft.providers[0].id;
+    renderAiConfiguration();
+    setAiConfigFeedback(`${removed && removed.name || "供应商"}已移除，保存后生效`);
+  }
+
+  function setAiRoutingMode(mode) {
+    if (!aiConfigDraft || !["manual", "auto"].includes(mode)) return;
+    aiConfigDraft.mode = mode;
+    syncAiRoutingControls();
   }
 
   function addCustomAiModel() {
@@ -905,8 +1104,11 @@
 
   async function fetchUpstreamAiModels() {
     const button = $("#fetchAiModelsButton");
+    syncActiveAiProviderEditor();
+    const provider = activeAiProvider();
     const baseUrl = $("#aiBaseUrl");
     const apiKey = $("#aiApiKey");
+    if (!provider) return;
     if (!baseUrl.value.trim()) return baseUrl.reportValidity();
     if (apiKey.required && !apiKey.value.trim()) return apiKey.reportValidity();
     setBusyButton(button, true, "正在获取…");
@@ -917,6 +1119,8 @@
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          providerId: provider.id,
+          providerName: provider.name,
           baseUrl: baseUrl.value.trim(),
           apiKey: apiKey.value.trim(),
           timeoutMs: Number($("#aiTimeout").value) || DEFAULT_AI_TIMEOUT_MS
@@ -945,14 +1149,9 @@
     setAiConfigFeedback("正在读取配置…");
     try {
       const config = await responseJson(await fetch("/api/admin/ai-config", { credentials: "same-origin", cache: "no-store" }));
-      $("#aiBaseUrl").value = config.baseUrl || "";
-      $("#aiApiKey").value = "";
-      $("#aiApiKey").required = !config.hasApiKey;
-      $("#aiApiKey").placeholder = config.hasApiKey ? "已保存，留空则不修改" : "输入 API Key";
-      setConfigModels(config.models || [], config.defaultModel);
-      $("#aiCustomModel").value = "";
-      $("#aiTimeout").value = String(config.timeoutMs || DEFAULT_AI_TIMEOUT_MS);
-      $("#aiRateLimit").value = String(config.rateLimitPerMinute || 20);
+      aiConfigDraft = createAiConfigDraft(config);
+      activeAiProviderId = aiConfigDraft.providers.some(provider => provider.id === config.manualProviderId) ? config.manualProviderId : aiConfigDraft.providers[0].id;
+      renderAiConfiguration(config.defaultModel);
       setAiConfigFeedback(config.configured ? "配置已保存" : "尚未配置");
     } catch (error) {
       setAiConfigFeedback(error.message, true);
@@ -960,23 +1159,55 @@
     refreshIcons();
   }
 
+  function aiProviderValidationProblem(provider) {
+    if (!provider.name) return { message: "请输入供应商名称", field: "#aiProviderName" };
+    if (!provider.baseUrl) return { message: `${provider.name} 缺少 Base URL`, field: "#aiBaseUrl" };
+    try {
+      const url = new URL(provider.baseUrl);
+      if (!["http:", "https:"].includes(url.protocol)) throw new Error("protocol");
+    } catch (_) { return { message: `${provider.name} 的 Base URL 无效`, field: "#aiBaseUrl" }; }
+    if (!provider.apiKey && !provider.hasApiKey) return { message: `${provider.name} 缺少 API Key`, field: "#aiApiKey" };
+    if (!provider.models.length) return { message: `${provider.name} 至少需要一个模型`, field: "#fetchAiModelsButton" };
+    if (!Number.isInteger(provider.timeoutMs) || provider.timeoutMs < 1000 || provider.timeoutMs > 120000) return { message: `${provider.name} 的超时必须在 1000 到 120000 毫秒之间`, field: "#aiTimeout" };
+    return null;
+  }
+
+  function showAiProviderValidation(provider, problem) {
+    activeAiProviderId = provider.id;
+    renderAiConfiguration();
+    setAiConfigFeedback(problem.message, true);
+    requestAnimationFrame(() => $(problem.field).focus());
+  }
+
   async function saveAiConfiguration(closeAfterSave = false) {
     const form = $("#aiConfigForm");
-    const models = configModelNames();
-    if (!models.length) {
-      setAiConfigFeedback("请先获取上游模型，或手动添加至少一个模型", true);
-      $("#fetchAiModelsButton").focus();
-      return null;
+    if (!aiConfigDraft) return null;
+    syncActiveAiProviderEditor();
+    aiConfigDraft.rateLimitPerMinute = Number($("#aiRateLimit").value);
+    aiConfigDraft.defaultModel = $("#aiDefaultModel").value;
+    for (const provider of aiConfigDraft.providers) {
+      const problem = aiProviderValidationProblem(provider);
+      if (problem) {
+        showAiProviderValidation(provider, problem);
+        return null;
+      }
     }
-    syncDefaultModelOptions();
     if (!form.reportValidity()) return null;
     const body = {
-      baseUrl: $("#aiBaseUrl").value.trim(),
-      apiKey: $("#aiApiKey").value.trim(),
-      models,
-      defaultModel: $("#aiDefaultModel").value,
-      timeoutMs: Number($("#aiTimeout").value),
-      rateLimitPerMinute: Number($("#aiRateLimit").value)
+      schema: 2,
+      mode: aiConfigDraft.mode,
+      manualProviderId: aiConfigDraft.manualProviderId,
+      providers: aiConfigDraft.providers.map(provider => ({
+        id: provider.id,
+        name: provider.name,
+        enabled: provider.enabled,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        models: provider.models,
+        timeoutMs: provider.timeoutMs
+      })),
+      defaultModel: aiConfigDraft.defaultModel,
+      rateLimitPerMinute: aiConfigDraft.rateLimitPerMinute
     };
     const config = await responseJson(await fetch("/api/admin/ai-config", {
       method: "PUT",
@@ -984,9 +1215,10 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     }));
-    $("#aiApiKey").value = "";
-    $("#aiApiKey").required = false;
-    $("#aiApiKey").placeholder = "已保存，留空则不修改";
+    const previousActiveId = activeAiProviderId;
+    aiConfigDraft = createAiConfigDraft(config);
+    activeAiProviderId = aiConfigDraft.providers.some(provider => provider.id === previousActiveId) ? previousActiveId : aiConfigDraft.providers[0].id;
+    renderAiConfiguration(config.defaultModel);
     setAiConfigFeedback("配置已保存");
     await loadAiOptions();
     if (closeAfterSave) $("#aiConfigDialog").close();
@@ -1004,17 +1236,20 @@
 
   async function testAiConfiguration() {
     const button = $("#testAiConfigButton");
+    const targetProviderId = activeAiProviderId;
     setBusyButton(button, true, "正在测试…");
     try {
       const config = await saveAiConfiguration(false);
       if (!config) return;
+      const provider = config.providers.find(item => item.id === targetProviderId) || config.providers[0];
+      const testModel = provider.models.includes(config.defaultModel) ? config.defaultModel : provider.models[0];
       const result = await responseJson(await fetch("/api/admin/ai-config/test", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: config.defaultModel, reasoningEffort: "medium" })
+        body: JSON.stringify({ providerId: provider.id, model: testModel, reasoningEffort: "medium" })
       }));
-      setAiConfigFeedback(`连接成功：${result.model}`);
+      setAiConfigFeedback(`连接成功：${result.providerName} · ${result.model}`);
     } catch (error) {
       setAiConfigFeedback(error.message, true);
     } finally {
@@ -1495,6 +1730,23 @@
     $("#openAiConfigButton").addEventListener("click", openAiConfiguration);
     $("#closeAiConfigButton").addEventListener("click", () => $("#aiConfigDialog").close());
     $("#aiConfigForm").addEventListener("submit", submitAiConfiguration);
+    $$('[data-ai-routing-mode]').forEach(button => button.addEventListener("click", () => setAiRoutingMode(button.dataset.aiRoutingMode)));
+    $("#aiManualProvider").addEventListener("change", event => {
+      if (!aiConfigDraft) return;
+      aiConfigDraft.manualProviderId = event.target.value;
+      syncAiRoutingControls();
+    });
+    $("#aiDefaultModel").addEventListener("change", event => { if (aiConfigDraft) aiConfigDraft.defaultModel = event.target.value; });
+    $("#aiRateLimit").addEventListener("input", event => { if (aiConfigDraft) aiConfigDraft.rateLimitPerMinute = Number(event.target.value); });
+    $("#addAiProviderButton").addEventListener("click", addAiProvider);
+    $("#aiProviderList").addEventListener("click", event => {
+      const remove = event.target.closest("[data-ai-provider-delete]");
+      if (remove) return deleteAiProvider(remove.dataset.aiProviderDelete);
+      const select = event.target.closest("[data-ai-provider-select]");
+      if (select) selectAiProvider(select.dataset.aiProviderSelect);
+    });
+    ["#aiProviderName", "#aiBaseUrl", "#aiApiKey", "#aiTimeout"].forEach(selector => $(selector).addEventListener("input", updateActiveAiProvider));
+    $("#aiProviderEnabled").addEventListener("change", updateActiveAiProvider);
     $("#fetchAiModelsButton").addEventListener("click", fetchUpstreamAiModels);
     $("#addAiModelButton").addEventListener("click", addCustomAiModel);
     $("#aiCustomModel").addEventListener("keydown", event => {
@@ -1517,7 +1769,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=15").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=16").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

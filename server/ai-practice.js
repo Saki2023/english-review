@@ -65,6 +65,8 @@ function sanitizeQuestionSet(value) {
   return {
     id: cleanText(value.id, 80) || `aiset-${crypto.randomUUID()}`,
     createdAt: cleanText(value.createdAt, 40) || new Date().toISOString(),
+    providerId: cleanText(value.providerId, 64),
+    providerName: cleanText(value.providerName, 60),
     model: cleanText(value.model, 120),
     reasoningEffort: AI_EFFORTS.includes(value.reasoningEffort) ? value.reasoningEffort : "medium",
     questions,
@@ -87,6 +89,8 @@ function sanitizeHistoryItem(value) {
     setCreatedAt: cleanText(source.setCreatedAt, 40),
     answeredAt: cleanText(source.answeredAt, 40),
     date: cleanText(source.date, 20),
+    providerId: cleanText(source.providerId, 64),
+    providerName: cleanText(source.providerName, 60),
     model: cleanText(source.model, 120),
     reasoningEffort: AI_EFFORTS.includes(source.reasoningEffort) ? source.reasoningEffort : "",
     questionNumber,
@@ -190,6 +194,8 @@ function createQuestionSet(questions, selection) {
   return sanitizeQuestionSet({
     id: `aiset-${crypto.randomUUID()}`,
     createdAt: new Date().toISOString(),
+    providerId: selection.providerId,
+    providerName: selection.providerName,
     model: selection.model,
     reasoningEffort: selection.reasoningEffort,
     questions: questions.map(question => ({ ...question, id: `aiq-${crypto.randomUUID()}` })),

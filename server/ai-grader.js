@@ -122,17 +122,25 @@ function providerError(status) {
 }
 
 function parseModelList(payload, maximum = 200) {
-  const source = Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload && payload.data)
-      ? payload.data
-      : Array.isArray(payload && payload.models)
-        ? payload.models
-        : [];
+  const queue = [payload];
+  const visited = new Set();
+  let source = [];
+  while (queue.length && !source.length) {
+    const value = queue.shift();
+    if (Array.isArray(value)) {
+      source = value;
+      break;
+    }
+    if (!value || typeof value !== "object" || visited.has(value)) continue;
+    visited.add(value);
+    ["data", "models", "items", "result", "results"].forEach(key => {
+      if (value[key] && (Array.isArray(value[key]) || typeof value[key] === "object")) queue.push(value[key]);
+    });
+  }
   const models = [];
   const seen = new Set();
   source.forEach(item => {
-    const id = String(typeof item === "string" ? item : (item && (item.id || item.name)) || "").trim();
+    const id = String(typeof item === "string" ? item : (item && (item.id || item.name || item.model || item.model_name || item.slug)) || "").trim();
     if (!id || id.length > 120 || seen.has(id)) return;
     seen.add(id);
     models.push(id);

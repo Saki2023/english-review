@@ -8,7 +8,7 @@ const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredent
 const { chineseAnswerMatches, englishAnswerMatches } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiQuestionGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
 const { MAX_AI_HISTORY, MAX_TUTOR_MESSAGES, buildLearningProfile, createQuestionSet, sanitizeAiPractice } = require("./server/ai-practice");
-const { AI_EFFORTS, createAiSettingsStore, resolveAiConnection, selectAiSettings } = require("./server/ai-settings");
+const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
 const { buildLearningSyncProfile } = require("./server/learning-sync");
 const { validLearningSyncToken } = require("./server/learning-sync-token");
 
@@ -138,6 +138,30 @@ function refreshUsers() { users = loadUsers(DATA_DIR); }
 function refreshAiSettings() {
   aiSettings = aiSettingsStore.load();
   takeAiRequest = createRateLimiter(aiSettings ? aiSettings.rateLimitPerMinute : 20);
+}
+
+function aiConfigured() { return Boolean(aiSettings && getAvailableModels(aiSettings).length); }
+
+function advanceAiRotation(config, mode) {
+  if (mode !== "auto") return;
+  aiSettings = aiSettingsStore.advanceRotation(config.providerId) || aiSettings;
+}
+
+async function runAiRoute(route, operation) {
+  let lastError;
+  for (const config of route.candidates) {
+    try {
+      const value = await operation(config);
+      advanceAiRotation(config, route.mode);
+      return { value, config };
+    } catch (error) {
+      lastError = error;
+      advanceAiRotation(config, route.mode);
+      if (route.mode !== "auto") throw error;
+      console.warn(`AI provider ${config.providerName} failed during automatic rotation: ${error && error.message ? error.message : "unknown error"}`);
+    }
+  }
+  throw lastError || Object.assign(new Error("no AI provider is available"), { statusCode: 503 });
 }
 
 function createSession(userId) {
@@ -337,28 +361,31 @@ function localSentenceAnswerMatches(task, answer) {
 
 function aiSelectionForState(state, requested = {}) {
   const practice = sanitizeAiPractice(state.aiPractice);
-  const model = String(requested.model || practice.settings.model || (aiSettings && aiSettings.defaultModel) || "").trim();
+  const availableModels = getAvailableModels(aiSettings);
+  const storedModel = String(practice.settings.model || "").trim();
+  const model = String(requested.model || (availableModels.includes(storedModel) ? storedModel : aiSettings && aiSettings.defaultModel) || "").trim();
   const reasoningEffort = AI_EFFORTS.includes(requested.reasoningEffort) ? requested.reasoningEffort : practice.settings.reasoningEffort;
   const count = [5, 10].includes(Number(requested.count)) ? Number(requested.count) : practice.settings.count;
-  const config = selectAiSettings(aiSettings, { model, reasoningEffort });
-  practice.settings = { model: config.model, reasoningEffort: config.reasoningEffort, count };
+  const route = selectAiCandidates(aiSettings, { model, reasoningEffort });
+  practice.settings = { model: route.model, reasoningEffort: route.reasoningEffort, count };
   practice.updatedAt = new Date().toISOString();
   state.aiPractice = practice;
-  return { config, count, practice };
+  return { route, count, practice };
 }
 
 function publicAiOptions(user) {
   const current = aiSettingsStore.public();
   const practice = user ? sanitizeAiPractice(getUserState(user).aiPractice) : sanitizeAiPractice(null);
-  const selectedModel = current.models.includes(practice.settings.model) ? practice.settings.model : current.defaultModel;
+  const selectedModel = current.availableModels.includes(practice.settings.model) ? practice.settings.model : current.defaultModel;
   return {
     configured: current.configured,
-    models: current.models,
+    models: current.availableModels,
     defaultModel: current.defaultModel,
     efforts: current.efforts,
     selectedModel,
     selectedEffort: practice.settings.reasoningEffort,
     selectedCount: practice.settings.count,
+    routingMode: current.mode,
     admin: Boolean(user && user.role === "admin")
   };
 }
@@ -431,9 +458,9 @@ async function handleAiAdmin(req, res, url, user) {
   if (url.pathname === "/api/admin/ai-config/test" && req.method === "POST") {
     try {
       const body = await readBody(req);
-      const config = selectAiSettings(aiSettings, body);
+      const config = selectAiCandidates(aiSettings, body, { allowDisabledProvider: true }).candidates[0];
       await createAiConnectionTester(config)();
-      return sendJson(res, 200, { ok: true, model: config.model, reasoningEffort: config.reasoningEffort });
+      return sendJson(res, 200, { ok: true, providerId: config.providerId, providerName: config.providerName, model: config.model, reasoningEffort: config.reasoningEffort });
     } catch (error) {
       console.warn(`AI connection test failed: ${error && error.message ? error.message : "unknown error"}`);
       return sendJson(res, 502, { error: "AI connection test failed", providerStatus: Number(error && error.providerStatus) || null });
@@ -468,6 +495,8 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
     setCreatedAt: set.createdAt,
     answeredAt: now,
     date: today(),
+    providerId: set.providerId,
+    providerName: set.providerName,
     model: set.model,
     reasoningEffort: set.reasoningEffort,
     questionNumber,
@@ -489,7 +518,7 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
 async function handleAiGrade(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI endpoint not found");
-  if (!aiSettings) return sendError(res, 503, "AI grading is not configured");
+  if (!aiConfigured()) return sendError(res, 503, "AI grading is not configured");
 
   try {
     const body = await readBody(req);
@@ -512,8 +541,8 @@ async function handleAiGrade(req, res, user) {
     persistUserStates();
     const acceptedAnswers = task.direction === "zh-en" ? (task.item.acceptedEnglish || [task.item.english]) : (task.item.acceptedChinese || [task.item.chinese]);
     const sourceText = task.direction === "zh-en" ? task.item.chinese : task.item.english;
-    const result = await createAiGrader(selection.config).grade({ answer, acceptedAnswers, direction: task.direction, sourceText });
-    return sendJson(res, 200, { ...result, source: "ai" });
+    const routed = await runAiRoute(selection.route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: task.direction, sourceText }));
+    return sendJson(res, 200, { ...routed.value, source: "ai" });
   } catch (error) {
     if (error && [400, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI grading failed: ${error && error.message ? error.message : "unknown error"}`);
@@ -524,7 +553,7 @@ async function handleAiGrade(req, res, user) {
 async function handleAiGenerate(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI generation endpoint not found");
-  if (!aiSettings) return sendError(res, 503, "AI is not configured");
+  if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
   try {
     const body = await readBody(req);
     const state = getUserState(user);
@@ -534,8 +563,8 @@ async function handleAiGenerate(req, res, user) {
     refreshContent();
     const profile = buildLearningProfile(content, state, today());
     if (!profile.allowedWords.length) return sendError(res, 409, "no learned words are available");
-    const questions = await createAiQuestionGenerator(selection.config).generate(profile, selection.count);
-    const set = createQuestionSet(questions, selection.config);
+    const routed = await runAiRoute(selection.route, config => createAiQuestionGenerator(config).generate(profile, selection.count));
+    const set = createQuestionSet(routed.value, routed.config);
     selection.practice.currentSet = set;
     selection.practice.tutor = null;
     selection.practice.updatedAt = new Date().toISOString();
@@ -553,7 +582,7 @@ async function handleAiGenerate(req, res, user) {
 async function handleAiTutorAsk(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI tutor endpoint not found");
-  if (!aiSettings) return sendError(res, 503, "AI is not configured");
+  if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
   try {
     const body = await readBody(req);
     const message = String(body.message || "").trim();
@@ -594,29 +623,30 @@ async function handleAiTutorAsk(req, res, user) {
     const rate = takeAiRequest(user.id);
     if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
     const contextModel = historyItem ? historyItem.model : set.model;
-    const requestedModel = aiSettings.models.includes(contextModel) ? contextModel : aiSettings.defaultModel;
+    const availableModels = getAvailableModels(aiSettings);
+    const requestedModel = availableModels.includes(contextModel) ? contextModel : aiSettings.defaultModel;
     const tutorEffort = AI_EFFORTS.includes(body.reasoningEffort) ? body.reasoningEffort : practice.tutorSettings.reasoningEffort;
-    const config = selectAiSettings(aiSettings, { model: requestedModel, reasoningEffort: tutorEffort });
+    const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: tutorEffort });
     const thread = practice.tutor && practice.tutor.setId === threadSetId && practice.tutor.questionId === threadQuestionId
       ? practice.tutor
       : { setId: threadSetId, questionId: threadQuestionId, messages: [] };
-    const answer = await createAiTutor(config).answer({
+    const routed = await runAiRoute(route, config => createAiTutor(config).answer({
       exercise,
       history: thread.messages,
       message
-    });
+    }));
     const createdAt = new Date().toISOString();
     thread.messages = [
       ...thread.messages,
       { role: "user", content: message, createdAt },
-      { role: "assistant", content: answer, createdAt }
+      { role: "assistant", content: routed.value, createdAt }
     ].slice(-MAX_TUTOR_MESSAGES);
     practice.tutor = thread;
-    practice.tutorSettings.reasoningEffort = config.reasoningEffort;
+    practice.tutorSettings.reasoningEffort = route.reasoningEffort;
     practice.updatedAt = createdAt;
     state.aiPractice = practice;
     persistUserStates();
-    return sendJson(res, 200, { answer, tutor: thread, tutorSettings: practice.tutorSettings });
+    return sendJson(res, 200, { answer: routed.value, tutor: thread, tutorSettings: practice.tutorSettings, provider: { id: routed.config.providerId, name: routed.config.providerName } });
   } catch (error) {
     if (error && [400, 404, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI tutoring failed: ${error && error.message ? error.message : "unknown error"}`);
@@ -628,7 +658,7 @@ async function handleAiTutorAsk(req, res, user) {
 async function handleAiQuestionGrade(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI question endpoint not found");
-  if (!aiSettings) return sendError(res, 503, "AI is not configured");
+  if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
   try {
     const body = await readBody(req);
     const answer = String(body.answer || "").trim();
@@ -645,11 +675,13 @@ async function handleAiQuestionGrade(req, res, user) {
     if (!result.correct) {
       const rate = takeAiRequest(user.id);
       if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
-      const requestedModel = aiSettings.models.includes(set.model) ? set.model : aiSettings.defaultModel;
-      const config = selectAiSettings(aiSettings, { model: requestedModel, reasoningEffort: set.reasoningEffort });
+      const availableModels = getAvailableModels(aiSettings);
+      const requestedModel = availableModels.includes(set.model) ? set.model : aiSettings.defaultModel;
+      const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: set.reasoningEffort });
       const acceptedAnswers = question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese;
       const sourceText = question.direction === "zh-en" ? question.chinese : question.english;
-      result = { ...(await createAiGrader(config).grade({ answer, acceptedAnswers, direction: question.direction, sourceText })), source: "ai" };
+      const routed = await runAiRoute(route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: question.direction, sourceText }));
+      result = { ...routed.value, source: "ai" };
     }
     const savedQuestion = saveAiQuestionResult(state, set.id, question.id, answer, result);
     return sendJson(res, 200, { ...result, question: savedQuestion, practice: state.aiPractice });
@@ -676,7 +708,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname.startsWith("/api/admin/ai-config")) return handleAiAdmin(req, res, url, user);
   if (url.pathname === "/api/health" && req.method === "GET") {
     refreshUsers();
-    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, authRequired: true, aiGrading: Boolean(aiSettings), time: new Date().toISOString() });
+    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, authRequired: true, aiGrading: aiConfigured(), time: new Date().toISOString() });
   }
   if (url.pathname === "/api/ai/options" && req.method === "GET") return user ? sendJson(res, 200, publicAiOptions(user)) : sendError(res, 401, "login required");
   if (url.pathname === "/api/ai/grade") return handleAiGrade(req, res, user);
