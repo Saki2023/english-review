@@ -1,0 +1,12 @@
+[Unit]
+Description=Check GitHub for English Review updates every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+AccuracySec=30s
+RandomizedDelaySec=30s
+Unit=english-review-update.service
+
+[Install]
+WantedBy=timers.target

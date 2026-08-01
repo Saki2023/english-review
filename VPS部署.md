@@ -128,3 +128,30 @@ sudo docker compose -f docker-compose.vps.yml exec -it english-review npm run us
 ```
 
 这里保存账号、密码哈希、会话、用户学习进度以及通过 API 添加的词句。重新创建容器不会清空这个目录。
+
+## 九、自动更新
+
+安装 `systemd` 自动更新定时器：
+
+```bash
+cd /opt/english-review
+git pull --ff-only
+sudo bash deploy/install-auto-update.sh
+```
+
+定时器每 5 分钟检查一次 GitHub。没有新提交时不会构建；发现新提交时会快进更新、重新构建，并等待应用健康检查通过。它不会修改 `.env` 或 `server/data`，也不会开放额外端口。
+
+每次部署前会把 `.env` 和 `server/data` 备份到 `/var/backups/english-review`，保留最近 10 份。更新前后还会核对 Docker 数据挂载；挂载不正确时自动停止部署。
+
+查看定时器和最近日志：
+
+```bash
+systemctl list-timers english-review-update.timer --no-pager
+journalctl -u english-review-update.service -n 100 --no-pager
+```
+
+需要立即检查更新时运行：
+
+```bash
+sudo systemctl start english-review-update.service
+```
