@@ -16,7 +16,6 @@
   let activeView = "home";
   let reviewMode = "all";
   let libraryType = "word";
-  let authMode = "login";
   let currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
   let appEventsBound = false;
   let authEventsBound = false;
@@ -129,25 +128,13 @@
     }
   }
 
-  function setAuthMode(mode) {
-    authMode = mode;
-    const register = mode === "register";
-    $$("[data-auth-mode]").forEach(button => { const active = button.dataset.authMode === mode; button.classList.toggle("is-selected", active); button.setAttribute("aria-selected", String(active)); });
-    $("#authTitle").textContent = register ? "创建账号" : "账号登录";
-    $("#authSubmit").textContent = register ? "注册并登录" : "登录";
-    $("#confirmPasswordWrap").hidden = !register;
-    $("#authConfirmPassword").required = register;
-    $("#authPassword").autocomplete = register ? "new-password" : "current-password";
-    $("#authFeedback").hidden = true;
-  }
-
   function showAuthView() {
     document.body.classList.add("auth-mode");
     $("#appBody").hidden = true;
     $("#authScreen").hidden = false;
     $("#accountArea").hidden = true;
     $("#resetButton").hidden = true;
-    setAuthMode(authMode);
+    $("#authFeedback").hidden = true;
     refreshIcons();
   }
 
@@ -175,9 +162,6 @@
       const response = await fetch("/api/auth/status", { credentials: "same-origin", cache: "no-store" });
       if (!response.ok) return false;
       const data = await response.json();
-      const registerTab = $('[data-auth-mode="register"]');
-      if (registerTab) registerTab.hidden = data.registrationOpen === false;
-      if (data.registrationOpen === false && authMode === "register") setAuthMode("login");
       if (!data.authenticated || !data.user) return false;
       currentUser = data.user;
       return true;
@@ -188,14 +172,11 @@
     event.preventDefault();
     const username = $("#authUsername").value.trim();
     const password = $("#authPassword").value;
-    const confirmation = $("#authConfirmPassword").value;
-    if (authMode === "register" && password !== confirmation) return setAuthFeedback("两次输入的密码不一致");
-    const endpoint = authMode === "register" ? "/api/auth/register" : "/api/auth/login";
     const submit = $("#authSubmit");
     submit.disabled = true;
     setAuthFeedback("");
     try {
-      const response = await fetch(endpoint, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
+      const response = await fetch("/api/auth/login", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) return setAuthFeedback(data.error || "操作失败，请稍后重试");
       currentUser = data.user;
@@ -219,7 +200,6 @@
   function bindAuthEvents() {
     if (authEventsBound) return;
     authEventsBound = true;
-    $$('[data-auth-mode]').forEach(button => button.addEventListener("click", () => setAuthMode(button.dataset.authMode)));
     $("#authForm").addEventListener("submit", submitAuth);
     $("#logoutButton").addEventListener("click", logout);
   }

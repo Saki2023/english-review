@@ -1,4 +1,5 @@
 server/data/*.json
 test-*.cjs
+test/
 *.log
 .env

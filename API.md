@@ -33,7 +33,6 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 |---|---|---|
 | GET | `/api/health` | 检查服务和词库数量 |
 | GET | `/api/auth/status` | 查看当前浏览器是否已登录 |
-| POST | `/api/auth/register` | 注册并自动登录 |
 | POST | `/api/auth/login` | 登录并取得会话 |
 | GET | `/api/auth/me` | 获取当前账号 |
 | POST | `/api/auth/logout` | 退出当前会话 |
@@ -48,7 +47,23 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | PUT | `/api/state` | 保存当前账号的复习记录，需要登录 |
 | GET | `/api/export` | 导出当前账号的词库和复习记录，需要登录 |
 
-注册、登录和复习状态使用 HTTP-only Cookie。内容新增、修改、删除只允许管理员账号，或使用服务器配置的 `API_TOKEN`。
+登录和复习状态使用 HTTP-only Cookie。网页不提供注册接口，账号只能在服务器终端创建。内容新增、修改、删除只允许管理员账号，或使用服务器配置的 `API_TOKEN`。
+
+## 创建账号
+
+VPS 部署后，通过 SSH 进入项目目录并运行：
+
+```bash
+docker compose -f docker-compose.vps.yml exec -it english-review npm run user:add
+```
+
+用户名会正常显示，密码和确认密码在终端中隐藏输入。首个账号自动成为管理员，后续账号默认为普通成员。需要创建额外管理员时运行：
+
+```bash
+docker compose -f docker-compose.vps.yml exec -it english-review npm run user:add -- --admin
+```
+
+网页没有账号创建入口，`POST /api/auth/register` 也不存在。
 
 ## 账号调试
 

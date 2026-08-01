@@ -4,7 +4,9 @@
   "private": true,
   "description": "Offline-first English review app with a Docker-ready API",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test",
+    "user:add": "node server/create-user.js"
   },
   "engines": {
     "node": ">=20"

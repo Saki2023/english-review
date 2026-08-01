@@ -53,17 +53,10 @@ sudo docker run --rm hello-world
 
 不要把 Service URL 写成 `localhost:8080`，因为 `cloudflared` 与应用位于不同容器中。
 
-## 三、上传程序
-
-从 Windows 上传：
-
-```powershell
-scp -r "C:\Users\w9423\Documents\三年英语学习计划\每日英语复习" root@VPS_IP:/opt/english-review
-```
-
-然后登录 VPS：
+## 三、下载程序
 
 ```bash
+git clone https://github.com/Saki2023/english-review.git /opt/english-review
 cd /opt/english-review
 ```
 
@@ -79,7 +72,6 @@ nano .env
 
 ```text
 DOMAIN=english.example.com
-ALLOW_REGISTRATION=true
 API_TOKEN=刚才由 openssl 生成的随机字符串
 CLOUDFLARE_TUNNEL_TOKEN=Cloudflare 提供的 Tunnel Token
 ```
@@ -106,21 +98,19 @@ sudo docker compose -f docker-compose.vps.yml logs --tail=100 cloudflared
 https://english.example.com
 ```
 
-## 六、创建账号并关闭注册
+## 六、通过 SSH 创建账号
 
-第一个注册账号自动成为管理员。创建完账号后修改 `.env`：
-
-```text
-ALLOW_REGISTRATION=false
-```
-
-重新应用配置：
+网页不提供注册入口，账号只能在 VPS 终端创建：
 
 ```bash
-sudo docker compose -f docker-compose.vps.yml up -d
+sudo docker compose -f docker-compose.vps.yml exec -it english-review npm run user:add
 ```
 
-已有账号仍可登录，页面将隐藏注册入口。
+按提示输入用户名、密码和确认密码。密码输入时不会显示，首个账号自动成为管理员。后续需要增加普通账号时重复运行同一命令；需要增加管理员时运行：
+
+```bash
+sudo docker compose -f docker-compose.vps.yml exec -it english-review npm run user:add -- --admin
+```
 
 ## 七、安装到荣耀手机
 

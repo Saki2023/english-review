@@ -8,7 +8,6 @@ services:
       PORT: 8080
       TZ: Asia/Shanghai
       COOKIE_SECURE: "true"
-      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
       API_TOKEN: ${API_TOKEN}
       CORS_ORIGIN: https://${DOMAIN}
     volumes:

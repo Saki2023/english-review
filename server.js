@@ -4,25 +4,24 @@ const path = require("path");
 const vm = require("vm");
 const crypto = require("crypto");
 const { URL } = require("url");
+const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
 
 const ROOT = __dirname;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, "server", "data"));
 const CONTENT_FILE = path.join(DATA_DIR, "content-store.json");
 const LEGACY_STATE_FILE = path.join(DATA_DIR, "state.json");
-const USERS_FILE = path.join(DATA_DIR, "users.json");
 const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
 const USER_STATES_FILE = path.join(DATA_DIR, "user-states.json");
 const PORT = Number(process.env.PORT || 8080);
 const API_TOKEN = String(process.env.API_TOKEN || "").trim();
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const APP_TIMEZONE = process.env.TZ || "Asia/Shanghai";
-const ALLOW_REGISTRATION = String(process.env.ALLOW_REGISTRATION || "true").toLowerCase() !== "false";
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const MAX_BODY = 2 * 1024 * 1024;
 
 ensureDataDir();
 let content = loadContent();
-let users = loadUsers();
+let users = loadUsers(DATA_DIR);
 let sessions = loadSessions();
 let userStates = loadUserStates();
 const legacyState = sanitizeState(readJson(LEGACY_STATE_FILE, {}));
@@ -109,11 +108,6 @@ function sanitizeState(value) {
 function defaultState() { return sanitizeState({}); }
 function isEmptyState(value) { return !value || (!Object.keys(value.taskStates || {}).length && !Object.keys(value.history || {}).length && !value.attempts?.length && !value.mistakes?.length); }
 
-function loadUsers() {
-  const saved = readJson(USERS_FILE, {});
-  return { schema: 1, users: Array.isArray(saved.users) ? saved.users : [] };
-}
-
 function loadSessions() {
   const saved = readJson(SESSIONS_FILE, {});
   return { schema: 1, sessions: saved.sessions && typeof saved.sessions === "object" ? saved.sessions : {} };
@@ -124,30 +118,10 @@ function loadUserStates() {
   return { schema: 1, users: saved.users && typeof saved.users === "object" ? saved.users : {} };
 }
 
-function persistUsers() { writeJson(USERS_FILE, users); }
 function persistSessions() { writeJson(SESSIONS_FILE, sessions); }
 function persistUserStates() { writeJson(USER_STATES_FILE, userStates); }
 function persistContent() { writeJson(CONTENT_FILE, content); }
-
-function publicUser(user) { return { id: user.id, username: user.username, role: user.role, createdAt: user.createdAt }; }
-
-function passwordHash(password, salt) { return crypto.scryptSync(password, salt, 64).toString("hex"); }
-
-function validPassword(password, salt, expected) {
-  const actual = Buffer.from(passwordHash(password, salt), "hex");
-  const target = Buffer.from(expected, "hex");
-  return actual.length === target.length && crypto.timingSafeEqual(actual, target);
-}
-
-function normalizeUsername(value) { return String(value || "").trim().toLowerCase(); }
-
-function validateCredentials(body) {
-  const username = String(body.username || "").trim();
-  const password = String(body.password || "");
-  if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) throw Object.assign(new Error("用户名需为 3 至 32 位字母、数字、下划线、点或短横线"), { statusCode: 400 });
-  if (password.length < 8 || password.length > 128) throw Object.assign(new Error("密码长度需为 8 至 128 位"), { statusCode: 400 });
-  return { username, password };
-}
+function refreshUsers() { users = loadUsers(DATA_DIR); }
 
 function createSession(userId) {
   purgeSessions();
@@ -233,26 +207,14 @@ function readBody(req) {
 function authResponse(req, res, user, token, status = 200) { sendJson(res, status, { user: publicUser(user), accessToken: token }, { "Set-Cookie": sessionCookie(req, token) }); }
 
 function handleAuth(req, res, url) {
+  refreshUsers();
   if (url.pathname === "/api/auth/status" && req.method === "GET") {
     const user = getRequestUser(req);
-    return sendJson(res, 200, { authenticated: Boolean(user), user: user ? publicUser(user) : null, registrationOpen: ALLOW_REGISTRATION });
+    return sendJson(res, 200, { authenticated: Boolean(user), user: user ? publicUser(user) : null });
   }
   if (url.pathname === "/api/auth/me" && req.method === "GET") {
     const user = getRequestUser(req);
     return user ? sendJson(res, 200, { user: publicUser(user) }) : sendError(res, 401, "login required");
-  }
-  if (url.pathname === "/api/auth/register" && req.method === "POST") {
-    if (!ALLOW_REGISTRATION) return sendError(res, 403, "registration disabled");
-    return readBody(req).then(body => {
-      const { username, password } = validateCredentials(body);
-      const usernameKey = normalizeUsername(username);
-      if (users.users.some(item => item.usernameKey === usernameKey)) throw Object.assign(new Error("用户名已存在"), { statusCode: 409 });
-      const salt = crypto.randomBytes(16).toString("hex");
-      const user = { id: crypto.randomUUID(), username, usernameKey, passwordSalt: salt, passwordHash: passwordHash(password, salt), role: users.users.length ? "member" : "admin", createdAt: new Date().toISOString() };
-      users.users.push(user); persistUsers();
-      const token = createSession(user.id);
-      return authResponse(req, res, user, token, 201);
-    }).catch(error => sendError(res, error.statusCode || 400, error.message));
   }
   if (url.pathname === "/api/auth/login" && req.method === "POST") {
     return readBody(req).then(body => {
@@ -336,7 +298,10 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`); const user = getRequestUser(req);
   if (req.method === "OPTIONS") { setCommonHeaders(res); res.writeHead(204); return res.end(); }
   if (url.pathname.startsWith("/api/auth/")) return handleAuth(req, res, url);
-  if (url.pathname === "/api/health" && req.method === "GET") return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, registrationOpen: ALLOW_REGISTRATION, authRequired: true, time: new Date().toISOString() });
+  if (url.pathname === "/api/health" && req.method === "GET") {
+    refreshUsers();
+    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, authRequired: true, time: new Date().toISOString() });
+  }
   if (url.pathname === "/api/export" && req.method === "GET") return user ? sendJson(res, 200, { content, state: getUserState(user), user: publicUser(user) }) : sendError(res, 401, "login required");
   if (url.pathname === "/api/state") return handleState(req, res, user);
   if (url.pathname === "/api/content" || url.pathname.startsWith("/api/content/")) return handleContent(req, res, url, user);
