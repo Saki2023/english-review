@@ -36,10 +36,45 @@ test("learning profile prioritizes weak learned content and excludes future less
 });
 
 test("AI practice state keeps a bounded question set and per-account settings", () => {
-  const set = createQuestionSet([{ direction: "en-zh", english: "cat", chinese: "猫", acceptedEnglish: ["cat"], acceptedChinese: ["猫"], focus: "猫" }], { model: "model-a", reasoningEffort: "high" });
-  const practice = sanitizeAiPractice({ settings: { model: "model-a", reasoningEffort: "high", count: 10 }, currentSet: set });
+  const set = createQuestionSet([{ direction: "en-zh", english: "cat", chinese: "猫", acceptedEnglish: ["cat"], acceptedChinese: ["猫"], focus: "单词复习" }], { model: "model-a", reasoningEffort: "max" });
+  const tutorMessages = Array.from({ length: 14 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `message-${index}` }));
+  const practice = sanitizeAiPractice({ settings: { model: "model-a", reasoningEffort: "max", count: 10 }, currentSet: set, tutor: { setId: set.id, questionId: set.questions[0].id, messages: tutorMessages } });
   assert.equal(practice.settings.model, "model-a");
-  assert.equal(practice.settings.reasoningEffort, "high");
+  assert.equal(practice.settings.reasoningEffort, "max");
   assert.equal(practice.settings.count, 10);
   assert.equal(practice.currentSet.questions.length, 1);
+  assert.equal(practice.currentSet.reasoningEffort, "max");
+  assert.equal(practice.tutor.messages.length, 12);
+  assert.equal(practice.tutor.messages[0].content, "message-2");
+});
+
+test("legacy AI history gains set metadata without exposing old focus hints", () => {
+  const practice = sanitizeAiPractice({ history: [{
+    id: "aiset-old:aiq-old",
+    date: "2026-08-01",
+    direction: "en-zh",
+    prompt: "A cat sat on a mat.",
+    userAnswer: "一只猫坐在垫子上",
+    correctAnswer: "一只猫坐在一张垫子上",
+    correct: true,
+    focus: "cat 表示猫"
+  }] });
+  assert.equal(practice.history[0].setId, "aiset-old");
+  assert.equal(practice.history[0].focus, "介词辨析");
+  assert.equal(practice.history[0].reasoningEffort, "");
+});
+
+test("AI question history retains the latest one thousand answers", () => {
+  const history = Array.from({ length: 1002 }, (_, index) => ({
+    id: `set-${index}:question-${index}`,
+    date: "2026-08-01",
+    direction: "en-zh",
+    prompt: "cat",
+    userAnswer: "猫",
+    correctAnswer: "猫",
+    correct: true
+  }));
+  const practice = sanitizeAiPractice({ history });
+  assert.equal(practice.history.length, 1000);
+  assert.equal(practice.history[0].id, "set-2:question-2");
 });

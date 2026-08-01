@@ -5,7 +5,9 @@ const path = require("node:path");
 const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl } = require("./ai-grader");
 
 const SETTINGS_FILE = "ai-settings.json";
-const AI_EFFORTS = ["low", "medium", "high"];
+const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const DEFAULT_AI_TIMEOUT_MS = 30000;
+const MAX_AI_TIMEOUT_MS = 120000;
 const MAX_AI_MODELS = 200;
 
 function boundedInteger(value, fallback, minimum, maximum) {
@@ -36,7 +38,7 @@ function resolveAiConnection(settings, requested = {}) {
   const source = requested && typeof requested === "object" ? requested : {};
   const baseUrl = String(source.baseUrl ?? previous.baseUrl ?? "").trim();
   const apiKey = String(source.apiKey || previous.apiKey || "").trim();
-  const timeoutMs = boundedInteger(source.timeoutMs, boundedInteger(previous.timeoutMs, 10000, 1000, 30000), 1000, 30000);
+  const timeoutMs = boundedInteger(source.timeoutMs, boundedInteger(previous.timeoutMs, DEFAULT_AI_TIMEOUT_MS, 1000, MAX_AI_TIMEOUT_MS), 1000, MAX_AI_TIMEOUT_MS);
 
   if (!baseUrl) throw configurationError("Base URL is required");
   if (baseUrl.length > 2048) throw configurationError("Base URL is too long");
@@ -80,7 +82,7 @@ function publicSettings(settings, source = "web") {
     hasApiKey: Boolean(settings && settings.apiKey),
     models: configured ? [...settings.models] : [],
     defaultModel: configured ? settings.defaultModel : "",
-    timeoutMs: configured ? settings.timeoutMs : 10000,
+    timeoutMs: configured ? settings.timeoutMs : DEFAULT_AI_TIMEOUT_MS,
     rateLimitPerMinute: configured ? settings.rateLimitPerMinute : 20,
     efforts: [...AI_EFFORTS],
     updatedAt: configured ? String(settings.updatedAt || "") : ""
@@ -147,6 +149,8 @@ function selectAiSettings(settings, requested = {}) {
 
 module.exports = {
   AI_EFFORTS,
+  DEFAULT_AI_TIMEOUT_MS,
+  MAX_AI_TIMEOUT_MS,
   createAiSettingsStore,
   normalizeModels,
   normalizeSettings,

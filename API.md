@@ -46,8 +46,9 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | GET | `/api/state` | 获取当前账号的复习记录，需要登录 |
 | PUT | `/api/state` | 保存当前账号的复习记录，需要登录 |
 | GET | `/api/export` | 导出当前账号的词库和复习记录，需要登录 |
+| GET | `/api/sync/profile?username=账号名` | 获取供本地学习窗口使用的学习档案，需要只读同步令牌 |
 
-登录和复习状态使用 HTTP-only Cookie。网页不提供注册接口，账号只能在服务器终端创建。内容新增、修改、删除只允许管理员账号，或使用服务器配置的 `API_TOKEN`。
+登录和复习状态使用 HTTP-only Cookie。网页不提供注册接口，账号只能在服务器终端创建。内容新增、修改、删除只允许管理员账号，或使用服务器配置的 `API_TOKEN`。本地学习档案使用由 `API_TOKEN` 派生的只读令牌，不能修改词库。
 
 ## 创建账号
 
@@ -140,6 +141,32 @@ Authorization: Bearer 你的令牌
 API_TOKEN=一段足够长的随机字符串
 ```
 
+## 同步到本地学习窗口
+
+`GET /api/sync/profile` 使用只读同步令牌鉴权，并按账号名返回学习档案。响应只包含课程内容、复习状态、AI 做题历史、错题和薄弱点统计，不包含密码、Cookie、会话令牌或 AI Key。
+
+在 VPS 生成只读令牌：
+
+```bash
+cd /opt/english-review
+docker compose -f docker-compose.vps.yml exec english-review npm run sync:token
+```
+
+该命令不会显示原始 `API_TOKEN`。只读令牌只能调用学习档案接口，不能新增、修改或删除内容。
+
+```powershell
+$headers = @{ Authorization = "Bearer 你的只读同步令牌" }
+Invoke-RestMethod -Uri "https://你的域名/api/sync/profile?username=你的账号名" -Headers $headers
+```
+
+本项目同时提供本地同步脚本。把父目录 `学习同步\.sync.env.example` 复制为 `.sync.env` 并填写三项配置后，在“三年英语学习计划”目录运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\每日英语复习\scripts\sync-learning-profile.ps1"
+```
+
+同步结果保存为 `学习同步\网站学习档案.json`，供独立的英语学习窗口读取。不要提交 `.sync.env`，也不要把任何令牌发到聊天中。
+
 ## 数据保存位置
 
 Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/data`，由 `docker-compose.yml` 映射到宿主机，不会因为容器重新创建而丢失。
@@ -181,6 +208,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | POST | `/api/admin/ai-config/models` | 管理员 | 使用当前或已保存的连接信息获取上游模型列表，不保存配置 |
 | POST | `/api/admin/ai-config/test` | 管理员 | 使用已保存配置测试模型连接 |
 | POST | `/api/ai/questions/generate` | 已登录 | 根据当前账号进度生成 5 或 10 道题 |
+| POST | `/api/ai/questions/ask` | 已登录 | 询问当前 AI 题目并保存该题的简短问答记录 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
 
 生成题目请求：
@@ -193,7 +221,19 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 }
 ```
 
-`reasoningEffort` 允许 `low`、`medium`、`high`。模型必须位于管理员网页配置的允许列表中。
+`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。AI 超时配置范围为 1 至 120 秒，默认 30 秒。
+
+询问当前题目：
+
+```json
+{
+  "setId": "当前题组 ID",
+  "questionId": "当前题目 ID",
+  "message": "为什么这里使用 on？"
+}
+```
+
+服务端从当前账号状态读取题目，不接受客户端伪造的参考答案。每个当前题目最多保留最近 12 条问答消息。
 
 获取上游模型时可发送 `baseUrl`、`apiKey` 和 `timeoutMs`。`apiKey` 留空时使用服务器已保存的 Key；响应只包含模型 ID 和数量，不返回 Key。服务端请求 OpenAI 兼容的 `GET /v1/models`。
 

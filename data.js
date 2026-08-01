@@ -31,6 +31,48 @@ window.ENGLISH_REVIEW_DATA = {
     { id: "d2-s5", day: 2, learned: "2026-08-01", english: "It is big.", chinese: "它很大。", acceptedChinese: ["它很大", "它是大的"], acceptedEnglish: ["it is big"], directions: ["en-zh", "zh-en"] },
     { id: "d2-s6", day: 2, learned: "2026-08-01", english: "A big cat sat on a mat.", chinese: "一只大猫坐在一张垫子上。", acceptedChinese: ["一只大猫坐在一张垫子上", "一只大猫坐在垫子上"], acceptedEnglish: ["a big cat sat on a mat"], directions: ["en-zh", "zh-en"] }
   ],
+  notes: [
+    {
+      day: 1,
+      date: "2026-07-31",
+      score: "6.5 / 8 · 约 81%",
+      summary: "认识字母名称与字母音的区别，学习短元音 /æ/，并读懂 I am... 和第一篇三句短文。",
+      goals: ["区分字母名称和字母音", "认识短元音 /æ/", "拼读 man、sat、mat", "看懂 I am... 和三句短文"],
+      pronunciation: [
+        "a /æ/：嘴巴比说“哎”时张得更大、更扁，声音短促。",
+        "m /m/：双唇闭合，用鼻子发声，不读成完整的“摸”。",
+        "n /n/：舌尖顶住上牙后方，用鼻子发声，不读成“恩”。",
+        "s /s/：牙齿靠近，让气流从中间通过，像“丝”的开头。",
+        "t /t/：舌尖碰上牙后方后立刻放开，不读成“特”。",
+        "字母 A 的名称是 /eɪ/，但它在 man、sat、mat 中发 /æ/。"
+      ],
+      patterns: [
+        { title: "I am + 名字或身份", note: "表示“我是……”。", examples: [{ english: "I am Sam.", chinese: "我是萨姆。" }, { english: "I am a man.", chinese: "我是一个男人。" }] },
+        { title: "sat on + 地点", note: "说明坐在哪里时需要介词 on，不能写成 I sat a mat.", examples: [{ english: "I sat on a mat.", chinese: "我坐在一张垫子上。" }] }
+      ],
+      mistakes: ["题目要求英文单词时要写 man，不能只写中文“男人”。", "继续练习 /s/ + /æ/ + /t/ 拼出 sat。"],
+      review: "重点复习 man、sat、短元音 /æ/，以及 sat on + 地点。"
+    },
+    {
+      day: 2,
+      date: "2026-08-01",
+      score: "9 / 10 · 90%",
+      summary: "学习短元音 /ɪ/、It is...、新单词拼读，以及由新旧单词组成的短句。",
+      goals: ["区分 /ɪ/ 与 /æ/", "学会 It is...", "拼读并理解当天新词", "读懂新旧单词组成的短句"],
+      pronunciation: [
+        "/ɪ/：接近一个很短、很放松的“衣”，不能拖长。",
+        "sat /sæt/ 的嘴巴张得较大；sit /sɪt/ 的嘴巴较小、更放松。",
+        "is /ɪz/ 最后的 s 发 /z/，声带要振动。",
+        "cat /kæt/ 中的字母 c 发 /k/。"
+      ],
+      patterns: [
+        { title: "It is...", note: "表示“它是……”或“它很……”。", examples: [{ english: "It is a big pig.", chinese: "它是一头大猪。" }, { english: "It is a big cat.", chinese: "它是一只大猫。" }] },
+        { title: "a + 形容词 + 名词", note: "形容词通常放在名词前面。", examples: [{ english: "a big pig", chinese: "一头大猪" }, { english: "a big cat", chinese: "一只大猫" }] }
+      ],
+      mistakes: ["cat 以 c 开头，虽然这里的 c 发 /k/，不能拼成 kat。", "it 是“它”，不是男性人物的“他”。", "题目要求英文时写 pig，不能只回答中文“猪”。"],
+      review: "重点复习 /æ/ 与 /ɪ/、cat 的拼写、it 与 he 的区别，以及按题目要求选择中文或英文作答。"
+    }
+  ],
   seedMistakes: [
     { id: "seed-e001", taskId: "d1-man:zh-en", day: 1, prompt: "/m/ + /æ/ + /n/ 是哪个英文单词？", userAnswer: "男人", correctAnswer: "man", note: "知道意思，但没有按要求写英文。" },
     { id: "seed-e002", taskId: "d1-sat:zh-en", day: 1, prompt: "/s/ + /æ/ + /t/ 是哪个英文单词？", userAnswer: "不知道", correctAnswer: "sat", note: "短元音 /æ/ 的拼读还需要巩固。" },

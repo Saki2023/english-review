@@ -6,9 +6,11 @@ const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
 const { chineseAnswerMatches, englishAnswerMatches } = require("./answer-utils");
-const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiQuestionGenerator, createRateLimiter } = require("./server/ai-grader");
-const { buildLearningProfile, createQuestionSet, sanitizeAiPractice } = require("./server/ai-practice");
-const { createAiSettingsStore, resolveAiConnection, selectAiSettings } = require("./server/ai-settings");
+const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiQuestionGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
+const { MAX_AI_HISTORY, MAX_TUTOR_MESSAGES, buildLearningProfile, createQuestionSet, sanitizeAiPractice } = require("./server/ai-practice");
+const { AI_EFFORTS, createAiSettingsStore, resolveAiConnection, selectAiSettings } = require("./server/ai-settings");
+const { buildLearningSyncProfile } = require("./server/learning-sync");
+const { validLearningSyncToken } = require("./server/learning-sync-token");
 
 const ROOT = __dirname;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, "server", "data"));
@@ -23,6 +25,7 @@ const APP_TIMEZONE = process.env.TZ || "Asia/Shanghai";
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_AI_ANSWER_LENGTH = 500;
+const MAX_AI_TUTOR_MESSAGE_LENGTH = 500;
 
 ensureDataDir();
 const aiSettingsStore = createAiSettingsStore(DATA_DIR);
@@ -70,6 +73,7 @@ function mergeContent(seed, stored) {
     currentDay: Math.max(Number(seed.currentDay || 0), Number(source.currentDay || 0)),
     words: mergeById(seed.words, source.words).filter(item => !deletedIds.includes(item.id)),
     sentences: mergeById(seed.sentences, source.sentences).filter(item => !deletedIds.includes(item.id)),
+    notes: Array.isArray(seed.notes) ? seed.notes : (Array.isArray(source.notes) ? source.notes : []),
     seedMistakes: Array.isArray(seed.seedMistakes) ? seed.seedMistakes : (Array.isArray(source.seedMistakes) ? source.seedMistakes : []),
     deletedIds
   };
@@ -93,7 +97,7 @@ function refreshContent() {
     const seed = readSeedContent();
     const merged = mergeContent(seed, content);
     recalculateCurrentDay(merged, seed.currentDay);
-    const changed = merged.currentDay !== content.currentDay || merged.words.length !== content.words.length || merged.sentences.length !== content.sentences.length || merged.updatedAt !== content.updatedAt || merged.deletedIds.length !== (content.deletedIds || []).length;
+    const changed = merged.currentDay !== content.currentDay || merged.words.length !== content.words.length || merged.sentences.length !== content.sentences.length || merged.notes.length !== (content.notes || []).length || merged.updatedAt !== content.updatedAt || merged.deletedIds.length !== (content.deletedIds || []).length;
     content = merged;
     if (changed) writeJson(CONTENT_FILE, content);
   } catch (_) {
@@ -175,6 +179,11 @@ function getRequestUser(req) {
 
 function isApiToken(req) { return Boolean(API_TOKEN && req.headers.authorization === `Bearer ${API_TOKEN}`); }
 
+function isLearningSyncToken(req) {
+  const authorization = String(req.headers.authorization || "");
+  return authorization.startsWith("Bearer ") && validLearningSyncToken(authorization.slice(7), API_TOKEN);
+}
+
 function canManageContent(req, user) { return Boolean(isApiToken(req) || (user && user.role === "admin")); }
 
 function isSecureRequest(req) { return process.env.COOKIE_SECURE === "true" || String(req.headers["x-forwarded-proto"] || "").toLowerCase() === "https"; }
@@ -192,7 +201,7 @@ function getUserState(user) {
     const canMigrate = user.role === "admin" && users.users.length === 1 && !isEmptyState(legacyState);
     userStates.users[user.id] = canMigrate ? legacyState : defaultState();
     persistUserStates();
-  }
+  } else userStates.users[user.id] = sanitizeState(userStates.users[user.id]);
   return userStates.users[user.id];
 }
 
@@ -298,6 +307,18 @@ function handleState(req, res, user) {
   return sendError(res, 404, "state endpoint not found");
 }
 
+function handleLearningSync(req, res, url) {
+  if (req.method !== "GET") return sendError(res, 404, "learning sync endpoint not found");
+  if (!isLearningSyncToken(req)) return sendError(res, 401, "valid learning sync token required");
+  const username = String(url.searchParams.get("username") || "").trim();
+  if (!username) return sendError(res, 400, "username is required");
+  refreshUsers();
+  refreshContent();
+  const target = users.users.find(item => item.usernameKey === normalizeUsername(username));
+  if (!target) return sendError(res, 404, "user not found");
+  return sendJson(res, 200, buildLearningSyncProfile(content, getUserState(target), target));
+}
+
 function findSentenceTask(taskId) {
   const value = String(taskId || "");
   const separator = value.lastIndexOf(":");
@@ -317,7 +338,7 @@ function localSentenceAnswerMatches(task, answer) {
 function aiSelectionForState(state, requested = {}) {
   const practice = sanitizeAiPractice(state.aiPractice);
   const model = String(requested.model || practice.settings.model || (aiSettings && aiSettings.defaultModel) || "").trim();
-  const reasoningEffort = ["low", "medium", "high"].includes(requested.reasoningEffort) ? requested.reasoningEffort : practice.settings.reasoningEffort;
+  const reasoningEffort = AI_EFFORTS.includes(requested.reasoningEffort) ? requested.reasoningEffort : practice.settings.reasoningEffort;
   const count = [5, 10].includes(Number(requested.count)) ? Number(requested.count) : practice.settings.count;
   const config = selectAiSettings(aiSettings, { model, reasoningEffort });
   practice.settings = { model: config.model, reasoningEffort: config.reasoningEffort, count };
@@ -359,6 +380,25 @@ function publicAiGenerationFailure(error) {
   } else if (/too few valid questions/i.test(detail)) message = "AI 返回的题目超出了已学词汇，请重试或更换模型";
   else if (/invalid question JSON|did not return questions|unsupported response/i.test(detail)) message = "AI 返回格式不符合出题要求，请重试或更换模型";
   else if (/response is too large/i.test(detail)) message = "AI 返回内容过长，请重试或更换模型";
+
+  return { message, providerStatus, statusCode };
+}
+
+function publicAiTutorFailure(error) {
+  const providerStatus = Number(error && error.providerStatus) || null;
+  const detail = String(error && error.message || "");
+  let message = "AI 暂时无法回答，请稍后重试或更换模型";
+  let statusCode = 502;
+
+  if ([401, 403].includes(providerStatus)) message = "AI 上游拒绝了请求，请检查 API Key 和模型权限";
+  else if ([404, 405, 501].includes(providerStatus)) message = "AI 上游不支持该模型的问答接口，请更换模型";
+  else if (providerStatus === 429) message = "AI 上游请求过多或额度不足，请稍后再试";
+  else if ([400, 422].includes(providerStatus)) message = "AI 上游拒绝了当前模型或强度参数，请更换模型或降低强度";
+  else if (providerStatus && providerStatus >= 500) message = "AI 上游服务暂时不可用，请稍后再试";
+  else if (/timed out/i.test(detail)) {
+    message = "AI 回答超时，请稍后重试或在 AI 设置中增加超时时间";
+    statusCode = 504;
+  } else if (/empty tutor answer|unsupported response/i.test(detail)) message = "AI 返回的回答格式无效，请重试或更换模型";
 
   return { message, providerStatus, statusCode };
 }
@@ -421,9 +461,17 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
   const prompt = question.direction === "en-zh" ? question.english : question.chinese;
   const correctAnswer = question.direction === "zh-en" ? question.english : question.chinese;
   const historyId = `${set.id}:${question.id}`;
+  const questionNumber = set.questions.findIndex(item => item.id === question.id) + 1;
   practice.history = [...practice.history.filter(item => item.id !== historyId), {
     id: historyId,
+    setId: set.id,
+    setCreatedAt: set.createdAt,
+    answeredAt: now,
     date: today(),
+    model: set.model,
+    reasoningEffort: set.reasoningEffort,
+    questionNumber,
+    questionCount: set.questions.length,
     direction: question.direction,
     prompt,
     userAnswer: answer,
@@ -431,7 +479,7 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
     correct: result.correct,
     focus: question.focus,
     explanation: result.explanation
-  }].slice(-120);
+  }].slice(-MAX_AI_HISTORY);
   practice.updatedAt = now;
   state.aiPractice = practice;
   persistUserStates();
@@ -489,6 +537,7 @@ async function handleAiGenerate(req, res, user) {
     const questions = await createAiQuestionGenerator(selection.config).generate(profile, selection.count);
     const set = createQuestionSet(questions, selection.config);
     selection.practice.currentSet = set;
+    selection.practice.tutor = null;
     selection.practice.updatedAt = new Date().toISOString();
     state.aiPractice = selection.practice;
     persistUserStates();
@@ -497,6 +546,61 @@ async function handleAiGenerate(req, res, user) {
     if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI question generation failed: ${error && error.message ? error.message : "unknown error"}`);
     const failure = publicAiGenerationFailure(error);
+    return sendJson(res, failure.statusCode, { error: failure.message, providerStatus: failure.providerStatus });
+  }
+}
+
+async function handleAiTutorAsk(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "POST") return sendError(res, 404, "AI tutor endpoint not found");
+  if (!aiSettings) return sendError(res, 503, "AI is not configured");
+  try {
+    const body = await readBody(req);
+    const message = String(body.message || "").trim();
+    if (!message) return sendError(res, 400, "question is required");
+    if (message.length > MAX_AI_TUTOR_MESSAGE_LENGTH) return sendError(res, 400, "question is too long");
+
+    const state = getUserState(user);
+    const practice = sanitizeAiPractice(state.aiPractice);
+    const set = practice.currentSet;
+    if (!set || set.id !== body.setId) return sendError(res, 404, "AI question set not found");
+    const question = set.questions.find(item => item.id === body.questionId);
+    if (!question) return sendError(res, 404, "AI question not found");
+
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+    const requestedModel = aiSettings.models.includes(set.model) ? set.model : aiSettings.defaultModel;
+    const config = selectAiSettings(aiSettings, { model: requestedModel, reasoningEffort: set.reasoningEffort });
+    const thread = practice.tutor && practice.tutor.setId === set.id && practice.tutor.questionId === question.id
+      ? practice.tutor
+      : { setId: set.id, questionId: question.id, messages: [] };
+    const answer = await createAiTutor(config).answer({
+      exercise: {
+        direction: question.direction,
+        english: question.english,
+        chinese: question.chinese,
+        learnerAnswer: question.userAnswer || "",
+        answered: typeof question.correct === "boolean",
+        focus: question.focus || ""
+      },
+      history: thread.messages,
+      message
+    });
+    const createdAt = new Date().toISOString();
+    thread.messages = [
+      ...thread.messages,
+      { role: "user", content: message, createdAt },
+      { role: "assistant", content: answer, createdAt }
+    ].slice(-MAX_TUTOR_MESSAGES);
+    practice.tutor = thread;
+    practice.updatedAt = createdAt;
+    state.aiPractice = practice;
+    persistUserStates();
+    return sendJson(res, 200, { answer, tutor: thread });
+  } catch (error) {
+    if (error && [400, 404, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+    console.warn(`AI tutoring failed: ${error && error.message ? error.message : "unknown error"}`);
+    const failure = publicAiTutorFailure(error);
     return sendJson(res, failure.statusCode, { error: failure.message, providerStatus: failure.providerStatus });
   }
 }
@@ -557,7 +661,9 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/ai/options" && req.method === "GET") return user ? sendJson(res, 200, publicAiOptions(user)) : sendError(res, 401, "login required");
   if (url.pathname === "/api/ai/grade") return handleAiGrade(req, res, user);
   if (url.pathname === "/api/ai/questions/generate") return handleAiGenerate(req, res, user);
+  if (url.pathname === "/api/ai/questions/ask") return handleAiTutorAsk(req, res, user);
   if (url.pathname === "/api/ai/questions/grade") return handleAiQuestionGrade(req, res, user);
+  if (url.pathname === "/api/sync/profile") return handleLearningSync(req, res, url);
   if (url.pathname === "/api/export" && req.method === "GET") return user ? sendJson(res, 200, { content, state: getUserState(user), user: publicUser(user) }) : sendError(res, 401, "login required");
   if (url.pathname === "/api/state") return handleState(req, res, user);
   if (url.pathname === "/api/content" || url.pathname.startsWith("/api/content/")) return handleContent(req, res, url, user);

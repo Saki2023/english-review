@@ -112,14 +112,25 @@ sudo docker compose -f docker-compose.vps.yml exec -it english-review npm run us
 sudo docker compose -f docker-compose.vps.yml exec -it english-review npm run user:add -- --admin
 ```
 
-## 七、安装到荣耀手机
+## 七、生成本地学习同步只读令牌
+
+网站更新完成后，在 VPS 项目目录运行：
+
+```bash
+cd /opt/english-review
+sudo docker compose -f docker-compose.vps.yml exec english-review npm run sync:token
+```
+
+把输出填入本地 `学习同步\.sync.env` 的 `SYNC_READ_TOKEN`。该令牌只能读取指定账号的学习档案，不能管理词库，也不会暴露原始 `API_TOKEN`。不要把输出发到聊天中。
+
+## 八、安装到荣耀手机
 
 1. 用荣耀浏览器或 Chrome 打开 Cloudflare HTTPS 地址。
 2. 登录账号。
 3. 打开浏览器菜单，选择“添加到主屏幕”或“安装应用”。
 4. 从手机桌面的“英语复习”图标进入。
 
-## 八、备份
+## 九、备份
 
 备份宿主机目录：
 
@@ -129,7 +140,7 @@ sudo docker compose -f docker-compose.vps.yml exec -it english-review npm run us
 
 这里保存账号、密码哈希、会话、用户学习进度以及通过 API 添加的词句。重新创建容器不会清空这个目录。
 
-## 九、自动更新
+## 十、自动更新
 
 安装 `systemd` 自动更新定时器：
 
@@ -156,6 +167,6 @@ journalctl -u english-review-update.service -n 100 --no-pager
 sudo systemctl start english-review-update.service
 ```
 
-## 十、配置 sub2api AI 判题
+## 十一、配置 sub2api AI 判题
 
 登录管理员账号后，在“AI 出题”页面右上角打开设置，直接填写 Base URL、API Key 和模型列表，不需要通过 SSH 修改 `.env`。完整说明见 [AI判题配置.md](AI判题配置.md)。

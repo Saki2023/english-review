@@ -1,9 +1,12 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { safeQuestionFocus } = require("./ai-question-utils");
 
-const MAX_AI_HISTORY = 120;
+const MAX_AI_HISTORY = 1000;
 const MAX_QUESTION_COUNT = 10;
+const MAX_TUTOR_MESSAGES = 12;
+const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 function cleanText(value, maximum = 300) {
   return Array.from(String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()).slice(0, maximum).join("");
@@ -12,6 +15,25 @@ function cleanText(value, maximum = 300) {
 function sanitizeStringArray(value, fallback = []) {
   const source = Array.isArray(value) ? value : fallback;
   return source.map(item => cleanText(item)).filter(Boolean).slice(0, 8);
+}
+
+function sanitizeTutorMessage(value) {
+  if (!value || typeof value !== "object" || !["user", "assistant"].includes(value.role)) return null;
+  const content = cleanText(value.content, value.role === "assistant" ? 1200 : 500);
+  if (!content) return null;
+  return { role: value.role, content, createdAt: cleanText(value.createdAt, 40) };
+}
+
+function sanitizeTutorThread(value) {
+  if (!value || typeof value !== "object") return null;
+  const setId = cleanText(value.setId, 80);
+  const questionId = cleanText(value.questionId, 80);
+  if (!setId || !questionId) return null;
+  return {
+    setId,
+    questionId,
+    messages: (Array.isArray(value.messages) ? value.messages : []).map(sanitizeTutorMessage).filter(Boolean).slice(-MAX_TUTOR_MESSAGES)
+  };
 }
 
 function sanitizeQuestion(value) {
@@ -27,7 +49,7 @@ function sanitizeQuestion(value) {
     chinese,
     acceptedEnglish: sanitizeStringArray(source.acceptedEnglish, [english]),
     acceptedChinese: sanitizeStringArray(source.acceptedChinese, [chinese]),
-    focus: cleanText(source.focus, 80),
+    focus: safeQuestionFocus(english),
     userAnswer: cleanText(source.userAnswer, 500),
     correct: typeof source.correct === "boolean" ? source.correct : null,
     explanation: cleanText(source.explanation, 180),
@@ -44,7 +66,7 @@ function sanitizeQuestionSet(value) {
     id: cleanText(value.id, 80) || `aiset-${crypto.randomUUID()}`,
     createdAt: cleanText(value.createdAt, 40) || new Date().toISOString(),
     model: cleanText(value.model, 120),
-    reasoningEffort: ["low", "medium", "high"].includes(value.reasoningEffort) ? value.reasoningEffort : "medium",
+    reasoningEffort: AI_EFFORTS.includes(value.reasoningEffort) ? value.reasoningEffort : "medium",
     questions,
     index,
     completed: Boolean(value.completed || index >= questions.length)
@@ -53,15 +75,28 @@ function sanitizeQuestionSet(value) {
 
 function sanitizeHistoryItem(value) {
   const source = value && typeof value === "object" ? value : {};
+  const id = cleanText(source.id, 180) || `aihistory-${crypto.randomUUID()}`;
+  const legacySetId = id.includes(":") ? id.slice(0, id.indexOf(":")) : "";
+  const direction = source.direction === "zh-en" ? "zh-en" : "en-zh";
+  const english = direction === "zh-en" ? source.correctAnswer : source.prompt;
+  const questionNumber = Math.min(Math.max(Number(source.questionNumber) || 0, 0), MAX_QUESTION_COUNT);
+  const questionCount = Math.min(Math.max(Number(source.questionCount) || 0, 0), MAX_QUESTION_COUNT);
   return {
-    id: cleanText(source.id, 80) || `aihistory-${crypto.randomUUID()}`,
+    id,
+    setId: cleanText(source.setId, 80) || cleanText(legacySetId, 80),
+    setCreatedAt: cleanText(source.setCreatedAt, 40),
+    answeredAt: cleanText(source.answeredAt, 40),
     date: cleanText(source.date, 20),
-    direction: source.direction === "zh-en" ? "zh-en" : "en-zh",
+    model: cleanText(source.model, 120),
+    reasoningEffort: AI_EFFORTS.includes(source.reasoningEffort) ? source.reasoningEffort : "",
+    questionNumber,
+    questionCount,
+    direction,
     prompt: cleanText(source.prompt),
     userAnswer: cleanText(source.userAnswer, 500),
     correctAnswer: cleanText(source.correctAnswer),
-    correct: Boolean(source.correct),
-    focus: cleanText(source.focus, 80),
+    correct: source.correct === true,
+    focus: safeQuestionFocus(english),
     explanation: cleanText(source.explanation, 180)
   };
 }
@@ -72,10 +107,11 @@ function sanitizeAiPractice(value) {
   return {
     settings: {
       model: cleanText(settings.model, 120),
-      reasoningEffort: ["low", "medium", "high"].includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
+      reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
       count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
     },
     currentSet: sanitizeQuestionSet(source.currentSet),
+    tutor: sanitizeTutorThread(source.tutor),
     history: (Array.isArray(source.history) ? source.history : []).map(sanitizeHistoryItem).slice(-MAX_AI_HISTORY),
     updatedAt: cleanText(source.updatedAt, 40)
   };
@@ -160,10 +196,12 @@ function createQuestionSet(questions, selection) {
 
 module.exports = {
   MAX_AI_HISTORY,
+  MAX_TUTOR_MESSAGES,
   buildLearningProfile,
   createQuestionSet,
   sanitizeAiPractice,
   sanitizeQuestion,
   sanitizeQuestionSet,
+  sanitizeTutorThread,
   taskItem
 };

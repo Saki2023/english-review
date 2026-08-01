@@ -10,7 +10,7 @@ const { once } = require("node:events");
 const { spawn } = require("node:child_process");
 const { test } = require("node:test");
 const { createUser, loadUsers, saveUsers } = require("../server/accounts");
-const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl, createAiGrader, createRateLimiter, parseGeneratedQuestions, parseGradeResponse, parseModelList } = require("../server/ai-grader");
+const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl, createAiGrader, createAiTutor, createRateLimiter, parseGeneratedQuestions, parseGradeResponse, parseModelList } = require("../server/ai-grader");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -134,6 +134,25 @@ test("AI grader falls back to the Responses API when chat completions are unavai
   assert.equal(Object.hasOwn(requests[1].body, "messages"), false);
 });
 
+test("AI tutor requests plain Chinese guidance with the selected maximum effort", async () => {
+  let requestBody;
+  const fetchImpl = async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: "先看 in 前后的词，再判断位置关系。" } }] }), { status: 200 });
+  };
+  const tutor = createAiTutor(aiConfig({ reasoningEffort: "max" }), { fetchImpl });
+  const answer = await tutor.answer({
+    exercise: { direction: "en-zh", english: "A cat is in a mat.", chinese: "一只猫在垫子里面。", answered: false },
+    history: [],
+    message: "in 在这里起什么作用？"
+  });
+
+  assert.equal(answer, "先看 in 前后的词，再判断位置关系。");
+  assert.equal(requestBody.reasoning_effort, "max");
+  assert.equal(Object.hasOwn(requestBody, "response_format"), false);
+  assert.match(requestBody.messages[0].content, /never reveal the full translation or final answer/);
+});
+
 test("generated questions reject unlearned English words and duplicates", () => {
   const payload = { choices: [{ message: { content: JSON.stringify({ questions: [
     { direction: "en-zh", english: "big cat", chinese: "\u5927\u732b", acceptedEnglish: ["big cat", "large cat"], acceptedChinese: ["\u5927\u732b"], focus: "big" },
@@ -147,6 +166,15 @@ test("generated questions reject unlearned English words and duplicates", () => 
   assert.deepEqual(questions.map(item => item.english), ["big cat", "cat"]);
   assert.deepEqual(questions[0].acceptedEnglish, ["big cat"]);
   assert.throws(() => parseGeneratedQuestions(payload, { allowedWords: ["big", "cat"], count: 3 }), /too few valid/);
+});
+
+test("generated question labels never expose model-provided answer hints", () => {
+  const payload = { choices: [{ message: { content: JSON.stringify({ questions: [
+    { direction: "en-zh", english: "cat in mat", chinese: "猫在垫子里面", acceptedEnglish: ["cat in mat"], acceptedChinese: ["猫在垫子里面"], focus: "in 表示在里面" }
+  ] }) } }] };
+  const questions = parseGeneratedQuestions(payload, { allowedWords: ["cat", "in", "mat"], count: 1 });
+  assert.equal(questions[0].focus, "介词辨析");
+  assert.equal(questions[0].focus.includes("里面"), false);
 });
 
 test("AI rate limiter isolates callers and returns a retry delay", () => {
@@ -194,7 +222,8 @@ test("admin configures AI on the web and progress-based questions use the select
           { direction: "zh-en", english: "It is a big pig.", chinese: "\u5b83\u662f\u4e00\u5934\u5927\u732a\u3002", acceptedEnglish: ["it is a big pig"], acceptedChinese: ["\u5b83\u662f\u4e00\u5934\u5927\u732a"], focus: "pig" },
           { direction: "en-zh", english: "A big cat sat on a mat.", chinese: "\u4e00\u53ea\u5927\u732b\u5750\u5728\u4e00\u5f20\u57ab\u5b50\u4e0a\u3002", acceptedEnglish: ["a big cat sat on a mat"], acceptedChinese: ["\u4e00\u53ea\u5927\u732b\u5750\u5728\u57ab\u5b50\u4e0a"], focus: "sat" }
         ] });
-      } else if (system.includes("ok set to true")) content = "{\"ok\":true}";
+      } else if (system.includes("patient English tutor")) content = "先看句子的主语和位置词，再自己试一次。";
+      else if (system.includes("ok set to true")) content = "{\"ok\":true}";
       else content = "{\"correct\":true,\"explanation\":\"\u610f\u601d\u76f8\u540c\uff0c\u53ea\u662f\u8bf4\u6cd5\u4e0d\u540c\u3002\"}";
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ choices: [{ message: { content } }] }));
@@ -332,7 +361,26 @@ test("admin configures AI on the web and progress-based questions use the select
     const questionResult = await questionGrade.json();
     assert.equal(questionResult.correct, true);
     assert.equal(questionResult.practice.history.length, 1);
+    assert.equal(questionResult.practice.history[0].setId, generatedBody.set.id);
+    assert.equal(questionResult.practice.history[0].model, "strong-model");
+    assert.equal(questionResult.practice.history[0].reasoningEffort, "high");
+    assert.equal(questionResult.practice.history[0].questionNumber, 1);
+    assert.equal(questionResult.practice.history[0].questionCount, 5);
+    assert.match(questionResult.practice.history[0].answeredAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(providerRequests.length, 4);
+
+    const tutorResponse = await fetch(`${baseUrl}/api/ai/questions/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ setId: generatedBody.set.id, questionId: firstQuestion.id, message: "这个句子应该先看哪里？" })
+    });
+    assert.equal(tutorResponse.status, 200);
+    const tutorBody = await tutorResponse.json();
+    assert.equal(tutorBody.answer, "先看句子的主语和位置词，再自己试一次。");
+    assert.equal(tutorBody.tutor.messages.length, 2);
+    assert.equal(providerRequests.length, 5);
+    assert.equal(providerRequests[4].body.reasoning_effort, "high");
+    assert.equal(Object.hasOwn(providerRequests[4].body, "response_format"), false);
 
     const unavailableGeneration = await fetch(`${baseUrl}/api/ai/questions/generate`, {
       method: "POST",
@@ -350,6 +398,7 @@ test("admin configures AI on the web and progress-based questions use the select
     const memberCookie = memberLogin.headers.get("set-cookie").split(";")[0];
     const memberState = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": memberCookie } })).json();
     assert.equal(memberState.aiPractice.currentSet, null);
+    assert.equal(memberState.aiPractice.tutor, null);
     assert.deepEqual(memberState.aiPractice.history, []);
     const memberOptions = await (await fetch(`${baseUrl}/api/ai/options`, { headers: { "Cookie": memberCookie } })).json();
     assert.equal(memberOptions.selectedModel, "test-model");

@@ -6,6 +6,10 @@
   const STORAGE_KEY = "daily-english-review-v1";
   const DAILY_TARGET = 10;
   const INTERVALS = [1, 3, 7, 14, 30, 60];
+  const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+  const AI_EFFORT_LABELS = { low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高" };
+  const DEFAULT_AI_TIMEOUT_MS = 30000;
+  const AI_CLIENT_TIMEOUT_MS = 125000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
   let remoteReady = !API_ENABLED;
   let remoteSaveTimer;
@@ -17,6 +21,7 @@
   let activeView = "home";
   let reviewMode = "all";
   let libraryType = "word";
+  let notesDay = Math.max(1, Number(DATA.currentDay) || 1, ...allItems.map(item => Number(item.day) || 0));
   let currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
   let appEventsBound = false;
   let authEventsBound = false;
@@ -24,8 +29,10 @@
   let toastTimer;
   let gradingInProgress = false;
   let aiRequestInProgress = false;
+  let aiTutorRequestInProgress = false;
+  let aiTutorDrag = null;
   let aiStatusMessage = "";
-  let aiOptions = { configured: false, models: [], defaultModel: "", efforts: ["low", "medium", "high"], admin: false };
+  let aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -50,17 +57,31 @@
 
   function storageKey() { return currentUser && currentUser.id ? `${STORAGE_KEY}-${currentUser.id}` : STORAGE_KEY; }
 
+  function normalizeClientTutor(value) {
+    if (!value || typeof value !== "object") return null;
+    const setId = String(value.setId || "").slice(0, 80);
+    const questionId = String(value.questionId || "").slice(0, 80);
+    if (!setId || !questionId) return null;
+    const messages = (Array.isArray(value.messages) ? value.messages : []).map(item => {
+      if (!item || !["user", "assistant"].includes(item.role)) return null;
+      const content = String(item.content || "").trim().slice(0, item.role === "assistant" ? 1200 : 500);
+      return content ? { role: item.role, content, createdAt: String(item.createdAt || "").slice(0, 40) } : null;
+    }).filter(Boolean).slice(-12);
+    return { setId, questionId, messages };
+  }
+
   function normalizeClientAiPractice(value) {
     const source = value && typeof value === "object" ? value : {};
     const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
     return {
       settings: {
         model: String(settings.model || ""),
-        reasoningEffort: ["low", "medium", "high"].includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
+        reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
         count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
       },
       currentSet: source.currentSet && Array.isArray(source.currentSet.questions) ? source.currentSet : null,
-      history: Array.isArray(source.history) ? source.history.slice(-120) : [],
+      tutor: normalizeClientTutor(source.tutor),
+      history: Array.isArray(source.history) ? source.history.slice(-1000) : [],
       updatedAt: String(source.updatedAt || "")
     };
   }
@@ -156,6 +177,8 @@
     $("#authScreen").hidden = false;
     $("#accountArea").hidden = true;
     $("#resetButton").hidden = true;
+    $("#openAiTutorButton").hidden = true;
+    $("#aiTutorWindow").hidden = true;
     $("#authFeedback").hidden = true;
     refreshIcons();
   }
@@ -268,7 +291,7 @@
   async function loadAiOptions() {
     aiStatusMessage = "";
     if (!API_ENABLED) {
-      aiOptions = { configured: false, models: [], defaultModel: "", efforts: ["low", "medium", "high"], admin: false };
+      aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
       renderAiView();
       return;
     }
@@ -278,11 +301,11 @@
       aiOptions = await response.json();
       const practice = normalizeClientAiPractice(model.aiPractice);
       if (!aiOptions.models.includes(practice.settings.model)) practice.settings.model = aiOptions.selectedModel || aiOptions.defaultModel || "";
-      if (["low", "medium", "high"].includes(aiOptions.selectedEffort) && !practice.updatedAt) practice.settings.reasoningEffort = aiOptions.selectedEffort;
+      if (AI_EFFORTS.includes(aiOptions.selectedEffort) && !practice.updatedAt) practice.settings.reasoningEffort = aiOptions.selectedEffort;
       if ([5, 10].includes(Number(aiOptions.selectedCount)) && !practice.updatedAt) practice.settings.count = Number(aiOptions.selectedCount);
       model.aiPractice = practice;
     } catch (_) {
-      aiOptions = { configured: false, models: [], defaultModel: "", efforts: ["low", "medium", "high"], admin: Boolean(currentUser && currentUser.role === "admin") };
+      aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: Boolean(currentUser && currentUser.role === "admin") };
     }
     populateAiModelSelect();
     renderAiView();
@@ -293,7 +316,287 @@
     return set && Array.isArray(set.questions) ? set.questions[Number(set.index) || 0] : null;
   }
 
+  function tutorThreadForQuestion(practice, set, question) {
+    const tutor = normalizeClientTutor(practice.tutor);
+    if (tutor && tutor.setId === set.id && tutor.questionId === question.id) return tutor;
+    return { setId: set.id, questionId: question.id, messages: [] };
+  }
+
+  function renderAiTutorWindow() {
+    const tutorWindow = $("#aiTutorWindow");
+    const launchButton = $("#openAiTutorButton");
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    const set = practice.currentSet;
+    const question = currentAiQuestion();
+    const available = activeView === "ai" && aiOptions.configured && set && question && !set.completed;
+    if (!available) {
+      tutorWindow.hidden = true;
+      launchButton.hidden = true;
+      return;
+    }
+
+    launchButton.hidden = !tutorWindow.hidden;
+    if (tutorWindow.hidden) return;
+    const prompt = question.direction === "en-zh" ? question.english : question.chinese;
+    $("#aiTutorContext").textContent = prompt;
+    const thread = tutorThreadForQuestion(practice, set, question);
+    const messageList = $("#aiTutorMessages");
+    if (!thread.messages.length) {
+      const empty = document.createElement("div");
+      empty.className = "ai-tutor-empty";
+      empty.textContent = "暂无问答";
+      messageList.replaceChildren(empty);
+    } else {
+      messageList.replaceChildren(...thread.messages.map(message => {
+        const item = document.createElement("div");
+        item.className = `ai-tutor-message ${message.role === "user" ? "is-user" : "is-assistant"}`;
+        const role = document.createElement("span");
+        role.className = "ai-tutor-message-role";
+        role.textContent = message.role === "user" ? "你" : "AI";
+        const content = document.createElement("span");
+        content.textContent = message.content;
+        item.append(role, content);
+        return item;
+      }));
+      requestAnimationFrame(() => { messageList.scrollTop = messageList.scrollHeight; });
+    }
+    $("#clearAiTutorButton").disabled = aiTutorRequestInProgress || !thread.messages.length;
+    $("#aiTutorInput").disabled = aiTutorRequestInProgress;
+    $("#sendAiTutorButton").disabled = aiTutorRequestInProgress;
+  }
+
+  function updateAiTutorWindowActions() {
+    const tutorWindow = $("#aiTutorWindow");
+    const minimized = tutorWindow.classList.contains("is-minimized");
+    const maximized = tutorWindow.classList.contains("is-maximized");
+    const minimize = $("#minimizeAiTutorButton");
+    const maximize = $("#maximizeAiTutorButton");
+    minimize.setAttribute("aria-label", minimized ? "还原问答窗口" : "最小化问答窗口");
+    minimize.dataset.tooltip = minimized ? "还原" : "最小化";
+    minimize.innerHTML = `<i data-lucide="${minimized ? "chevron-up" : "minus"}" aria-hidden="true"></i>`;
+    maximize.setAttribute("aria-label", maximized ? "还原问答窗口" : "最大化问答窗口");
+    maximize.dataset.tooltip = maximized ? "还原" : "最大化";
+    maximize.innerHTML = `<i data-lucide="${maximized ? "minimize-2" : "maximize-2"}" aria-hidden="true"></i>`;
+    refreshIcons();
+  }
+
+  function openAiTutorWindow() {
+    if (!currentAiQuestion()) return;
+    const tutorWindow = $("#aiTutorWindow");
+    tutorWindow.hidden = false;
+    tutorWindow.classList.remove("is-minimized");
+    updateAiTutorWindowActions();
+    renderAiTutorWindow();
+    requestAnimationFrame(() => $("#aiTutorInput").focus());
+  }
+
+  function closeAiTutorWindow() {
+    $("#aiTutorWindow").hidden = true;
+    renderAiTutorWindow();
+  }
+
+  function toggleAiTutorMinimize() {
+    const tutorWindow = $("#aiTutorWindow");
+    const restore = tutorWindow.classList.contains("is-minimized");
+    tutorWindow.classList.remove("is-maximized");
+    tutorWindow.classList.toggle("is-minimized", !restore);
+    updateAiTutorWindowActions();
+    if (restore) requestAnimationFrame(() => $("#aiTutorInput").focus());
+  }
+
+  function toggleAiTutorMaximize() {
+    const tutorWindow = $("#aiTutorWindow");
+    tutorWindow.classList.remove("is-minimized");
+    tutorWindow.classList.toggle("is-maximized");
+    updateAiTutorWindowActions();
+  }
+
+  function clearAiTutor() {
+    if (aiTutorRequestInProgress) return;
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    practice.tutor = null;
+    practice.updatedAt = new Date().toISOString();
+    model.aiPractice = practice;
+    saveModel();
+    renderAiTutorWindow();
+  }
+
+  async function submitAiTutorQuestion(event) {
+    event.preventDefault();
+    if (aiTutorRequestInProgress) return;
+    const input = $("#aiTutorInput");
+    const message = input.value.trim();
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    const set = practice.currentSet;
+    const question = currentAiQuestion();
+    if (!message || !set || !question) return;
+
+    const previousTutor = practice.tutor;
+    const thread = tutorThreadForQuestion(practice, set, question);
+    const createdAt = new Date().toISOString();
+    practice.tutor = {
+      setId: set.id,
+      questionId: question.id,
+      messages: [
+        ...thread.messages,
+        { role: "user", content: message, createdAt },
+        { role: "assistant", content: "正在回答…", createdAt }
+      ].slice(-12)
+    };
+    model.aiPractice = practice;
+    aiTutorRequestInProgress = true;
+    renderAiTutorWindow();
+    try {
+      const data = await responseJson(await fetch("/api/ai/questions/ask", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ setId: set.id, questionId: question.id, message })
+      }));
+      const next = normalizeClientAiPractice(model.aiPractice);
+      next.tutor = normalizeClientTutor(data.tutor);
+      next.updatedAt = new Date().toISOString();
+      model.aiPractice = next;
+      input.value = "";
+      saveModel();
+    } catch (error) {
+      const reverted = normalizeClientAiPractice(model.aiPractice);
+      reverted.tutor = previousTutor;
+      model.aiPractice = reverted;
+      showToast(error.message);
+    } finally {
+      aiTutorRequestInProgress = false;
+      renderAiTutorWindow();
+      requestAnimationFrame(() => input.focus());
+    }
+  }
+
+  function startAiTutorDrag(event) {
+    const tutorWindow = $("#aiTutorWindow");
+    if (event.button !== 0 || event.target.closest("button") || matchMedia("(max-width: 760px)").matches || tutorWindow.classList.contains("is-minimized") || tutorWindow.classList.contains("is-maximized")) return;
+    const rect = tutorWindow.getBoundingClientRect();
+    aiTutorDrag = { pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top, width: rect.width, height: rect.height };
+    tutorWindow.style.width = `${rect.width}px`;
+    tutorWindow.style.height = `${rect.height}px`;
+    tutorWindow.style.right = "auto";
+    tutorWindow.style.bottom = "auto";
+    tutorWindow.style.left = `${rect.left}px`;
+    tutorWindow.style.top = `${rect.top}px`;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function moveAiTutorWindow(event) {
+    if (!aiTutorDrag || event.pointerId !== aiTutorDrag.pointerId) return;
+    const maximumLeft = Math.max(8, window.innerWidth - aiTutorDrag.width - 8);
+    const maximumTop = Math.max(8, window.innerHeight - aiTutorDrag.height - 8);
+    $("#aiTutorWindow").style.left = `${Math.min(maximumLeft, Math.max(8, event.clientX - aiTutorDrag.offsetX))}px`;
+    $("#aiTutorWindow").style.top = `${Math.min(maximumTop, Math.max(8, event.clientY - aiTutorDrag.offsetY))}px`;
+  }
+
+  function endAiTutorDrag(event) {
+    if (!aiTutorDrag || event.pointerId !== aiTutorDrag.pointerId) return;
+    aiTutorDrag = null;
+    try { event.currentTarget.releasePointerCapture(event.pointerId); } catch (_) {}
+  }
+
   function aiCorrectAnswer(question) { return question.direction === "zh-en" ? question.english : question.chinese; }
+
+  function aiHistorySetId(item, index) {
+    const explicit = String(item && item.setId || "").trim();
+    if (explicit) return explicit;
+    const id = String(item && item.id || "");
+    return id.includes(":") ? id.slice(0, id.indexOf(":")) : `legacy-${item && item.date || "unknown"}-${index}`;
+  }
+
+  function formatAiHistoryTime(value, fallback = "") {
+    const source = String(value || fallback || "");
+    if (!source) return "时间未记录";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(source)) return displayDate(source);
+    const date = new Date(source);
+    if (Number.isNaN(date.getTime())) return source;
+    return new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
+  }
+
+  function groupAiHistory(practice) {
+    const currentSet = practice.currentSet;
+    const groups = new Map();
+    practice.history.forEach((item, index) => {
+      if (!item || typeof item !== "object") return;
+      const setId = aiHistorySetId(item, index);
+      if (!groups.has(setId)) {
+        groups.set(setId, {
+          id: setId,
+          createdAt: item.setCreatedAt || item.answeredAt || item.date || "",
+          latestAt: item.answeredAt || item.setCreatedAt || item.date || "",
+          model: item.model || "",
+          reasoningEffort: item.reasoningEffort || "",
+          expectedCount: Number(item.questionCount) || 0,
+          latestOrder: index,
+          questions: []
+        });
+      }
+      const group = groups.get(setId);
+      group.questions.push(item);
+      if (String(item.answeredAt || "") > String(group.latestAt || "")) group.latestAt = item.answeredAt;
+      group.latestOrder = Math.max(group.latestOrder, index);
+      if (!group.model && item.model) group.model = item.model;
+      if (!group.reasoningEffort && item.reasoningEffort) group.reasoningEffort = item.reasoningEffort;
+      group.expectedCount = Math.max(group.expectedCount, Number(item.questionCount) || 0);
+    });
+    return Array.from(groups.values()).map(group => {
+      if (currentSet && currentSet.id === group.id) {
+        group.createdAt ||= currentSet.createdAt;
+        group.model ||= currentSet.model;
+        group.reasoningEffort ||= currentSet.reasoningEffort;
+        group.expectedCount = Math.max(group.expectedCount, currentSet.questions.length);
+      }
+      group.questions.sort((left, right) => (Number(left.questionNumber) || 999) - (Number(right.questionNumber) || 999) || String(left.answeredAt || "").localeCompare(String(right.answeredAt || "")));
+      if (!group.expectedCount) group.expectedCount = group.questions.length;
+      return group;
+    }).sort((left, right) => String(right.latestAt || right.createdAt || "").localeCompare(String(left.latestAt || left.createdAt || "")) || right.latestOrder - left.latestOrder);
+  }
+
+  function renderAiHistory() {
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    const groups = groupAiHistory(practice);
+    const questions = groups.flatMap(group => group.questions);
+    const correct = questions.filter(item => item.correct === true).length;
+    const accuracy = questions.length ? Math.round((correct / questions.length) * 100) : 0;
+    $("#aiHistorySummary").textContent = questions.length ? `${groups.length} 组 · ${questions.length} 题 · 正确率 ${accuracy}%` : "暂无做题记录";
+    const list = $("#aiHistoryList");
+    if (!groups.length) {
+      list.innerHTML = `<div class="ai-history-empty"><i data-lucide="history" aria-hidden="true"></i><span>暂无做题记录</span></div>`;
+      refreshIcons();
+      return;
+    }
+    list.innerHTML = groups.map(group => {
+      const groupCorrect = group.questions.filter(item => item.correct === true).length;
+      const complete = group.questions.length >= group.expectedCount;
+      const modelLabel = [group.model, AI_EFFORT_LABELS[group.reasoningEffort]].filter(Boolean).join(" · ") || "历史题组";
+      const questionRows = group.questions.map((item, index) => {
+        const number = Number(item.questionNumber) || index + 1;
+        return `<article class="ai-history-question">
+          <div class="ai-history-question-meta"><span>第 ${number} 题 · ${formatDirection(item.direction)}</span><span class="ai-history-result ${item.correct === true ? "is-correct" : "is-wrong"}">${item.correct === true ? "正确" : "错误"}</span></div>
+          <div class="ai-history-prompt">${escapeHtml(item.prompt || "（题目未记录）")}</div>
+          <dl class="ai-history-answers">
+            <div><dt>你的答案</dt><dd>${escapeHtml(item.userAnswer || "（未填写）")}</dd></div>
+            <div><dt>正确答案</dt><dd>${escapeHtml(item.correctAnswer || "（未记录）")}</dd></div>
+            ${item.explanation ? `<div><dt>讲解</dt><dd>${escapeHtml(item.explanation)}</dd></div>` : ""}
+          </dl>
+        </article>`;
+      }).join("");
+      return `<details class="ai-history-group">
+        <summary>
+          <div class="ai-history-group-main"><strong>${escapeHtml(formatAiHistoryTime(group.createdAt, group.latestAt))}</strong><span>${escapeHtml(modelLabel)}</span></div>
+          <div class="ai-history-score"><strong>${groupCorrect} / ${group.questions.length}</strong><span>${complete ? "已完成" : `已做 ${group.questions.length} / ${group.expectedCount}`}</span></div>
+          <i data-lucide="chevron-down" aria-hidden="true"></i>
+        </summary>
+        <div class="ai-history-questions">${questionRows}</div>
+      </details>`;
+    }).join("");
+    refreshIcons();
+  }
 
   function renderAiFeedback(question) {
     const feedback = $("#aiFeedback");
@@ -312,6 +615,7 @@
   function renderAiView() {
     if (!model.aiPractice) model.aiPractice = normalizeClientAiPractice(null);
     populateAiModelSelect();
+    renderAiHistory();
     $("#openAiConfigButton").hidden = !currentUser || currentUser.role !== "admin";
     $("#aiStatus").textContent = aiStatusMessage || (aiOptions.configured ? "AI 已配置" : "AI 尚未配置");
     const empty = $("#aiEmptyState");
@@ -320,6 +624,7 @@
     if (!aiOptions.configured) {
       empty.hidden = false; panel.hidden = true; complete.hidden = true;
       $("#aiEmptyTitle").textContent = currentUser && currentUser.role === "admin" ? "请先完成 AI 连接设置" : "AI 尚未配置";
+      renderAiTutorWindow();
       return;
     }
 
@@ -327,6 +632,7 @@
     if (!set) {
       empty.hidden = false; panel.hidden = true; complete.hidden = true;
       $("#aiEmptyTitle").textContent = "准备生成题目";
+      renderAiTutorWindow();
       return;
     }
     if (set.completed || Number(set.index) >= set.questions.length) {
@@ -334,14 +640,18 @@
       empty.hidden = true; panel.hidden = true; complete.hidden = false;
       const correct = set.questions.filter(question => question.correct === true).length;
       $("#aiCompleteNote").textContent = `答对 ${correct} / ${set.questions.length} 题`;
+      renderAiTutorWindow();
       return;
     }
 
     const question = currentAiQuestion();
-    if (!question) return;
+    if (!question) {
+      renderAiTutorWindow();
+      return;
+    }
     empty.hidden = true; panel.hidden = false; complete.hidden = true;
     $("#aiFocusBadge").textContent = question.focus || "巩固练习";
-    $("#aiModelReadout").textContent = `${set.model} · ${{ low: "低", medium: "中", high: "高" }[set.reasoningEffort] || "中"}`;
+    $("#aiModelReadout").textContent = `${set.model} · ${AI_EFFORT_LABELS[set.reasoningEffort] || "中"}`;
     $("#aiQuestionProgress").textContent = `${Number(set.index) + 1} / ${set.questions.length}`;
     $("#aiDirectionLabel").textContent = formatDirection(question.direction);
     $("#aiPromptText").textContent = question.direction === "en-zh" ? question.english : question.chinese;
@@ -351,6 +661,7 @@
     $("#aiAnswerInput").disabled = answered || aiRequestInProgress;
     $("#submitAiAnswer").disabled = answered || aiRequestInProgress;
     renderAiFeedback(question);
+    renderAiTutorWindow();
     if (!answered) requestAnimationFrame(() => $("#aiAnswerInput").focus());
     refreshIcons();
   }
@@ -398,6 +709,7 @@
       const practice = normalizeClientAiPractice(model.aiPractice);
       practice.settings = data.settings;
       practice.currentSet = data.set;
+      practice.tutor = null;
       practice.updatedAt = new Date().toISOString();
       model.aiPractice = practice;
       saveModel();
@@ -450,6 +762,7 @@
     if (!question || typeof question.correct !== "boolean") return;
     set.index = (Number(set.index) || 0) + 1;
     set.completed = set.index >= set.questions.length;
+    practice.tutor = null;
     practice.updatedAt = new Date().toISOString();
     model.aiPractice = practice;
     saveModel();
@@ -545,7 +858,7 @@
         body: JSON.stringify({
           baseUrl: baseUrl.value.trim(),
           apiKey: apiKey.value.trim(),
-          timeoutMs: Number($("#aiTimeout").value) || 10000
+          timeoutMs: Number($("#aiTimeout").value) || DEFAULT_AI_TIMEOUT_MS
         })
       }));
       setConfigModels(data.models, $("#aiDefaultModel").value);
@@ -577,7 +890,7 @@
       $("#aiApiKey").placeholder = config.hasApiKey ? "已保存，留空则不修改" : "输入 API Key";
       setConfigModels(config.models || [], config.defaultModel);
       $("#aiCustomModel").value = "";
-      $("#aiTimeout").value = String(config.timeoutMs || 10000);
+      $("#aiTimeout").value = String(config.timeoutMs || DEFAULT_AI_TIMEOUT_MS);
       $("#aiRateLimit").value = String(config.rateLimitPerMinute || 20);
       setAiConfigFeedback(config.configured ? "配置已保存" : "尚未配置");
     } catch (error) {
@@ -743,8 +1056,10 @@
     if (view === "home") renderHome();
     if (view === "ai") renderAiView();
     if (view === "library") renderLibrary();
+    if (view === "notes") renderNotes();
     if (view === "mistakes") renderMistakes();
     if (view === "progress") renderProgress();
+    renderAiTutorWindow();
     refreshIcons();
   }
 
@@ -823,7 +1138,7 @@
 
   async function requestAiGrade(task, answer) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 32000);
+    const timeout = setTimeout(() => controller.abort(), AI_CLIENT_TIMEOUT_MS);
     const settings = selectedAiSettings();
     try {
       const response = await fetch("/api/ai/grade", {
@@ -956,6 +1271,46 @@
     refreshIcons();
   }
 
+  function renderNotes() {
+    const noteDays = Array.from(new Set([
+      ...allItems.map(item => Number(item.day) || 0),
+      ...(Array.isArray(DATA.notes) ? DATA.notes.map(note => Number(note.day) || 0) : [])
+    ].filter(Boolean))).sort((left, right) => left - right);
+    if (!noteDays.includes(notesDay)) notesDay = noteDays[noteDays.length - 1] || 1;
+    const note = (Array.isArray(DATA.notes) ? DATA.notes : []).find(item => Number(item.day) === notesDay) || {};
+    const words = DATA.words.filter(item => Number(item.day) === notesDay);
+    const sentences = DATA.sentences.filter(item => Number(item.day) === notesDay);
+    const date = String(note.date || words[0]?.learned || sentences[0]?.learned || "");
+    const select = $("#notesDaySelect");
+    select.replaceChildren(...noteDays.map(day => {
+      const entry = (Array.isArray(DATA.notes) ? DATA.notes : []).find(item => Number(item.day) === day) || {};
+      const dayDate = String(entry.date || DATA.words.find(item => Number(item.day) === day)?.learned || DATA.sentences.find(item => Number(item.day) === day)?.learned || "");
+      const option = document.createElement("option");
+      option.value = String(day);
+      option.textContent = dayDate ? `${displayDate(dayDate)} · 第 ${day} 天` : `第 ${day} 天`;
+      return option;
+    }));
+    select.value = String(notesDay);
+    $("#notesStatus").textContent = `已整理 ${noteDays.length} 天 · ${words.length} 个单词 · ${sentences.length} 个句子`;
+
+    const goals = Array.isArray(note.goals) ? note.goals : [];
+    const pronunciation = Array.isArray(note.pronunciation) ? note.pronunciation : words.map(item => `${item.english} ${item.phonetic}：${item.pronunciation}`).filter(Boolean);
+    const patterns = Array.isArray(note.patterns) ? note.patterns : [];
+    const mistakes = Array.isArray(note.mistakes) ? note.mistakes : [];
+    const listHtml = values => `<ul class="notes-list">${values.map(value => `<li>${escapeHtml(value)}</li>`).join("")}</ul>`;
+    const body = [
+      `<section class="notes-overview"><div class="notes-overview-meta"><span>${escapeHtml(date ? displayDate(date) : `第 ${notesDay} 天`)}</span>${note.score ? `<span class="count-badge">${escapeHtml(note.score)}</span>` : ""}</div><h2>${escapeHtml(date ? `${displayDate(date)}学习总结` : `第 ${notesDay} 天学习总结`)}</h2><p>${escapeHtml(note.summary || `当天学习了 ${words.length} 个单词和 ${sentences.length} 个句子。`)}</p></section>`,
+      `<div class="notes-columns"><section class="notes-section"><h2>学习目标</h2>${goals.length ? listHtml(goals) : listHtml(["复习当天词句并完成双向翻译。"])}</section><section class="notes-section"><h2>发音提醒</h2>${pronunciation.length ? listHtml(pronunciation) : listHtml(["当天暂无单独发音记录。"])}</section></div>`,
+      words.length ? `<section class="notes-section"><h2>当天单词</h2><div class="table-wrap"><table class="data-table"><thead><tr><th>单词</th><th>发音</th><th>中文</th></tr></thead><tbody>${words.map(item => `<tr><td><code>${escapeHtml(item.english)}</code></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td></tr>`).join("")}</tbody></table></div></section>` : "",
+      sentences.length ? `<section class="notes-section"><h2>当天句子</h2>${sentences.map(item => `<div class="notes-example"><code>${escapeHtml(item.english)}</code><span>${escapeHtml(item.chinese)}</span></div>`).join("")}</section>` : "",
+      patterns.length ? `<section class="notes-section"><h2>核心句型</h2>${patterns.map(pattern => `<div class="notes-pattern"><h3>${escapeHtml(pattern.title)}</h3><p>${escapeHtml(pattern.note)}</p>${(Array.isArray(pattern.examples) ? pattern.examples : []).map(example => `<div class="notes-example"><code>${escapeHtml(example.english)}</code><span>${escapeHtml(example.chinese)}</span></div>`).join("")}</div>`).join("")}</section>` : "",
+      mistakes.length ? `<section class="notes-section"><h2>易错点</h2>${listHtml(mistakes)}</section>` : "",
+      `<div class="notes-review"><strong>复习重点：</strong>${escapeHtml(note.review || "复习当天单词、句子和发音提示。")}</div>`
+    ].join("");
+    $("#notesBody").innerHTML = body;
+    refreshIcons();
+  }
+
   function mistakeRows() {
     const seeded = DATA.seedMistakes.map(item => ({ ...item, seeded: true }));
     const dynamic = (model.mistakes || []).map(item => ({ ...item, seeded: false }));
@@ -1022,6 +1377,10 @@
     $$("[data-library-type]").forEach(button => button.addEventListener("click", () => { libraryType = button.dataset.libraryType; renderLibrary(); }));
     $("#librarySearch").addEventListener("input", renderLibrary);
     $("#dayFilter").addEventListener("change", renderLibrary);
+    $("#notesDaySelect").addEventListener("change", event => {
+      notesDay = Number(event.target.value) || notesDay;
+      renderNotes();
+    });
     $("#aiModelSelect").addEventListener("change", event => {
       aiStatusMessage = "";
       updateAiPreferences({ model: event.target.value });
@@ -1040,6 +1399,21 @@
     $("#generateAiQuestions").addEventListener("click", generateAiQuestions);
     $("#generateAnotherAiSet").addEventListener("click", generateAiQuestions);
     $("#aiAnswerForm").addEventListener("submit", submitAiAnswer);
+    $("#openAiTutorButton").addEventListener("click", openAiTutorWindow);
+    $("#closeAiTutorButton").addEventListener("click", closeAiTutorWindow);
+    $("#minimizeAiTutorButton").addEventListener("click", toggleAiTutorMinimize);
+    $("#maximizeAiTutorButton").addEventListener("click", toggleAiTutorMaximize);
+    $("#clearAiTutorButton").addEventListener("click", clearAiTutor);
+    $("#aiTutorForm").addEventListener("submit", submitAiTutorQuestion);
+    $("#aiTutorInput").addEventListener("keydown", event => {
+      if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
+      event.preventDefault();
+      $("#aiTutorForm").requestSubmit();
+    });
+    $("#aiTutorDragHandle").addEventListener("pointerdown", startAiTutorDrag);
+    $("#aiTutorDragHandle").addEventListener("pointermove", moveAiTutorWindow);
+    $("#aiTutorDragHandle").addEventListener("pointerup", endAiTutorDrag);
+    $("#aiTutorDragHandle").addEventListener("pointercancel", endAiTutorDrag);
     $("#nextAiQuestion").addEventListener("click", advanceAiQuestion);
     $("#nextAiQuestion").addEventListener("keydown", event => {
       if (event.key !== "Enter") return;
@@ -1071,7 +1445,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=12").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=14").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

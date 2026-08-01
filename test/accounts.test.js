@@ -9,6 +9,7 @@ const path = require("node:path");
 const { once } = require("node:events");
 const { test } = require("node:test");
 const { createUser, loadUsers, saveUsers, validPassword } = require("../server/accounts");
+const { deriveLearningSyncToken } = require("../server/learning-sync-token");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -76,7 +77,7 @@ test("SSH-created account can log in and public registration is absent", async (
   const baseUrl = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
     cwd: ROOT,
-    env: { ...process.env, DATA_DIR: dataDir, PORT: String(port), COOKIE_SECURE: "false" },
+    env: { ...process.env, DATA_DIR: dataDir, PORT: String(port), COOKIE_SECURE: "false", API_TOKEN: "profile-sync-test-token" },
     stdio: ["ignore", "pipe", "pipe"]
   });
 
@@ -104,20 +105,46 @@ test("SSH-created account can log in and public registration is absent", async (
     const status = await statusResponse.json();
     assert.equal(Object.hasOwn(status, "registrationOpen"), false);
 
+    const contentResponse = await fetch(`${baseUrl}/api/content`);
+    assert.equal(contentResponse.status, 200);
+    const content = await contentResponse.json();
+    assert.equal(content.notes.length, 2);
+    assert.match(content.notes[1].review, /cat/);
+
+    const blockedSync = await fetch(`${baseUrl}/api/sync/profile?username=sshowner`);
+    assert.equal(blockedSync.status, 401);
+    const overprivilegedSync = await fetch(`${baseUrl}/api/sync/profile?username=sshowner`, { headers: { "Authorization": "Bearer profile-sync-test-token" } });
+    assert.equal(overprivilegedSync.status, 401);
+    const readToken = deriveLearningSyncToken("profile-sync-test-token");
+    const syncResponse = await fetch(`${baseUrl}/api/sync/profile?username=sshowner`, { headers: { "Authorization": `Bearer ${readToken}` } });
+    assert.equal(syncResponse.status, 200);
+    const syncProfile = await syncResponse.json();
+    assert.equal(syncProfile.user.username, "sshowner");
+    assert.equal(syncProfile.course.currentDay, 2);
+    assert.equal(syncProfile.summary.aiQuestions, 0);
+    assert.equal(Object.hasOwn(syncProfile.user, "passwordHash"), false);
+    assert.equal(JSON.stringify(syncProfile).includes("profile-sync-test-token"), false);
+    assert.equal(JSON.stringify(syncProfile).includes(readToken), false);
+
     const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
     assert.doesNotMatch(html, /data-auth-mode|confirmPasswordWrap|>注册</);
-    assert.match(html, /app\.js\?v=12/);
-    assert.doesNotMatch(html, /\?v=(?:[7-9]|1[01])(?:\D|$)/);
+    assert.match(html, /app\.js\?v=14/);
+    assert.match(html, /data-view="notes"/);
+    assert.match(html, /id="aiTutorWindow"/);
+    assert.match(html, /id="aiHistoryList"/);
+    assert.doesNotMatch(html, /\?v=(?:[7-9]|1[0-3])(?:\D|$)/);
 
-    const appResponse = await fetch(`${baseUrl}/app.js?v=12`);
+    const appResponse = await fetch(`${baseUrl}/app.js?v=14`);
     assert.equal(appResponse.status, 200);
     assert.equal(appResponse.headers.get("cache-control"), "no-cache");
 
     const appSource = await appResponse.text();
     assert.match(appSource, /nextButton"\)\.focus\(\{ preventScroll: true \}\)/);
     assert.match(appSource, /nextAiQuestion"\)\.addEventListener\("keydown"/);
-    assert.match(appSource, /sw\.js\?v=12/);
+    assert.match(appSource, /sw\.js\?v=14/);
     assert.match(appSource, /api\/admin\/ai-config\/models/);
+    assert.match(appSource, /api\/ai\/questions\/ask/);
+    assert.match(appSource, /function renderAiHistory/);
   } finally {
     child.kill();
     if (child.exitCode === null) {

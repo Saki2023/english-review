@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test",
+    "sync:token": "node server/show-sync-token.js",
     "user:add": "node server/create-user.js"
   },
   "engines": {

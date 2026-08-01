@@ -12,6 +12,7 @@ test("web AI settings persist the key without returning it to clients", () => {
   try {
     const store = createAiSettingsStore(dataDir);
     assert.equal(store.public().configured, false);
+    assert.equal(store.public().timeoutMs, 30000);
     assert.equal(Object.hasOwn(store.public(), "apiKey"), false);
 
     store.save({
@@ -26,11 +27,13 @@ test("web AI settings persist the key without returning it to clients", () => {
     assert.equal(visible.configured, true);
     assert.equal(visible.hasApiKey, true);
     assert.equal(visible.defaultModel, "model-strong");
+    assert.deepEqual(visible.efforts, ["low", "medium", "high", "xhigh", "max"]);
     assert.equal(JSON.stringify(visible).includes("private-web-key"), false);
 
     store.save({ models: ["model-fast"], defaultModel: "model-fast", apiKey: "" });
     assert.equal(store.load().apiKey, "private-web-key");
     assert.equal(store.load().defaultModel, "model-fast");
+    assert.equal(selectAiSettings(store.load(), { model: "model-fast", reasoningEffort: "max" }).reasoningEffort, "max");
     assert.throws(() => selectAiSettings(store.load(), { model: "not-allowed" }), /not allowed/);
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
