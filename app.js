@@ -2,6 +2,7 @@
   "use strict";
 
   const DATA = window.ENGLISH_REVIEW_DATA;
+  const { chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const STORAGE_KEY = "daily-english-review-v1";
   const DAILY_TARGET = 10;
   const INTERVALS = [1, 3, 7, 14, 30, 60];
@@ -204,14 +205,6 @@
     $("#logoutButton").addEventListener("click", logout);
   }
 
-  function normalizeEnglish(value) {
-    return String(value || "").toLowerCase().replace(/[“”‘’.,!?;:，。！？；：]/g, "").replace(/\s+/g, " ").trim();
-  }
-
-  function normalizeChinese(value) {
-    return String(value || "").replace(/[\s“”‘’.,!?;:，。！？；：、]/g, "").replace(/\.\.\./g, "").trim();
-  }
-
   function formatDirection(direction) { return direction === "en-zh" ? "英译中" : "中译英"; }
 
   function todayStats() {
@@ -366,12 +359,8 @@
 
   function answerMatches(task, answer) {
     if (!answer.trim()) return false;
-    if (task.direction === "zh-en") return (task.item.acceptedEnglish || [task.item.english]).some(expected => normalizeEnglish(expected) === normalizeEnglish(answer));
-    const normalized = normalizeChinese(answer);
-    const accepted = task.item.acceptedChinese || [task.item.chinese];
-    if (accepted.some(expected => normalizeChinese(expected) === normalized)) return true;
-    const keywords = task.item.type === "sentence" ? (task.item.acceptedChinese || []).map(expected => normalizeChinese(expected)).sort((a, b) => b.length - a.length)[0] : "";
-    return Boolean(keywords && normalized && keywords === normalized);
+    if (task.direction === "zh-en") return englishAnswerMatches(answer, task.item.acceptedEnglish || [task.item.english]);
+    return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese]);
   }
 
   function correctAnswer(task) {
@@ -538,7 +527,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=6").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=7").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

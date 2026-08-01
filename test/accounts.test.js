@@ -106,9 +106,9 @@ test("SSH-created account can log in and public registration is absent", async (
 
     const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
     assert.doesNotMatch(html, /data-auth-mode|confirmPasswordWrap|>注册</);
-    assert.match(html, /app\.js\?v=6/);
+    assert.match(html, /app\.js\?v=7/);
 
-    const appResponse = await fetch(`${baseUrl}/app.js?v=6`);
+    const appResponse = await fetch(`${baseUrl}/app.js?v=7`);
     assert.equal(appResponse.status, 200);
     assert.equal(appResponse.headers.get("cache-control"), "no-cache");
 
