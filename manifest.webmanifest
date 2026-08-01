@@ -1,0 +1,19 @@
+{
+  "name": "每日英语复习",
+  "short_name": "英语复习",
+  "description": "按间隔复习单词和句子的英语学习应用",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f7f5",
+  "theme_color": "#167c66",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

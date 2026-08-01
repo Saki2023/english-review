@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="每日英语复习">
+  <rect width="128" height="128" rx="24" fill="#167c66"/>
+  <path d="M27 31h27c9 0 16 7 16 16v48H43c-9 0-16-7-16-16V31Z" fill="#fff" opacity=".96"/>
+  <path d="M101 31H74c-9 0-16 7-16 16v48h27c9 0 16-7 16-16V31Z" fill="#dff0ea"/>
+  <path d="M43 47h17M43 59h17M43 71h12M82 47h8M82 59h8M82 71h8" fill="none" stroke="#167c66" stroke-linecap="round" stroke-width="6"/>
+  <path d="m79 83 7 7 15-18" fill="none" stroke="#a36b05" stroke-linecap="round" stroke-linejoin="round" stroke-width="7"/>
+</svg>

@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#167c66">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="icon" href="data:,">
+  <link rel="manifest" href="manifest.webmanifest">
+  <title>每日英语复习</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true"><i data-lucide="book-open-check"></i></div>
+        <div>
+          <div class="brand-name">每日英语复习</div>
+          <div class="brand-meta" id="dataStatus">词库同步至第 2 天</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span class="date-label" id="todayLabel"></span>
+        <div class="account-area" id="accountArea" hidden>
+          <span class="user-badge" id="userBadge"></span>
+          <button class="icon-button" type="button" id="logoutButton" data-tooltip="退出账号" aria-label="退出账号"><i data-lucide="log-out" aria-hidden="true"></i></button>
+        </div>
+        <button class="icon-button" type="button" id="resetButton" data-tooltip="重置当前账号复习记录" aria-label="重置当前账号复习记录">
+          <i data-lucide="rotate-ccw" aria-hidden="true"></i>
+        </button>
+      </div>
+    </header>
+
+    <section class="auth-screen" id="authScreen" hidden aria-labelledby="authTitle">
+      <div class="auth-panel">
+        <div class="auth-mark" aria-hidden="true"><i data-lucide="book-open-check"></i></div>
+        <p class="eyebrow">DAILY ENGLISH REVIEW</p>
+        <h1 id="authTitle">账号登录</h1>
+        <p class="auth-note">登录后，手机和电脑共享同一份学习进度。</p>
+        <div class="auth-tabs" role="tablist" aria-label="账号操作">
+          <button class="auth-tab is-selected" type="button" data-auth-mode="login" role="tab" aria-selected="true">登录</button>
+          <button class="auth-tab" type="button" data-auth-mode="register" role="tab" aria-selected="false">注册</button>
+        </div>
+        <form id="authForm" class="auth-form">
+          <label for="authUsername">用户名</label>
+          <input id="authUsername" name="username" type="text" autocomplete="username" minlength="3" maxlength="32" required>
+          <label for="authPassword">密码</label>
+          <input id="authPassword" name="password" type="password" autocomplete="current-password" minlength="8" maxlength="128" required>
+          <div id="confirmPasswordWrap" hidden>
+            <label for="authConfirmPassword">确认密码</label>
+            <input id="authConfirmPassword" name="confirmPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128">
+          </div>
+          <button class="primary-button auth-submit" id="authSubmit" type="submit">登录</button>
+        </form>
+        <p class="auth-feedback" id="authFeedback" aria-live="polite" hidden></p>
+      </div>
+    </section>
+
+    <div class="app-body" id="appBody" hidden>
+      <nav class="side-nav" aria-label="主要功能">
+        <button class="nav-item is-active" type="button" data-view="home" aria-current="page">
+          <i data-lucide="layout-dashboard" aria-hidden="true"></i><span>今日复习</span>
+        </button>
+        <button class="nav-item" type="button" data-view="library">
+          <i data-lucide="library" aria-hidden="true"></i><span>词句库</span>
+        </button>
+        <button class="nav-item" type="button" data-view="mistakes">
+          <i data-lucide="triangle-alert" aria-hidden="true"></i><span>错题本</span>
+        </button>
+        <button class="nav-item" type="button" data-view="progress">
+          <i data-lucide="bar-chart-3" aria-hidden="true"></i><span>学习进度</span>
+        </button>
+      </nav>
+
+      <main class="main-content">
+        <section class="view is-visible" id="view-home" aria-labelledby="homeTitle">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">TODAY</p>
+              <h1 id="homeTitle">今日复习</h1>
+              <p class="heading-note" id="queueNote">先复习错题，再练新词和句子。</p>
+            </div>
+            <div class="goal-readout">
+              <span class="goal-label">今日目标</span>
+              <strong id="goalReadout">0 / 10</strong>
+            </div>
+          </div>
+
+          <div class="stats-grid" aria-label="今日统计">
+            <article class="stat-card">
+              <span class="stat-label">待复习</span>
+              <strong class="stat-value" id="dueCount">0</strong>
+              <span class="stat-context">到期题目</span>
+            </article>
+            <article class="stat-card">
+              <span class="stat-label">今日完成</span>
+              <strong class="stat-value" id="reviewedCount">0</strong>
+              <span class="stat-context">已提交题目</span>
+            </article>
+            <article class="stat-card">
+              <span class="stat-label">今日正确率</span>
+              <strong class="stat-value" id="accuracyCount">—</strong>
+              <span class="stat-context">以提交记录计算</span>
+            </article>
+          </div>
+
+          <div class="review-toolbar">
+            <div class="segmented-control" role="group" aria-label="复习范围">
+              <button type="button" class="segment is-selected" data-mode="all" aria-pressed="true">全部</button>
+              <button type="button" class="segment" data-mode="word" aria-pressed="false">单词</button>
+              <button type="button" class="segment" data-mode="sentence" aria-pressed="false">句子</button>
+            </div>
+            <span class="review-source" id="reviewSource"><i data-lucide="list-checks" aria-hidden="true"></i>间隔复习</span>
+          </div>
+
+          <article class="review-panel" id="reviewPanel">
+            <div class="review-panel-top">
+              <div class="prompt-meta">
+                <span class="type-badge" id="promptType">单词</span>
+                <span id="promptDay">第 1 天</span>
+              </div>
+              <span class="question-count" id="questionCount">1 / 10</span>
+            </div>
+            <div class="question-area" id="questionArea">
+              <p class="direction-label" id="directionLabel">英译中</p>
+              <div class="prompt-text" id="promptText">准备中…</div>
+              <div class="phonetic-line" id="phoneticLine"></div>
+              <div class="example-line" id="exampleLine"></div>
+              <form class="answer-form" id="answerForm">
+                <label class="sr-only" for="answerInput">你的答案</label>
+                <input id="answerInput" class="answer-input" type="text" autocomplete="off" spellcheck="false" placeholder="输入答案">
+                <button class="primary-button" id="submitAnswer" type="submit"><i data-lucide="arrow-right" aria-hidden="true"></i>提交答案</button>
+              </form>
+              <div class="feedback" id="feedback" aria-live="polite" hidden></div>
+              <div class="feedback-actions" id="feedbackActions" hidden>
+                <button class="secondary-button" type="button" id="retryButton"><i data-lucide="refresh-cw" aria-hidden="true"></i>再练一次</button>
+                <button class="primary-button" type="button" id="nextButton">下一题<i data-lucide="arrow-right" aria-hidden="true"></i></button>
+              </div>
+            </div>
+          </article>
+
+          <div class="review-complete" id="reviewComplete" hidden>
+            <div class="complete-icon" aria-hidden="true"><i data-lucide="check"></i></div>
+            <div>
+              <h2>这一轮完成</h2>
+              <p id="completeNote">今日目标已完成。</p>
+            </div>
+            <button class="secondary-button" type="button" id="moreReviewButton">再练 10 题<i data-lucide="arrow-right" aria-hidden="true"></i></button>
+          </div>
+        </section>
+
+        <section class="view" id="view-library" aria-labelledby="libraryTitle" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">LIBRARY</p>
+              <h1 id="libraryTitle">词句库</h1>
+              <p class="heading-note">每天学过的内容会自动收录在这里。</p>
+            </div>
+          </div>
+          <div class="library-controls">
+            <div class="segmented-control" role="group" aria-label="词句类型">
+              <button type="button" class="segment is-selected" data-library-type="word" aria-pressed="true">单词</button>
+              <button type="button" class="segment" data-library-type="sentence" aria-pressed="false">句子</button>
+            </div>
+            <label class="search-field">
+              <i data-lucide="search" aria-hidden="true"></i>
+              <span class="sr-only">搜索词句</span>
+              <input id="librarySearch" type="search" placeholder="搜索英文或中文">
+            </label>
+            <label class="select-field">
+              <span class="sr-only">按学习天数筛选</span>
+              <i data-lucide="filter" aria-hidden="true"></i>
+              <select id="dayFilter" aria-label="按学习天数筛选">
+                <option value="all">全部天数</option>
+                <option value="1">第 1 天</option>
+                <option value="2">第 2 天</option>
+              </select>
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead id="libraryHead"></thead>
+              <tbody id="libraryBody"></tbody>
+            </table>
+          </div>
+          <p class="empty-message" id="libraryEmpty" hidden>还没有符合条件的内容。</p>
+        </section>
+
+        <section class="view" id="view-mistakes" aria-labelledby="mistakesTitle" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">REVIEW AGAIN</p>
+              <h1 id="mistakesTitle">错题本</h1>
+              <p class="heading-note">错过的题会在后续复习中优先出现。</p>
+            </div>
+            <span class="count-badge" id="mistakeCount">0 条</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table mistake-table">
+              <thead>
+                <tr><th>题目</th><th>你的答案</th><th>正确答案</th><th>来源</th><th></th></tr>
+              </thead>
+              <tbody id="mistakeBody"></tbody>
+            </table>
+          </div>
+          <p class="empty-message" id="mistakeEmpty" hidden>还没有错题，继续保持。</p>
+        </section>
+
+        <section class="view" id="view-progress" aria-labelledby="progressTitle" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">PROGRESS</p>
+              <h1 id="progressTitle">学习进度</h1>
+              <p class="heading-note">看见每天的积累，比一次学很多更重要。</p>
+            </div>
+          </div>
+          <div class="progress-overview">
+            <div class="progress-number"><span>已收录词句</span><strong id="libraryTotal">0</strong></div>
+            <div class="progress-number"><span>已熟练词句</span><strong id="masteredTotal">0</strong></div>
+            <div class="progress-number"><span>连续学习</span><strong id="streakTotal">0 天</strong></div>
+          </div>
+          <section class="chart-section" aria-labelledby="weeklyTitle">
+            <div class="section-heading"><h2 id="weeklyTitle">最近 7 天</h2><span class="text-muted">提交题数</span></div>
+            <div class="bar-chart" id="weeklyChart" role="img" aria-label="最近七天的复习提交数量"></div>
+          </section>
+          <section class="day-breakdown" aria-labelledby="dayBreakdownTitle">
+            <div class="section-heading"><h2 id="dayBreakdownTitle">课程积累</h2><span class="text-muted">词汇与句子</span></div>
+            <div id="dayBreakdownBody"></div>
+          </section>
+          <div class="progress-footer">
+            <span><i data-lucide="calendar-days" aria-hidden="true"></i>词库更新时间：<strong id="updatedAtLabel">2026-08-01</strong></span>
+            <button class="text-button danger-button" type="button" id="openResetButton">重置本机记录</button>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="resetDialog" class="reset-dialog">
+    <form method="dialog">
+      <h2>重置本机记录？</h2>
+      <p>词库不会被删除，但复习次数、错题和间隔安排会清空。</p>
+      <div class="dialog-actions">
+        <button class="secondary-button" value="cancel">取消</button>
+        <button class="danger-button filled-danger" id="confirmReset" value="confirm">确认重置</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="vendor/lucide.min.js"></script>
+  <script src="data.js"></script>
+  <script>
+    (async () => {
+      if (location.protocol === "http:" || location.protocol === "https:") {
+        try {
+          const response = await fetch("/api/content", { cache: "no-store" });
+          if (response.ok) window.ENGLISH_REVIEW_DATA = await response.json();
+        } catch (_) {
+          // Keep the bundled data as a fallback when the API is temporarily unavailable.
+        }
+      }
+      const appScript = document.createElement("script");
+      appScript.src = "app.js";
+      document.body.appendChild(appScript);
+    })();
+  </script>
+</body>
+</html>

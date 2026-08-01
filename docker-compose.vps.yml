@@ -1,0 +1,31 @@
+services:
+  english-review:
+    build: .
+    container_name: english-review
+    expose:
+      - "8080"
+    environment:
+      PORT: 8080
+      TZ: Asia/Shanghai
+      COOKIE_SECURE: "true"
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      API_TOKEN: ${API_TOKEN}
+      CORS_ORIGIN: https://${DOMAIN}
+    volumes:
+      - ./server/data:/app/server/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: english-review-cloudflared
+    depends_on:
+      english-review:
+        condition: service_healthy
+    command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN}"]
+    restart: unless-stopped

@@ -1,0 +1,12 @@
+{
+  "name": "daily-english-review",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Offline-first English review app with a Docker-ready API",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
