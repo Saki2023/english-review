@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches } = require("../answer-utils");
+const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, shouldSubmitOnEnter } = require("../answer-utils");
 
 test("Chinese answers accept explicit equivalent location wording", () => {
   const accepted = ["一只猫坐在一张垫子上", "一只猫坐在垫子上"];
@@ -41,4 +41,14 @@ test("mistake practice starts at the selected row and continues through unique m
   ]);
   assert.deepEqual(buildMistakePracticeQueue(rows, "unknown", valid), []);
   assert.deepEqual(buildMistakePracticeQueue(rows, "sentence-a:en-zh", []), []);
+});
+
+test("AI tutor sends with Enter while preserving multiline and IME input", () => {
+  assert.equal(shouldSubmitOnEnter({ key: "Enter" }), true);
+  assert.equal(shouldSubmitOnEnter({ key: "Enter", ctrlKey: true }), true);
+  assert.equal(shouldSubmitOnEnter({ key: "Enter", metaKey: true }), true);
+  assert.equal(shouldSubmitOnEnter({ key: "Enter", shiftKey: true }), false);
+  assert.equal(shouldSubmitOnEnter({ key: "Enter", isComposing: true }), false);
+  assert.equal(shouldSubmitOnEnter({ key: "Enter", keyCode: 229 }), false);
+  assert.equal(shouldSubmitOnEnter({ key: "a" }), false);
 });

@@ -372,15 +372,23 @@ test("admin configures AI on the web and progress-based questions use the select
     const tutorResponse = await fetch(`${baseUrl}/api/ai/questions/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Cookie": cookie },
-      body: JSON.stringify({ setId: generatedBody.set.id, questionId: firstQuestion.id, message: "这个句子应该先看哪里？" })
+      body: JSON.stringify({ historyId: questionResult.practice.history[0].id, message: "这个句子应该先看哪里？", reasoningEffort: "low" })
     });
     assert.equal(tutorResponse.status, 200);
     const tutorBody = await tutorResponse.json();
     assert.equal(tutorBody.answer, "先看句子的主语和位置词，再自己试一次。");
     assert.equal(tutorBody.tutor.messages.length, 2);
+    assert.deepEqual(tutorBody.tutorSettings, { reasoningEffort: "low" });
     assert.equal(providerRequests.length, 5);
-    assert.equal(providerRequests[4].body.reasoning_effort, "high");
+    assert.equal(providerRequests[4].body.reasoning_effort, "low");
     assert.equal(Object.hasOwn(providerRequests[4].body, "response_format"), false);
+    const tutorRequest = JSON.parse(providerRequests[4].body.messages[1].content);
+    assert.equal(tutorRequest.exercise.answered, true);
+    assert.equal(tutorRequest.exercise.learnerAnswer, "它非常大");
+    assert.equal(tutorRequest.exercise.explanation, "意思相同，只是说法不同。");
+    const stateAfterTutor = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
+    assert.equal(stateAfterTutor.aiPractice.settings.reasoningEffort, "high");
+    assert.equal(stateAfterTutor.aiPractice.tutorSettings.reasoningEffort, "low");
 
     const unavailableGeneration = await fetch(`${baseUrl}/api/ai/questions/generate`, {
       method: "POST",

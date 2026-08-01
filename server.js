@@ -562,27 +562,46 @@ async function handleAiTutorAsk(req, res, user) {
 
     const state = getUserState(user);
     const practice = sanitizeAiPractice(state.aiPractice);
+    const historyItem = body.historyId ? practice.history.find(item => item.id === body.historyId) : null;
     const set = practice.currentSet;
-    if (!set || set.id !== body.setId) return sendError(res, 404, "AI question set not found");
-    const question = set.questions.find(item => item.id === body.questionId);
-    if (!question) return sendError(res, 404, "AI question not found");
+    const question = !historyItem && set && set.id === body.setId ? set.questions.find(item => item.id === body.questionId) : null;
+    if (body.historyId && !historyItem) return sendError(res, 404, "AI history question not found");
+    if (!historyItem && (!set || set.id !== body.setId)) return sendError(res, 404, "AI question set not found");
+    if (!historyItem && !question) return sendError(res, 404, "AI question not found");
+
+    const historyPrefix = historyItem && historyItem.setId ? `${historyItem.setId}:` : "";
+    const historyQuestionId = historyItem && historyPrefix && historyItem.id.startsWith(historyPrefix) ? historyItem.id.slice(historyPrefix.length) : historyItem && historyItem.id;
+    const threadSetId = historyItem ? (historyItem.setId || `history-${historyItem.id}`) : set.id;
+    const threadQuestionId = historyItem ? historyQuestionId : question.id;
+    const exercise = historyItem ? {
+      direction: historyItem.direction,
+      english: historyItem.direction === "zh-en" ? historyItem.correctAnswer : historyItem.prompt,
+      chinese: historyItem.direction === "zh-en" ? historyItem.prompt : historyItem.correctAnswer,
+      learnerAnswer: historyItem.userAnswer,
+      answered: true,
+      focus: historyItem.focus || "",
+      explanation: historyItem.explanation || ""
+    } : {
+      direction: question.direction,
+      english: question.english,
+      chinese: question.chinese,
+      learnerAnswer: question.userAnswer || "",
+      answered: typeof question.correct === "boolean",
+      focus: question.focus || "",
+      explanation: question.explanation || ""
+    };
 
     const rate = takeAiRequest(user.id);
     if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
-    const requestedModel = aiSettings.models.includes(set.model) ? set.model : aiSettings.defaultModel;
-    const config = selectAiSettings(aiSettings, { model: requestedModel, reasoningEffort: set.reasoningEffort });
-    const thread = practice.tutor && practice.tutor.setId === set.id && practice.tutor.questionId === question.id
+    const contextModel = historyItem ? historyItem.model : set.model;
+    const requestedModel = aiSettings.models.includes(contextModel) ? contextModel : aiSettings.defaultModel;
+    const tutorEffort = AI_EFFORTS.includes(body.reasoningEffort) ? body.reasoningEffort : practice.tutorSettings.reasoningEffort;
+    const config = selectAiSettings(aiSettings, { model: requestedModel, reasoningEffort: tutorEffort });
+    const thread = practice.tutor && practice.tutor.setId === threadSetId && practice.tutor.questionId === threadQuestionId
       ? practice.tutor
-      : { setId: set.id, questionId: question.id, messages: [] };
+      : { setId: threadSetId, questionId: threadQuestionId, messages: [] };
     const answer = await createAiTutor(config).answer({
-      exercise: {
-        direction: question.direction,
-        english: question.english,
-        chinese: question.chinese,
-        learnerAnswer: question.userAnswer || "",
-        answered: typeof question.correct === "boolean",
-        focus: question.focus || ""
-      },
+      exercise,
       history: thread.messages,
       message
     });
@@ -593,10 +612,11 @@ async function handleAiTutorAsk(req, res, user) {
       { role: "assistant", content: answer, createdAt }
     ].slice(-MAX_TUTOR_MESSAGES);
     practice.tutor = thread;
+    practice.tutorSettings.reasoningEffort = config.reasoningEffort;
     practice.updatedAt = createdAt;
     state.aiPractice = practice;
     persistUserStates();
-    return sendJson(res, 200, { answer, tutor: thread });
+    return sendJson(res, 200, { answer, tutor: thread, tutorSettings: practice.tutorSettings });
   } catch (error) {
     if (error && [400, 404, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI tutoring failed: ${error && error.message ? error.message : "unknown error"}`);

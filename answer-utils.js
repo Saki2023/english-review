@@ -45,5 +45,9 @@
     return [...taskIds.slice(startIndex), ...taskIds.slice(0, startIndex)];
   }
 
-  return { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish };
+  function shouldSubmitOnEnter(event) {
+    return Boolean(event && event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229);
+  }
+
+  return { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish, shouldSubmitOnEnter };
 });

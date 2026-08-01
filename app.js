@@ -2,7 +2,7 @@
   "use strict";
 
   const DATA = window.ENGLISH_REVIEW_DATA;
-  const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish } = window.ENGLISH_REVIEW_ANSWER_UTILS;
+  const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const STORAGE_KEY = "daily-english-review-v1";
   const DAILY_TARGET = 10;
   const INTERVALS = [1, 3, 7, 14, 30, 60];
@@ -31,6 +31,7 @@
   let aiRequestInProgress = false;
   let aiTutorRequestInProgress = false;
   let aiTutorDrag = null;
+  let aiTutorTarget = null;
   let aiStatusMessage = "";
   let aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
 
@@ -73,11 +74,15 @@
   function normalizeClientAiPractice(value) {
     const source = value && typeof value === "object" ? value : {};
     const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
+    const tutorSettings = source.tutorSettings && typeof source.tutorSettings === "object" ? source.tutorSettings : {};
     return {
       settings: {
         model: String(settings.model || ""),
         reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
         count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
+      },
+      tutorSettings: {
+        reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
       },
       currentSet: source.currentSet && Array.isArray(source.currentSet.questions) ? source.currentSet : null,
       tutor: normalizeClientTutor(source.tutor),
@@ -267,6 +272,14 @@
     saveModel();
   }
 
+  function updateAiTutorPreferences(patch) {
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    practice.tutorSettings = { ...practice.tutorSettings, ...patch };
+    practice.updatedAt = new Date().toISOString();
+    model.aiPractice = practice;
+    saveModel();
+  }
+
   function populateAiModelSelect() {
     const select = $("#aiModelSelect");
     const settings = selectedAiSettings();
@@ -316,19 +329,54 @@
     return set && Array.isArray(set.questions) ? set.questions[Number(set.index) || 0] : null;
   }
 
-  function tutorThreadForQuestion(practice, set, question) {
+  function aiHistoryQuestionId(item) {
+    const id = String(item && item.id || "");
+    const setId = String(item && item.setId || "");
+    const prefix = setId ? `${setId}:` : "";
+    return prefix && id.startsWith(prefix) ? id.slice(prefix.length) : id;
+  }
+
+  function aiTutorTargetForHistory(item) {
+    if (!item || !item.id) return null;
+    return {
+      kind: "history",
+      historyId: String(item.id),
+      setId: String(item.setId || `history-${item.id}`),
+      questionId: aiHistoryQuestionId(item),
+      prompt: String(item.prompt || "历史题目")
+    };
+  }
+
+  function resolveAiTutorTarget(practice) {
+    if (aiTutorTarget && aiTutorTarget.kind === "history") {
+      const historyItem = practice.history.find(item => item.id === aiTutorTarget.historyId);
+      if (historyItem) return aiTutorTargetForHistory(historyItem);
+    }
+    if (aiTutorTarget && aiTutorTarget.kind === "current") {
+      const set = practice.currentSet;
+      const question = set && set.id === aiTutorTarget.setId ? set.questions.find(item => item.id === aiTutorTarget.questionId) : null;
+      if (question) return { ...aiTutorTarget, prompt: question.direction === "en-zh" ? question.english : question.chinese };
+    }
+    const set = practice.currentSet;
+    const question = currentAiQuestion();
+    if (set && question && !set.completed) {
+      return { kind: "current", historyId: "", setId: set.id, questionId: question.id, prompt: question.direction === "en-zh" ? question.english : question.chinese };
+    }
+    return aiTutorTargetForHistory(practice.history[practice.history.length - 1]);
+  }
+
+  function tutorThreadForTarget(practice, target) {
     const tutor = normalizeClientTutor(practice.tutor);
-    if (tutor && tutor.setId === set.id && tutor.questionId === question.id) return tutor;
-    return { setId: set.id, questionId: question.id, messages: [] };
+    if (tutor && tutor.setId === target.setId && tutor.questionId === target.questionId) return tutor;
+    return { setId: target.setId, questionId: target.questionId, messages: [] };
   }
 
   function renderAiTutorWindow() {
     const tutorWindow = $("#aiTutorWindow");
     const launchButton = $("#openAiTutorButton");
     const practice = normalizeClientAiPractice(model.aiPractice);
-    const set = practice.currentSet;
-    const question = currentAiQuestion();
-    const available = activeView === "ai" && aiOptions.configured && set && question && !set.completed;
+    const target = resolveAiTutorTarget(practice);
+    const available = aiOptions.configured && target;
     if (!available) {
       tutorWindow.hidden = true;
       launchButton.hidden = true;
@@ -337,9 +385,11 @@
 
     launchButton.hidden = !tutorWindow.hidden;
     if (tutorWindow.hidden) return;
-    const prompt = question.direction === "en-zh" ? question.english : question.chinese;
-    $("#aiTutorContext").textContent = prompt;
-    const thread = tutorThreadForQuestion(practice, set, question);
+    aiTutorTarget = target;
+    $("#aiTutorTitle").textContent = target.kind === "history" ? "历史题问答" : "题目问答";
+    $("#aiTutorContext").textContent = target.prompt;
+    $("#aiTutorEffort").value = practice.tutorSettings.reasoningEffort;
+    const thread = tutorThreadForTarget(practice, target);
     const messageList = $("#aiTutorMessages");
     if (!thread.messages.length) {
       const empty = document.createElement("div");
@@ -361,6 +411,7 @@
       requestAnimationFrame(() => { messageList.scrollTop = messageList.scrollHeight; });
     }
     $("#clearAiTutorButton").disabled = aiTutorRequestInProgress || !thread.messages.length;
+    $("#aiTutorEffort").disabled = aiTutorRequestInProgress;
     $("#aiTutorInput").disabled = aiTutorRequestInProgress;
     $("#sendAiTutorButton").disabled = aiTutorRequestInProgress;
   }
@@ -380,8 +431,10 @@
     refreshIcons();
   }
 
-  function openAiTutorWindow() {
-    if (!currentAiQuestion()) return;
+  function openAiTutorWindow(target = null) {
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    if (target) aiTutorTarget = target;
+    if (!resolveAiTutorTarget(practice)) return;
     const tutorWindow = $("#aiTutorWindow");
     tutorWindow.hidden = false;
     tutorWindow.classList.remove("is-minimized");
@@ -427,16 +480,15 @@
     const input = $("#aiTutorInput");
     const message = input.value.trim();
     const practice = normalizeClientAiPractice(model.aiPractice);
-    const set = practice.currentSet;
-    const question = currentAiQuestion();
-    if (!message || !set || !question) return;
+    const target = resolveAiTutorTarget(practice);
+    if (!message || !target) return;
 
     const previousTutor = practice.tutor;
-    const thread = tutorThreadForQuestion(practice, set, question);
+    const thread = tutorThreadForTarget(practice, target);
     const createdAt = new Date().toISOString();
     practice.tutor = {
-      setId: set.id,
-      questionId: question.id,
+      setId: target.setId,
+      questionId: target.questionId,
       messages: [
         ...thread.messages,
         { role: "user", content: message, createdAt },
@@ -451,10 +503,17 @@
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ setId: set.id, questionId: question.id, message })
+        body: JSON.stringify({
+          setId: target.setId,
+          questionId: target.questionId,
+          historyId: target.historyId,
+          message,
+          reasoningEffort: practice.tutorSettings.reasoningEffort
+        })
       }));
       const next = normalizeClientAiPractice(model.aiPractice);
       next.tutor = normalizeClientTutor(data.tutor);
+      next.tutorSettings = normalizeClientAiPractice({ tutorSettings: data.tutorSettings }).tutorSettings;
       next.updatedAt = new Date().toISOString();
       model.aiPractice = next;
       input.value = "";
@@ -577,7 +636,7 @@
       const questionRows = group.questions.map((item, index) => {
         const number = Number(item.questionNumber) || index + 1;
         return `<article class="ai-history-question">
-          <div class="ai-history-question-meta"><span>第 ${number} 题 · ${formatDirection(item.direction)}</span><span class="ai-history-result ${item.correct === true ? "is-correct" : "is-wrong"}">${item.correct === true ? "正确" : "错误"}</span></div>
+          <div class="ai-history-question-meta"><span>第 ${number} 题 · ${formatDirection(item.direction)}</span><div class="ai-history-question-actions"><span class="ai-history-result ${item.correct === true ? "is-correct" : "is-wrong"}">${item.correct === true ? "正确" : "错误"}</span><button class="text-button ai-history-ask" type="button" data-ai-history-ask="${escapeHtml(item.id)}"><i data-lucide="message-circle-question" aria-hidden="true"></i>询问</button></div></div>
           <div class="ai-history-prompt">${escapeHtml(item.prompt || "（题目未记录）")}</div>
           <dl class="ai-history-answers">
             <div><dt>你的答案</dt><dd>${escapeHtml(item.userAnswer || "（未填写）")}</dd></div>
@@ -710,6 +769,7 @@
       practice.settings = data.settings;
       practice.currentSet = data.set;
       practice.tutor = null;
+      aiTutorTarget = null;
       practice.updatedAt = new Date().toISOString();
       model.aiPractice = practice;
       saveModel();
@@ -763,6 +823,7 @@
     set.index = (Number(set.index) || 0) + 1;
     set.completed = set.index >= set.questions.length;
     practice.tutor = null;
+    aiTutorTarget = null;
     practice.updatedAt = new Date().toISOString();
     model.aiPractice = practice;
     saveModel();
@@ -1399,16 +1460,27 @@
     $("#generateAiQuestions").addEventListener("click", generateAiQuestions);
     $("#generateAnotherAiSet").addEventListener("click", generateAiQuestions);
     $("#aiAnswerForm").addEventListener("submit", submitAiAnswer);
-    $("#openAiTutorButton").addEventListener("click", openAiTutorWindow);
+    $("#openAiTutorButton").addEventListener("click", () => openAiTutorWindow());
     $("#closeAiTutorButton").addEventListener("click", closeAiTutorWindow);
     $("#minimizeAiTutorButton").addEventListener("click", toggleAiTutorMinimize);
     $("#maximizeAiTutorButton").addEventListener("click", toggleAiTutorMaximize);
     $("#clearAiTutorButton").addEventListener("click", clearAiTutor);
+    $("#aiTutorEffort").addEventListener("change", event => {
+      updateAiTutorPreferences({ reasoningEffort: event.target.value });
+    });
     $("#aiTutorForm").addEventListener("submit", submitAiTutorQuestion);
     $("#aiTutorInput").addEventListener("keydown", event => {
-      if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
+      if (!shouldSubmitOnEnter(event)) return;
       event.preventDefault();
       $("#aiTutorForm").requestSubmit();
+    });
+    $("#aiHistoryList").addEventListener("click", event => {
+      const button = event.target.closest("[data-ai-history-ask]");
+      if (!button) return;
+      const practice = normalizeClientAiPractice(model.aiPractice);
+      const item = practice.history.find(entry => entry.id === button.dataset.aiHistoryAsk);
+      const target = aiTutorTargetForHistory(item);
+      if (target) openAiTutorWindow(target);
     });
     $("#aiTutorDragHandle").addEventListener("pointerdown", startAiTutorDrag);
     $("#aiTutorDragHandle").addEventListener("pointermove", moveAiTutorWindow);
@@ -1445,7 +1517,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=14").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=15").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

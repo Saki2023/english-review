@@ -104,11 +104,15 @@ function sanitizeHistoryItem(value) {
 function sanitizeAiPractice(value) {
   const source = value && typeof value === "object" ? value : {};
   const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
+  const tutorSettings = source.tutorSettings && typeof source.tutorSettings === "object" ? source.tutorSettings : {};
   return {
     settings: {
       model: cleanText(settings.model, 120),
       reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
       count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
+    },
+    tutorSettings: {
+      reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
     },
     currentSet: sanitizeQuestionSet(source.currentSet),
     tutor: sanitizeTutorThread(source.tutor),

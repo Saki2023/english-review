@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=14">
+  <link rel="stylesheet" href="styles.css?v=15">
 </head>
 <body>
   <div class="app-shell">
@@ -362,6 +362,17 @@
       </div>
     </header>
     <div class="ai-tutor-body" id="aiTutorBody">
+      <div class="ai-tutor-controls">
+        <label for="aiTutorEffort"><span>问答强度</span>
+          <select id="aiTutorEffort">
+            <option value="low">轻度</option>
+            <option value="medium" selected>中</option>
+            <option value="high">高</option>
+            <option value="xhigh">极高</option>
+            <option value="max">最高</option>
+          </select>
+        </label>
+      </div>
       <div class="ai-tutor-messages" id="aiTutorMessages" aria-live="polite"></div>
       <form class="ai-tutor-form" id="aiTutorForm">
         <label class="sr-only" for="aiTutorInput">询问当前题目</label>
@@ -445,9 +456,9 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=14"></script>
-  <script src="data.js?v=14"></script>
-  <script src="answer-utils.js?v=14"></script>
+  <script src="vendor/lucide.min.js?v=15"></script>
+  <script src="data.js?v=15"></script>
+  <script src="answer-utils.js?v=15"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -463,7 +474,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=14";
+      appScript.src = "app.js?v=15";
       document.body.appendChild(appScript);
     })();
   </script>

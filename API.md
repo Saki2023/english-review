@@ -221,17 +221,19 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 }
 ```
 
-`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。AI 超时配置范围为 1 至 120 秒，默认 30 秒。
-
-询问当前题目：
+题目问答请求中的 `reasoningEffort` 是问答窗口自己的强度，不跟随生成题组时使用的强度，并会按账号保存：
 
 ```json
 {
   "setId": "当前题组 ID",
   "questionId": "当前题目 ID",
-  "message": "为什么这里使用 on？"
+  "historyId": "询问历史题时发送该记录 ID，否则留空",
+  "message": "这个句子应该先看哪里？",
+  "reasoningEffort": "medium"
 }
 ```
+
+`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。AI 超时配置范围为 1 至 120 秒，默认 30 秒。
 
 服务端从当前账号状态读取题目，不接受客户端伪造的参考答案。每个当前题目最多保留最近 12 条问答消息。
 
