@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body>
   <div class="app-shell">
@@ -244,20 +244,24 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js"></script>
-  <script src="data.js"></script>
+  <script src="vendor/lucide.min.js?v=5"></script>
+  <script src="data.js?v=5"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
         try {
-          const response = await fetch("/api/content", { cache: "no-store" });
+          const response = await fetch("/api/content", { cache: "no-store", signal: controller.signal });
           if (response.ok) window.ENGLISH_REVIEW_DATA = await response.json();
         } catch (_) {
           // Keep the bundled data as a fallback when the API is temporarily unavailable.
+        } finally {
+          clearTimeout(timeout);
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js";
+      appScript.src = "app.js?v=5";
       document.body.appendChild(appScript);
     })();
   </script>

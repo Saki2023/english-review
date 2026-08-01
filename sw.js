@@ -1,13 +1,13 @@
-const CACHE_NAME = "daily-english-review-v4";
+const CACHE_NAME = "daily-english-review-v5";
 const APP_SHELL = [
   "/",
   "/index.html",
-  "/styles.css",
-  "/data.js",
-  "/app.js",
+  "/styles.css?v=5",
+  "/data.js?v=5",
+  "/app.js?v=5",
   "/manifest.webmanifest",
   "/icon.svg",
-  "/vendor/lucide.min.js"
+  "/vendor/lucide.min.js?v=5"
 ];
 
 self.addEventListener("install", event => {
@@ -26,5 +26,5 @@ self.addEventListener("fetch", event => {
     event.respondWith(fetch(request).then(response => { const copy = response.clone(); caches.open(CACHE_NAME).then(cache => cache.put("/index.html", copy)); return response; }).catch(() => caches.match("/index.html")));
     return;
   }
-  event.respondWith(caches.match(request).then(cached => cached || fetch(request).then(response => { const copy = response.clone(); caches.open(CACHE_NAME).then(cache => cache.put(request, copy)); return response; })));
+  event.respondWith(fetch(request).then(response => { const copy = response.clone(); caches.open(CACHE_NAME).then(cache => cache.put(request, copy)); return response; }).catch(() => caches.match(request)));
 });
