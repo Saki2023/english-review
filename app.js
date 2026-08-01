@@ -2,7 +2,7 @@
   "use strict";
 
   const DATA = window.ENGLISH_REVIEW_DATA;
-  const { chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish } = window.ENGLISH_REVIEW_ANSWER_UTILS;
+  const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const STORAGE_KEY = "daily-english-review-v1";
   const DAILY_TARGET = 10;
   const INTERVALS = [1, 3, 7, 14, 30, 60];
@@ -491,6 +491,17 @@
     setView("home");
   }
 
+  function practiceMistakeQueue(taskId) {
+    const taskIds = buildMistakePracticeQueue(mistakeRows(), taskId, taskById.keys());
+    if (!taskIds.length) return;
+    const today = localDate();
+    reviewMode = "all";
+    model.sessions[today] = { date: today, mode: reviewMode, taskIds, index: 0, doneTaskIds: [], currentTaskId: taskIds[0], batchComplete: false };
+    saveModel();
+    $$("[data-mode]").forEach(button => { const active = button.dataset.mode === reviewMode; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
+    setView("home");
+  }
+
   function renderLibrary() {
     const search = normalizeChinese($("#librarySearch").value || "");
     const day = $("#dayFilter").value;
@@ -514,7 +525,7 @@
     $("#mistakeCount").textContent = `${rows.length} 条`;
     $("#mistakeBody").innerHTML = rows.map(row => `<tr><td>${escapeHtml(row.prompt)}</td><td>${escapeHtml(row.userAnswer)}</td><td>${escapeHtml(row.correctAnswer)}</td><td class="day-cell">第 ${row.day} 天</td><td><button class="table-action" type="button" data-mistake-task="${escapeHtml(row.taskId)}">再练</button></td></tr>`).join("");
     $("#mistakeEmpty").hidden = rows.length > 0;
-    $$('[data-mistake-task]').forEach(button => button.addEventListener("click", () => practiceTask(button.dataset.mistakeTask)));
+    $$('[data-mistake-task]').forEach(button => button.addEventListener("click", () => practiceMistakeQueue(button.dataset.mistakeTask)));
   }
 
   function renderProgress() {
@@ -579,7 +590,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=8").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=9").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

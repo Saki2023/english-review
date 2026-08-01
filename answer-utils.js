@@ -29,5 +29,21 @@
     return Boolean(normalized && acceptedAnswers.some(expected => normalizeChinese(expected) === normalized));
   }
 
-  return { chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish };
+  function buildMistakePracticeQueue(rows, startTaskId, validTaskIds) {
+    const filterKnownTasks = validTaskIds != null;
+    const valid = new Set(validTaskIds || []);
+    const seen = new Set();
+    const taskIds = [];
+    (Array.isArray(rows) ? rows : []).forEach(row => {
+      const taskId = String(row && row.taskId || "");
+      if (!taskId || seen.has(taskId) || (filterKnownTasks && !valid.has(taskId))) return;
+      seen.add(taskId);
+      taskIds.push(taskId);
+    });
+    const startIndex = taskIds.indexOf(String(startTaskId || ""));
+    if (startIndex < 0) return [];
+    return [...taskIds.slice(startIndex), ...taskIds.slice(0, startIndex)];
+  }
+
+  return { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish };
 });
