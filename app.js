@@ -23,6 +23,8 @@
   let model = loadModel();
   let toastTimer;
   let gradingInProgress = false;
+  let aiRequestInProgress = false;
+  let aiOptions = { configured: false, models: [], defaultModel: "", efforts: ["low", "medium", "high"], admin: false };
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -47,6 +49,21 @@
 
   function storageKey() { return currentUser && currentUser.id ? `${STORAGE_KEY}-${currentUser.id}` : STORAGE_KEY; }
 
+  function normalizeClientAiPractice(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
+    return {
+      settings: {
+        model: String(settings.model || ""),
+        reasoningEffort: ["low", "medium", "high"].includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
+        count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
+      },
+      currentSet: source.currentSet && Array.isArray(source.currentSet.questions) ? source.currentSet : null,
+      history: Array.isArray(source.history) ? source.history.slice(-120) : [],
+      updatedAt: String(source.updatedAt || "")
+    };
+  }
+
   function loadModel() {
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem(storageKey()) || "null"); } catch (_) { saved = null; }
@@ -55,6 +72,7 @@
     next.history = next.history || {};
     next.attempts = Array.isArray(next.attempts) ? next.attempts : [];
     next.sessions = next.sessions || {};
+    next.aiPractice = normalizeClientAiPractice(next.aiPractice);
     next.schema = 1;
     allItems.forEach(item => (item.directions || ["en-zh"]).forEach(direction => {
       const taskId = `${item.id}:${direction}`;
@@ -88,7 +106,8 @@
       history: { ...local.history },
       sessions: { ...local.sessions },
       attempts: [...(local.attempts || [])],
-      mistakes: [...(local.mistakes || [])]
+      mistakes: [...(local.mistakes || [])],
+      aiPractice: String(remote && remote.aiPractice && remote.aiPractice.updatedAt || "") >= String(local.aiPractice && local.aiPractice.updatedAt || "") ? normalizeClientAiPractice(remote.aiPractice) : normalizeClientAiPractice(local.aiPractice)
     };
     Object.entries(remoteTaskStates).forEach(([taskId, remoteState]) => {
       const localState = merged.taskStates[taskId];
@@ -148,6 +167,7 @@
     $("#resetButton").hidden = false;
     $("#userBadge").textContent = currentUser ? currentUser.username : "本机模式";
     $("#logoutButton").hidden = !API_ENABLED;
+    $("#openAiConfigButton").hidden = !currentUser || currentUser.role !== "admin";
     refreshIcons();
   }
 
@@ -187,6 +207,7 @@
       showAppView();
       bindAppEvents();
       renderHome();
+      loadAiOptions();
       syncRemoteState();
     } catch (_) { setAuthFeedback("无法连接服务器，请检查网络"); }
     finally { submit.disabled = false; }
@@ -207,6 +228,332 @@
   }
 
   function formatDirection(direction) { return direction === "en-zh" ? "英译中" : "中译英"; }
+
+  function selectedAiSettings() {
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    const modelName = aiOptions.models.includes(practice.settings.model) ? practice.settings.model : aiOptions.defaultModel;
+    return { model: modelName, reasoningEffort: practice.settings.reasoningEffort, count: practice.settings.count };
+  }
+
+  function updateAiPreferences(patch) {
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    practice.settings = { ...practice.settings, ...patch };
+    practice.updatedAt = new Date().toISOString();
+    model.aiPractice = practice;
+    saveModel();
+  }
+
+  function populateAiModelSelect() {
+    const select = $("#aiModelSelect");
+    const settings = selectedAiSettings();
+    select.replaceChildren(...aiOptions.models.map(modelName => {
+      const option = document.createElement("option");
+      option.value = modelName;
+      option.textContent = modelName;
+      return option;
+    }));
+    if (settings.model) select.value = settings.model;
+    select.disabled = !aiOptions.configured || !aiOptions.models.length;
+    $("#aiQuestionCount").value = String(settings.count);
+    $$('[data-ai-effort]').forEach(button => {
+      const active = button.dataset.aiEffort === settings.reasoningEffort;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.disabled = !aiOptions.configured;
+    });
+    $("#generateAiQuestions").disabled = !aiOptions.configured || aiRequestInProgress;
+  }
+
+  async function loadAiOptions() {
+    if (!API_ENABLED) {
+      aiOptions = { configured: false, models: [], defaultModel: "", efforts: ["low", "medium", "high"], admin: false };
+      renderAiView();
+      return;
+    }
+    try {
+      const response = await fetch("/api/ai/options", { credentials: "same-origin", cache: "no-store" });
+      if (!response.ok) throw new Error("AI options request failed");
+      aiOptions = await response.json();
+      const practice = normalizeClientAiPractice(model.aiPractice);
+      if (!aiOptions.models.includes(practice.settings.model)) practice.settings.model = aiOptions.selectedModel || aiOptions.defaultModel || "";
+      if (["low", "medium", "high"].includes(aiOptions.selectedEffort) && !practice.updatedAt) practice.settings.reasoningEffort = aiOptions.selectedEffort;
+      if ([5, 10].includes(Number(aiOptions.selectedCount)) && !practice.updatedAt) practice.settings.count = Number(aiOptions.selectedCount);
+      model.aiPractice = practice;
+    } catch (_) {
+      aiOptions = { configured: false, models: [], defaultModel: "", efforts: ["low", "medium", "high"], admin: Boolean(currentUser && currentUser.role === "admin") };
+    }
+    populateAiModelSelect();
+    renderAiView();
+  }
+
+  function currentAiQuestion() {
+    const set = model.aiPractice && model.aiPractice.currentSet;
+    return set && Array.isArray(set.questions) ? set.questions[Number(set.index) || 0] : null;
+  }
+
+  function aiCorrectAnswer(question) { return question.direction === "zh-en" ? question.english : question.chinese; }
+
+  function renderAiFeedback(question) {
+    const feedback = $("#aiFeedback");
+    if (typeof question.correct !== "boolean") {
+      feedback.hidden = true;
+      $("#aiFeedbackActions").hidden = true;
+      return;
+    }
+    feedback.hidden = false;
+    feedback.className = `feedback ${question.correct ? "is-correct" : "is-wrong"}`;
+    feedback.innerHTML = `<span class="feedback-title">${question.correct ? "答对了" : "再看一次"}</span><span class="feedback-answer">正确答案：${escapeHtml(aiCorrectAnswer(question))}</span>${question.correct ? "" : `<span class="feedback-note">你的答案：${escapeHtml(question.userAnswer || "（未填写）")}</span>`}${question.explanation ? `<span class="feedback-note">${escapeHtml(question.explanation)}</span>` : ""}`;
+    $("#aiFeedbackActions").hidden = false;
+    requestAnimationFrame(() => $("#nextAiQuestion").focus({ preventScroll: true }));
+  }
+
+  function renderAiView() {
+    if (!model.aiPractice) model.aiPractice = normalizeClientAiPractice(null);
+    populateAiModelSelect();
+    $("#openAiConfigButton").hidden = !currentUser || currentUser.role !== "admin";
+    $("#aiStatus").textContent = aiOptions.configured ? "AI 已连接" : "AI 尚未配置";
+    const empty = $("#aiEmptyState");
+    const panel = $("#aiPracticePanel");
+    const complete = $("#aiPracticeComplete");
+    if (!aiOptions.configured) {
+      empty.hidden = false; panel.hidden = true; complete.hidden = true;
+      $("#aiEmptyTitle").textContent = currentUser && currentUser.role === "admin" ? "请先完成 AI 连接设置" : "AI 尚未配置";
+      return;
+    }
+
+    const set = model.aiPractice.currentSet;
+    if (!set) {
+      empty.hidden = false; panel.hidden = true; complete.hidden = true;
+      $("#aiEmptyTitle").textContent = "准备生成题目";
+      return;
+    }
+    if (set.completed || Number(set.index) >= set.questions.length) {
+      set.completed = true;
+      empty.hidden = true; panel.hidden = true; complete.hidden = false;
+      const correct = set.questions.filter(question => question.correct === true).length;
+      $("#aiCompleteNote").textContent = `答对 ${correct} / ${set.questions.length} 题`;
+      return;
+    }
+
+    const question = currentAiQuestion();
+    if (!question) return;
+    empty.hidden = true; panel.hidden = false; complete.hidden = true;
+    $("#aiFocusBadge").textContent = question.focus || "巩固练习";
+    $("#aiModelReadout").textContent = `${set.model} · ${{ low: "低", medium: "中", high: "高" }[set.reasoningEffort] || "中"}`;
+    $("#aiQuestionProgress").textContent = `${Number(set.index) + 1} / ${set.questions.length}`;
+    $("#aiDirectionLabel").textContent = formatDirection(question.direction);
+    $("#aiPromptText").textContent = question.direction === "en-zh" ? question.english : question.chinese;
+    $("#aiAnswerInput").value = question.userAnswer || "";
+    $("#aiAnswerInput").placeholder = question.direction === "en-zh" ? "输入中文答案" : "输入英文答案";
+    const answered = typeof question.correct === "boolean";
+    $("#aiAnswerInput").disabled = answered || aiRequestInProgress;
+    $("#submitAiAnswer").disabled = answered || aiRequestInProgress;
+    renderAiFeedback(question);
+    if (!answered) requestAnimationFrame(() => $("#aiAnswerInput").focus());
+    refreshIcons();
+  }
+
+  function setBusyButton(button, busy, label) {
+    if (busy) {
+      button.dataset.idleHtml = button.innerHTML;
+      button.textContent = label;
+      button.disabled = true;
+    } else if (button.dataset.idleHtml) {
+      button.innerHTML = button.dataset.idleHtml;
+      delete button.dataset.idleHtml;
+      button.disabled = false;
+      refreshIcons();
+    }
+  }
+
+  async function responseJson(response) {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "请求失败，请稍后重试");
+    return data;
+  }
+
+  async function generateAiQuestions() {
+    if (aiRequestInProgress || !aiOptions.configured) return;
+    const button = $("#generateAiQuestions");
+    const settings = {
+      model: $("#aiModelSelect").value,
+      reasoningEffort: $$('[data-ai-effort]').find(item => item.classList.contains("is-selected"))?.dataset.aiEffort || "medium",
+      count: Number($("#aiQuestionCount").value) || 5
+    };
+    updateAiPreferences(settings);
+    aiRequestInProgress = true;
+    setBusyButton(button, true, "正在生成…");
+    $("#aiStatus").textContent = "正在分析学习进度…";
+    try {
+      const response = await fetch("/api/ai/questions/generate", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings)
+      });
+      const data = await responseJson(response);
+      const practice = normalizeClientAiPractice(model.aiPractice);
+      practice.settings = data.settings;
+      practice.currentSet = data.set;
+      practice.updatedAt = new Date().toISOString();
+      model.aiPractice = practice;
+      saveModel();
+      $("#aiStatus").textContent = "题目已生成";
+    } catch (error) {
+      $("#aiStatus").textContent = error.message;
+      showToast(error.message);
+    } finally {
+      aiRequestInProgress = false;
+      setBusyButton(button, false, "");
+      renderAiView();
+    }
+  }
+
+  async function submitAiAnswer(event) {
+    event.preventDefault();
+    if (aiRequestInProgress) return;
+    const set = model.aiPractice && model.aiPractice.currentSet;
+    const question = currentAiQuestion();
+    const answer = $("#aiAnswerInput").value.trim();
+    if (!set || !question || !answer) return;
+    aiRequestInProgress = true;
+    setBusyButton($("#submitAiAnswer"), true, "AI 正在判断…");
+    $("#aiAnswerInput").disabled = true;
+    try {
+      const response = await fetch("/api/ai/questions/grade", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ setId: set.id, questionId: question.id, answer })
+      });
+      const data = await responseJson(response);
+      model.aiPractice = normalizeClientAiPractice(data.practice);
+      saveModel();
+    } catch (error) {
+      showToast(error.message);
+      $("#aiAnswerInput").disabled = false;
+    } finally {
+      aiRequestInProgress = false;
+      setBusyButton($("#submitAiAnswer"), false, "");
+      renderAiView();
+    }
+  }
+
+  function advanceAiQuestion() {
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    const set = practice.currentSet;
+    if (!set) return;
+    const question = set.questions[Number(set.index) || 0];
+    if (!question || typeof question.correct !== "boolean") return;
+    set.index = (Number(set.index) || 0) + 1;
+    set.completed = set.index >= set.questions.length;
+    practice.updatedAt = new Date().toISOString();
+    model.aiPractice = practice;
+    saveModel();
+    renderAiView();
+  }
+
+  function configModelNames() {
+    return Array.from(new Set($("#aiModels").value.split(/[\n,]/).map(value => value.trim()).filter(Boolean)));
+  }
+
+  function syncDefaultModelOptions(preferred = "") {
+    const select = $("#aiDefaultModel");
+    const current = preferred || select.value;
+    const models = configModelNames();
+    select.replaceChildren(...models.map(modelName => {
+      const option = document.createElement("option");
+      option.value = modelName;
+      option.textContent = modelName;
+      return option;
+    }));
+    if (models.includes(current)) select.value = current;
+  }
+
+  function setAiConfigFeedback(message, error = false) {
+    const feedback = $("#aiConfigFeedback");
+    feedback.textContent = message;
+    feedback.hidden = !message;
+    feedback.classList.toggle("is-error", error);
+  }
+
+  async function openAiConfiguration() {
+    if (!currentUser || currentUser.role !== "admin") return;
+    const dialog = $("#aiConfigDialog");
+    dialog.showModal();
+    setAiConfigFeedback("正在读取配置…");
+    try {
+      const config = await responseJson(await fetch("/api/admin/ai-config", { credentials: "same-origin", cache: "no-store" }));
+      $("#aiBaseUrl").value = config.baseUrl || "";
+      $("#aiApiKey").value = "";
+      $("#aiApiKey").required = !config.hasApiKey;
+      $("#aiApiKey").placeholder = config.hasApiKey ? "已保存，留空则不修改" : "输入 API Key";
+      $("#aiModels").value = (config.models || []).join("\n");
+      syncDefaultModelOptions(config.defaultModel);
+      $("#aiTimeout").value = String(config.timeoutMs || 10000);
+      $("#aiRateLimit").value = String(config.rateLimitPerMinute || 20);
+      setAiConfigFeedback(config.configured ? "配置已保存" : "尚未配置");
+    } catch (error) {
+      setAiConfigFeedback(error.message, true);
+    }
+    refreshIcons();
+  }
+
+  async function saveAiConfiguration(closeAfterSave = false) {
+    const form = $("#aiConfigForm");
+    syncDefaultModelOptions();
+    if (!form.reportValidity()) return null;
+    const body = {
+      baseUrl: $("#aiBaseUrl").value.trim(),
+      apiKey: $("#aiApiKey").value.trim(),
+      models: configModelNames(),
+      defaultModel: $("#aiDefaultModel").value,
+      timeoutMs: Number($("#aiTimeout").value),
+      rateLimitPerMinute: Number($("#aiRateLimit").value)
+    };
+    const config = await responseJson(await fetch("/api/admin/ai-config", {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }));
+    $("#aiApiKey").value = "";
+    $("#aiApiKey").required = false;
+    $("#aiApiKey").placeholder = "已保存，留空则不修改";
+    setAiConfigFeedback("配置已保存");
+    await loadAiOptions();
+    if (closeAfterSave) $("#aiConfigDialog").close();
+    return config;
+  }
+
+  async function submitAiConfiguration(event) {
+    event.preventDefault();
+    const button = event.submitter || $("#aiConfigForm button[type='submit']");
+    setBusyButton(button, true, "正在保存…");
+    try { await saveAiConfiguration(true); }
+    catch (error) { setAiConfigFeedback(error.message, true); }
+    finally { setBusyButton(button, false, ""); }
+  }
+
+  async function testAiConfiguration() {
+    const button = $("#testAiConfigButton");
+    setBusyButton(button, true, "正在测试…");
+    try {
+      const config = await saveAiConfiguration(false);
+      if (!config) return;
+      const result = await responseJson(await fetch("/api/admin/ai-config/test", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: config.defaultModel, reasoningEffort: "medium" })
+      }));
+      setAiConfigFeedback(`连接成功：${result.model}`);
+    } catch (error) {
+      setAiConfigFeedback(error.message, true);
+    } finally {
+      setBusyButton(button, false, "");
+    }
+  }
 
   function todayStats() {
     const history = model.history[localDate()] || { reviewed: 0, correct: 0 };
@@ -301,6 +648,7 @@
       section.hidden = !active;
     });
     if (view === "home") renderHome();
+    if (view === "ai") renderAiView();
     if (view === "library") renderLibrary();
     if (view === "mistakes") renderMistakes();
     if (view === "progress") renderProgress();
@@ -382,13 +730,14 @@
 
   async function requestAiGrade(task, answer) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), 32000);
+    const settings = selectedAiSettings();
     try {
       const response = await fetch("/api/ai/grade", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId: task.taskId, answer }),
+        body: JSON.stringify({ taskId: task.taskId, answer, model: settings.model, reasoningEffort: settings.reasoningEffort }),
         signal: controller.signal
       });
       if (response.status === 401) showAuthView();
@@ -558,7 +907,7 @@
     localStorage.removeItem(storageKey());
     model = loadModel();
     saveModel();
-    renderHome(); renderMistakes(); renderProgress();
+    renderHome(); renderAiView(); renderMistakes(); renderProgress();
     showToast("当前账号复习记录已重置");
   }
 
@@ -580,6 +929,26 @@
     $$("[data-library-type]").forEach(button => button.addEventListener("click", () => { libraryType = button.dataset.libraryType; renderLibrary(); }));
     $("#librarySearch").addEventListener("input", renderLibrary);
     $("#dayFilter").addEventListener("change", renderLibrary);
+    $("#aiModelSelect").addEventListener("change", event => updateAiPreferences({ model: event.target.value }));
+    $$('[data-ai-effort]').forEach(button => button.addEventListener("click", () => {
+      updateAiPreferences({ reasoningEffort: button.dataset.aiEffort });
+      renderAiView();
+    }));
+    $("#aiQuestionCount").addEventListener("change", event => updateAiPreferences({ count: Number(event.target.value) }));
+    $("#generateAiQuestions").addEventListener("click", generateAiQuestions);
+    $("#generateAnotherAiSet").addEventListener("click", generateAiQuestions);
+    $("#aiAnswerForm").addEventListener("submit", submitAiAnswer);
+    $("#nextAiQuestion").addEventListener("click", advanceAiQuestion);
+    $("#nextAiQuestion").addEventListener("keydown", event => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      advanceAiQuestion();
+    });
+    $("#openAiConfigButton").addEventListener("click", openAiConfiguration);
+    $("#closeAiConfigButton").addEventListener("click", () => $("#aiConfigDialog").close());
+    $("#aiConfigForm").addEventListener("submit", submitAiConfiguration);
+    $("#aiModels").addEventListener("input", () => syncDefaultModelOptions());
+    $("#testAiConfigButton").addEventListener("click", testAiConfiguration);
     $("#answerForm").addEventListener("submit", submitAnswer);
     $("#nextButton").addEventListener("click", () => advance(false));
     $("#retryButton").addEventListener("click", () => advance(true));
@@ -590,7 +959,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=9").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=10").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
@@ -606,5 +975,6 @@
   bindAppEvents();
   renderHome();
   refreshIcons();
+  await loadAiOptions();
   syncRemoteState();
 })();

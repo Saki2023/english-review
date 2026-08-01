@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=9">
+  <link rel="stylesheet" href="styles.css?v=10">
 </head>
 <body>
   <div class="app-shell">
@@ -55,6 +55,9 @@
       <nav class="side-nav" aria-label="主要功能">
         <button class="nav-item is-active" type="button" data-view="home" aria-current="page">
           <i data-lucide="layout-dashboard" aria-hidden="true"></i><span>今日复习</span>
+        </button>
+        <button class="nav-item" type="button" data-view="ai" id="aiNavItem">
+          <i data-lucide="sparkles" aria-hidden="true"></i><span>AI 出题</span>
         </button>
         <button class="nav-item" type="button" data-view="library">
           <i data-lucide="library" aria-hidden="true"></i><span>词句库</span>
@@ -141,6 +144,81 @@
               <p id="completeNote">今日目标已完成。</p>
             </div>
             <button class="secondary-button" type="button" id="moreReviewButton">再练 10 题<i data-lucide="arrow-right" aria-hidden="true"></i></button>
+          </div>
+        </section>
+
+        <section class="view" id="view-ai" aria-labelledby="aiTitle" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">AI PRACTICE</p>
+              <h1 id="aiTitle">AI 出题</h1>
+              <p class="heading-note" id="aiStatus">正在读取 AI 配置…</p>
+            </div>
+            <button class="icon-button" type="button" id="openAiConfigButton" data-tooltip="AI 连接设置" aria-label="AI 连接设置" hidden>
+              <i data-lucide="settings-2" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="ai-controls" id="aiControls">
+            <label class="ai-control-field">
+              <span>模型</span>
+              <select id="aiModelSelect" aria-label="选择 AI 模型"></select>
+            </label>
+            <div class="ai-control-field">
+              <span>强度</span>
+              <div class="segmented-control" role="group" aria-label="AI 思考强度">
+                <button type="button" class="segment" data-ai-effort="low" aria-pressed="false">低</button>
+                <button type="button" class="segment is-selected" data-ai-effort="medium" aria-pressed="true">中</button>
+                <button type="button" class="segment" data-ai-effort="high" aria-pressed="false">高</button>
+              </div>
+            </div>
+            <label class="ai-control-field compact-control">
+              <span>题数</span>
+              <select id="aiQuestionCount" aria-label="选择题目数量">
+                <option value="5">5 题</option>
+                <option value="10">10 题</option>
+              </select>
+            </label>
+            <button class="primary-button ai-generate-button" type="button" id="generateAiQuestions">
+              <i data-lucide="sparkles" aria-hidden="true"></i>生成题目
+            </button>
+          </div>
+
+          <div class="ai-state" id="aiEmptyState">
+            <i data-lucide="wand-sparkles" aria-hidden="true"></i>
+            <strong id="aiEmptyTitle">准备生成题目</strong>
+          </div>
+
+          <article class="review-panel" id="aiPracticePanel" hidden>
+            <div class="review-panel-top">
+              <div class="prompt-meta">
+                <span class="type-badge" id="aiFocusBadge">巩固练习</span>
+                <span id="aiModelReadout"></span>
+              </div>
+              <span class="question-count" id="aiQuestionProgress">1 / 5</span>
+            </div>
+            <div class="question-area">
+              <p class="direction-label" id="aiDirectionLabel">英译中</p>
+              <div class="prompt-text" id="aiPromptText">准备中…</div>
+              <form class="answer-form" id="aiAnswerForm">
+                <label class="sr-only" for="aiAnswerInput">你的答案</label>
+                <input id="aiAnswerInput" class="answer-input" type="text" autocomplete="off" spellcheck="false" placeholder="输入答案">
+                <button class="primary-button" id="submitAiAnswer" type="submit"><i data-lucide="arrow-right" aria-hidden="true"></i>提交答案</button>
+              </form>
+              <div class="feedback" id="aiFeedback" aria-live="polite" hidden></div>
+              <div class="feedback-actions" id="aiFeedbackActions" hidden>
+                <button class="primary-button" type="button" id="nextAiQuestion">下一题<i data-lucide="arrow-right" aria-hidden="true"></i></button>
+              </div>
+            </div>
+          </article>
+
+          <div class="review-complete" id="aiPracticeComplete" hidden>
+            <div class="complete-icon" aria-hidden="true"><i data-lucide="check"></i></div>
+            <div>
+              <h2>这一组完成</h2>
+              <p id="aiCompleteNote">本组题目已完成。</p>
+            </div>
+            <button class="secondary-button" type="button" id="generateAnotherAiSet">生成下一组<i data-lucide="sparkles" aria-hidden="true"></i></button>
           </div>
         </section>
 
@@ -242,11 +320,56 @@
     </form>
   </dialog>
 
+  <dialog id="aiConfigDialog" class="settings-dialog">
+    <form id="aiConfigForm">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">ADMIN</p>
+          <h2>AI 连接设置</h2>
+        </div>
+        <button class="icon-button" type="button" id="closeAiConfigButton" aria-label="关闭 AI 连接设置" data-tooltip="关闭">
+          <i data-lucide="x" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div class="settings-fields">
+        <label class="settings-field full-field">
+          <span>Base URL</span>
+          <input id="aiBaseUrl" type="url" required placeholder="https://example.com/v1" autocomplete="url">
+        </label>
+        <label class="settings-field full-field">
+          <span>API Key</span>
+          <input id="aiApiKey" type="password" maxlength="500" autocomplete="new-password">
+        </label>
+        <label class="settings-field full-field">
+          <span>可用模型</span>
+          <textarea id="aiModels" rows="4" required placeholder="每行填写一个模型名"></textarea>
+        </label>
+        <label class="settings-field full-field">
+          <span>默认模型</span>
+          <select id="aiDefaultModel" required></select>
+        </label>
+        <label class="settings-field">
+          <span>超时</span>
+          <div class="number-field"><input id="aiTimeout" type="number" min="1000" max="30000" step="1000" value="10000" required><span>毫秒</span></div>
+        </label>
+        <label class="settings-field">
+          <span>每分钟上限</span>
+          <div class="number-field"><input id="aiRateLimit" type="number" min="1" max="60" step="1" value="20" required><span>次</span></div>
+        </label>
+      </div>
+      <p class="settings-feedback" id="aiConfigFeedback" aria-live="polite" hidden></p>
+      <div class="dialog-actions settings-actions">
+        <button class="secondary-button" type="button" id="testAiConfigButton"><i data-lucide="plug-zap" aria-hidden="true"></i>保存并测试</button>
+        <button class="primary-button" type="submit"><i data-lucide="save" aria-hidden="true"></i>保存</button>
+      </div>
+    </form>
+  </dialog>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=9"></script>
-  <script src="data.js?v=9"></script>
-  <script src="answer-utils.js?v=9"></script>
+  <script src="vendor/lucide.min.js?v=10"></script>
+  <script src="data.js?v=10"></script>
+  <script src="answer-utils.js?v=10"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -262,7 +385,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=9";
+      appScript.src = "app.js?v=10";
       document.body.appendChild(appScript);
     })();
   </script>

@@ -158,4 +158,4 @@ sudo systemctl start english-review-update.service
 
 ## 十、配置 sub2api AI 判题
 
-AI Key 只保存在 VPS 的 `.env`，不会进入网页或 GitHub。Base URL、模型名、重建容器和检查方法见 [AI判题配置.md](AI判题配置.md)。
+登录管理员账号后，在“AI 出题”页面右上角打开设置，直接填写 Base URL、API Key 和模型列表，不需要通过 SSH 修改 `.env`。完整说明见 [AI判题配置.md](AI判题配置.md)。

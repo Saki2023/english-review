@@ -6,7 +6,9 @@ const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
 const { chineseAnswerMatches, englishAnswerMatches } = require("./answer-utils");
-const { createAiGrader, createRateLimiter, loadAiConfig } = require("./server/ai-grader");
+const { createAiConnectionTester, createAiGrader, createAiQuestionGenerator, createRateLimiter } = require("./server/ai-grader");
+const { buildLearningProfile, createQuestionSet, sanitizeAiPractice } = require("./server/ai-practice");
+const { createAiSettingsStore, selectAiSettings } = require("./server/ai-settings");
 
 const ROOT = __dirname;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, "server", "data"));
@@ -21,11 +23,11 @@ const APP_TIMEZONE = process.env.TZ || "Asia/Shanghai";
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_AI_ANSWER_LENGTH = 500;
-const aiConfig = loadAiConfig();
-const aiGrader = createAiGrader(aiConfig);
-const takeAiRequest = createRateLimiter(aiConfig.rateLimitPerMinute);
 
 ensureDataDir();
+const aiSettingsStore = createAiSettingsStore(DATA_DIR);
+let aiSettings = aiSettingsStore.load();
+let takeAiRequest = createRateLimiter(aiSettings ? aiSettings.rateLimitPerMinute : 20);
 let content = loadContent();
 let users = loadUsers(DATA_DIR);
 let sessions = loadSessions();
@@ -107,7 +109,8 @@ function sanitizeState(value) {
     history: source.history && typeof source.history === "object" ? source.history : {},
     attempts: Array.isArray(source.attempts) ? source.attempts.slice(-120) : [],
     sessions: source.sessions && typeof source.sessions === "object" ? source.sessions : {},
-    mistakes: Array.isArray(source.mistakes) ? source.mistakes.slice(-80) : []
+    mistakes: Array.isArray(source.mistakes) ? source.mistakes.slice(-80) : [],
+    aiPractice: sanitizeAiPractice(source.aiPractice)
   };
 }
 
@@ -128,6 +131,10 @@ function persistSessions() { writeJson(SESSIONS_FILE, sessions); }
 function persistUserStates() { writeJson(USER_STATES_FILE, userStates); }
 function persistContent() { writeJson(CONTENT_FILE, content); }
 function refreshUsers() { users = loadUsers(DATA_DIR); }
+function refreshAiSettings() {
+  aiSettings = aiSettingsStore.load();
+  takeAiRequest = createRateLimiter(aiSettings ? aiSettings.rateLimitPerMinute : 20);
+}
 
 function createSession(userId) {
   purgeSessions();
@@ -307,10 +314,102 @@ function localSentenceAnswerMatches(task, answer) {
   return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese]);
 }
 
+function aiSelectionForState(state, requested = {}) {
+  const practice = sanitizeAiPractice(state.aiPractice);
+  const model = String(requested.model || practice.settings.model || (aiSettings && aiSettings.defaultModel) || "").trim();
+  const reasoningEffort = ["low", "medium", "high"].includes(requested.reasoningEffort) ? requested.reasoningEffort : practice.settings.reasoningEffort;
+  const count = [5, 10].includes(Number(requested.count)) ? Number(requested.count) : practice.settings.count;
+  const config = selectAiSettings(aiSettings, { model, reasoningEffort });
+  practice.settings = { model: config.model, reasoningEffort: config.reasoningEffort, count };
+  practice.updatedAt = new Date().toISOString();
+  state.aiPractice = practice;
+  return { config, count, practice };
+}
+
+function publicAiOptions(user) {
+  const current = aiSettingsStore.public();
+  const practice = user ? sanitizeAiPractice(getUserState(user).aiPractice) : sanitizeAiPractice(null);
+  const selectedModel = current.models.includes(practice.settings.model) ? practice.settings.model : current.defaultModel;
+  return {
+    configured: current.configured,
+    models: current.models,
+    defaultModel: current.defaultModel,
+    efforts: current.efforts,
+    selectedModel,
+    selectedEffort: practice.settings.reasoningEffort,
+    selectedCount: practice.settings.count,
+    admin: Boolean(user && user.role === "admin")
+  };
+}
+
+async function handleAiAdmin(req, res, url, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (user.role !== "admin") return sendError(res, 403, "admin role required");
+
+  if (url.pathname === "/api/admin/ai-config" && req.method === "GET") return sendJson(res, 200, aiSettingsStore.public());
+  if (url.pathname === "/api/admin/ai-config" && req.method === "PUT") {
+    try {
+      aiSettingsStore.save(await readBody(req));
+      refreshAiSettings();
+      return sendJson(res, 200, aiSettingsStore.public());
+    } catch (error) {
+      return sendError(res, error.statusCode || 400, error.message);
+    }
+  }
+  if (url.pathname === "/api/admin/ai-config/test" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const config = selectAiSettings(aiSettings, body);
+      await createAiConnectionTester(config)();
+      return sendJson(res, 200, { ok: true, model: config.model, reasoningEffort: config.reasoningEffort });
+    } catch (error) {
+      console.warn(`AI connection test failed: ${error && error.message ? error.message : "unknown error"}`);
+      return sendJson(res, 502, { error: "AI connection test failed", providerStatus: Number(error && error.providerStatus) || null });
+    }
+  }
+  return sendError(res, 404, "AI admin endpoint not found");
+}
+
+function aiQuestionMatches(question, answer) {
+  if (question.direction === "zh-en") return englishAnswerMatches(answer, question.acceptedEnglish || [question.english]);
+  return chineseAnswerMatches(answer, question.acceptedChinese || [question.chinese]);
+}
+
+function saveAiQuestionResult(state, setId, questionId, answer, result) {
+  const practice = sanitizeAiPractice(state.aiPractice);
+  const set = practice.currentSet;
+  if (!set || set.id !== setId) throw Object.assign(new Error("AI question set not found"), { statusCode: 404 });
+  const question = set.questions.find(item => item.id === questionId);
+  if (!question) throw Object.assign(new Error("AI question not found"), { statusCode: 404 });
+  const now = new Date().toISOString();
+  question.userAnswer = answer;
+  question.correct = result.correct;
+  question.explanation = result.explanation;
+  question.answeredAt = now;
+  const prompt = question.direction === "en-zh" ? question.english : question.chinese;
+  const correctAnswer = question.direction === "zh-en" ? question.english : question.chinese;
+  const historyId = `${set.id}:${question.id}`;
+  practice.history = [...practice.history.filter(item => item.id !== historyId), {
+    id: historyId,
+    date: today(),
+    direction: question.direction,
+    prompt,
+    userAnswer: answer,
+    correctAnswer,
+    correct: result.correct,
+    focus: question.focus,
+    explanation: result.explanation
+  }].slice(-120);
+  practice.updatedAt = now;
+  state.aiPractice = practice;
+  persistUserStates();
+  return question;
+}
+
 async function handleAiGrade(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI endpoint not found");
-  if (!aiGrader.configured) return sendError(res, 503, "AI grading is not configured");
+  if (!aiSettings) return sendError(res, 503, "AI grading is not configured");
 
   try {
     const body = await readBody(req);
@@ -328,14 +427,79 @@ async function handleAiGrade(req, res, user) {
       return sendJson(res, 429, { error: "AI grading rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
     }
 
+    const state = getUserState(user);
+    const selection = aiSelectionForState(state, body);
+    persistUserStates();
     const acceptedAnswers = task.direction === "zh-en" ? (task.item.acceptedEnglish || [task.item.english]) : (task.item.acceptedChinese || [task.item.chinese]);
     const sourceText = task.direction === "zh-en" ? task.item.chinese : task.item.english;
-    const result = await aiGrader.grade({ answer, acceptedAnswers, direction: task.direction, sourceText });
+    const result = await createAiGrader(selection.config).grade({ answer, acceptedAnswers, direction: task.direction, sourceText });
     return sendJson(res, 200, { ...result, source: "ai" });
   } catch (error) {
     if (error && [400, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI grading failed: ${error && error.message ? error.message : "unknown error"}`);
     return sendError(res, 503, "AI grading is temporarily unavailable");
+  }
+}
+
+async function handleAiGenerate(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "POST") return sendError(res, 404, "AI generation endpoint not found");
+  if (!aiSettings) return sendError(res, 503, "AI is not configured");
+  try {
+    const body = await readBody(req);
+    const state = getUserState(user);
+    const selection = aiSelectionForState(state, body);
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+    refreshContent();
+    const profile = buildLearningProfile(content, state, today());
+    if (!profile.allowedWords.length) return sendError(res, 409, "no learned words are available");
+    const questions = await createAiQuestionGenerator(selection.config).generate(profile, selection.count);
+    const set = createQuestionSet(questions, selection.config);
+    selection.practice.currentSet = set;
+    selection.practice.updatedAt = new Date().toISOString();
+    state.aiPractice = selection.practice;
+    persistUserStates();
+    return sendJson(res, 201, { set, settings: selection.practice.settings });
+  } catch (error) {
+    if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+    console.warn(`AI question generation failed: ${error && error.message ? error.message : "unknown error"}`);
+    return sendError(res, 503, "AI question generation is temporarily unavailable");
+  }
+}
+
+async function handleAiQuestionGrade(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "POST") return sendError(res, 404, "AI question endpoint not found");
+  if (!aiSettings) return sendError(res, 503, "AI is not configured");
+  try {
+    const body = await readBody(req);
+    const answer = String(body.answer || "").trim();
+    if (!answer) return sendError(res, 400, "answer is required");
+    if (answer.length > MAX_AI_ANSWER_LENGTH) return sendError(res, 400, "answer is too long");
+    const state = getUserState(user);
+    const practice = sanitizeAiPractice(state.aiPractice);
+    const set = practice.currentSet;
+    if (!set || set.id !== body.setId) return sendError(res, 404, "AI question set not found");
+    const question = set.questions.find(item => item.id === body.questionId);
+    if (!question) return sendError(res, 404, "AI question not found");
+
+    let result = { correct: aiQuestionMatches(question, answer), explanation: "本地规则判定。", source: "local" };
+    if (!result.correct) {
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+      const requestedModel = aiSettings.models.includes(set.model) ? set.model : aiSettings.defaultModel;
+      const config = selectAiSettings(aiSettings, { model: requestedModel, reasoningEffort: set.reasoningEffort });
+      const acceptedAnswers = question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese;
+      const sourceText = question.direction === "zh-en" ? question.chinese : question.english;
+      result = { ...(await createAiGrader(config).grade({ answer, acceptedAnswers, direction: question.direction, sourceText })), source: "ai" };
+    }
+    const savedQuestion = saveAiQuestionResult(state, set.id, question.id, answer, result);
+    return sendJson(res, 200, { ...result, question: savedQuestion, practice: state.aiPractice });
+  } catch (error) {
+    if (error && [400, 404, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+    console.warn(`AI question grading failed: ${error && error.message ? error.message : "unknown error"}`);
+    return sendError(res, 503, "AI question grading is temporarily unavailable");
   }
 }
 
@@ -352,11 +516,15 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`); const user = getRequestUser(req);
   if (req.method === "OPTIONS") { setCommonHeaders(res); res.writeHead(204); return res.end(); }
   if (url.pathname.startsWith("/api/auth/")) return handleAuth(req, res, url);
+  if (url.pathname.startsWith("/api/admin/ai-config")) return handleAiAdmin(req, res, url, user);
   if (url.pathname === "/api/health" && req.method === "GET") {
     refreshUsers();
-    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, authRequired: true, aiGrading: aiGrader.configured, time: new Date().toISOString() });
+    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, authRequired: true, aiGrading: Boolean(aiSettings), time: new Date().toISOString() });
   }
+  if (url.pathname === "/api/ai/options" && req.method === "GET") return user ? sendJson(res, 200, publicAiOptions(user)) : sendError(res, 401, "login required");
   if (url.pathname === "/api/ai/grade") return handleAiGrade(req, res, user);
+  if (url.pathname === "/api/ai/questions/generate") return handleAiGenerate(req, res, user);
+  if (url.pathname === "/api/ai/questions/grade") return handleAiQuestionGrade(req, res, user);
   if (url.pathname === "/api/export" && req.method === "GET") return user ? sendJson(res, 200, { content, state: getUserState(user), user: publicUser(user) }) : sendError(res, 401, "login required");
   if (url.pathname === "/api/state") return handleState(req, res, user);
   if (url.pathname === "/api/content" || url.pathname.startsWith("/api/content/")) return handleContent(req, res, url, user);

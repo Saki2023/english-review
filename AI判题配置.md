@@ -1,92 +1,60 @@
-# sub2api AI 判题配置
+# 网页配置 sub2api 与 AI 出题
 
-AI 只用于本地规则无法确定的句子翻译。单词仍使用严格的本地判题，已经被本地规则接受的句子也不会调用 AI。
+AI 的 Base URL、Key、模型和调用限制全部在网页中配置，不需要通过 SSH 修改 `.env`。
 
-## 一、准备信息
+## 管理员配置
 
-需要准备以下三项：
+1. 登录英语复习软件的管理员账号。
+2. 打开“AI 出题”。
+3. 点击页面右上角的设置图标。
+4. 填写 Base URL、API Key 和可用模型。
+5. 点击“保存并测试”。
 
-- sub2api 的 OpenAI 兼容 Base URL，例如 `https://你的-sub2api-域名/v1`
-- sub2api Key
-- sub2api 中可以使用的模型名
+配置字段：
 
-不要把 Key 发到聊天窗口，也不要写入 GitHub。Key 只保存在 VPS 的 `/opt/english-review/.env`。
+- `Base URL`：sub2api 的 OpenAI 兼容地址，例如 `https://你的-sub2api-域名/v1`。
+- `API Key`：sub2api Key。已保存后输入框会清空，留空表示不修改原 Key。
+- `可用模型`：每行一个模型名，填写 sub2api 实际支持的模型 ID。
+- `默认模型`：普通 AI 判题和首次进入 AI 出题时使用的模型。
+- `超时`：上游请求最长等待时间，范围为 1 至 30 秒。
+- `每分钟上限`：每个账号每分钟最多发起的 AI 请求，范围为 1 至 60 次。
 
-如果 sub2api 在同一台 VPS 上，仍建议填写它的公网 HTTPS Base URL。不要填写 `http://127.0.0.1:8080`，因为在 `english-review` 容器中，`127.0.0.1` 指向英语软件自身，不是 sub2api 容器。
-
-## 二、修改 VPS 配置
-
-通过 SSH 运行：
-
-```bash
-cd /opt/english-review
-nano .env
-```
-
-在原有配置下面增加：
+Key 只从浏览器通过 HTTPS 发送到英语软件服务器，保存于：
 
 ```text
-AI_BASE_URL=https://你的-sub2api-域名/v1
-AI_API_KEY=你的-sub2api-key
-AI_MODEL=你平时使用的模型名
-AI_TIMEOUT_MS=10000
-AI_RATE_LIMIT_PER_MINUTE=20
+/opt/english-review/server/data/ai-settings.json
 ```
 
-说明：
+该文件位于 Docker 持久化目录，权限为 `0600`，不会进入 GitHub，也不会在任何读取接口中返回 Key。自动更新备份会和其他账号数据一起备份它。
 
-- `AI_BASE_URL` 可以填写到 `/v1`，程序会自动请求 `/v1/chat/completions`。
-- `AI_TIMEOUT_MS` 默认 10 秒，允许范围是 1 至 30 秒。
-- `AI_RATE_LIMIT_PER_MINUTE` 是每个登录账号每分钟最多调用次数，默认 20 次。
-- `.env` 已被 Git 忽略，自动更新不会覆盖它。
+## 模型与强度
 
-修改后保持仅 root 可读：
+“AI 出题”页面可以为当前账号选择模型和强度：
 
-```bash
-chmod 600 /opt/english-review/.env
-```
+- `低`：优先速度，适合简单翻译和日常复习。
+- `中`：速度与判断质量的平衡，默认选择。
+- `高`：用于更难的句子，通常响应更慢。
 
-## 三、重建容器
+强度使用 OpenAI 兼容的 `reasoning_effort` 参数。部分 sub2api 上游模型不支持该参数；遇到兼容错误时，服务器会自动移除强度参数后重试。
 
-```bash
-cd /opt/english-review
-docker compose -f docker-compose.vps.yml up -d --build
-docker compose -f docker-compose.vps.yml ps
-```
+模型和强度选择按账号保存。普通复习中的 AI 判题也会使用该账号最后选择的模型和强度。
 
-检查 AI 是否启用：
+## AI 出题依据
 
-```bash
-curl -s https://english.6584285.xyz/api/health
-```
+服务器会向所选模型提供以下学习数据：
 
-返回内容中应包含：
+- 已经学过的单词和句型
+- 单词与句子的熟练等级
+- 近期错题和正确答案
+- 最近普通复习正确率
+- 最近 AI 练习结果
 
-```json
-"aiGrading": true
-```
+生成的英文题目会经过服务器校验，只允许使用已经学过的英语词汇。未来日期的课程不会提前进入出题范围。
 
-如果是 `false`，说明 `AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL` 至少有一项没有传入容器，或 Base URL 格式无效。检查变量是否存在时不要输出 Key 内容：
+## 安全边界
 
-```bash
-docker compose -f docker-compose.vps.yml exec english-review node -e "console.log({baseUrl:Boolean(process.env.AI_BASE_URL),apiKey:Boolean(process.env.AI_API_KEY),model:process.env.AI_MODEL||''})"
-```
-
-查看服务日志：
-
-```bash
-docker compose -f docker-compose.vps.yml logs --tail=100 english-review
-```
-
-日志只记录超时或 HTTP 状态，不会打印 Key。
-
-## 四、判题方式
-
-```text
-本地规则已答对 -> 直接通过，不消耗 AI
-单词答错 -> 按本地严格规则判错
-句子不完全匹配 -> AI 判断意思是否相同并给出中文说明
-AI 超时、限流或不可用 -> 自动退回本地判题，学习记录仍会保存
-```
-
-AI 只能通过已登录的账号调用。网页不会获得 sub2api Key，健康接口也只显示 AI 是否启用。
+- 只有管理员能查看和修改 AI 连接设置。
+- 普通账号只能选择管理员允许的模型。
+- 网页无法读取已保存的 Key。
+- 生成题和 AI 练习历史按账号隔离。
+- 不要把真实 API Key 发到聊天窗口或提交到 GitHub。

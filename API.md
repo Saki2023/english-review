@@ -169,4 +169,27 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 }
 ```
 
-服务端 sub2api 设置见 [AI判题配置.md](AI判题配置.md)。不要向这个接口发送 `AI_API_KEY`，也不要把 Key 放入前端代码。
+服务端 sub2api 设置见 [AI判题配置.md](AI判题配置.md)。不要向判题或出题接口发送 `API Key`。
+
+## AI 配置与出题接口
+
+| 方法 | 路径 | 权限 | 用途 |
+|---|---|---|---|
+| GET | `/api/ai/options` | 已登录 | 获取允许使用的模型、强度和当前账号选择 |
+| PUT | `/api/admin/ai-config` | 管理员 | 保存 Base URL、Key、模型和调用限制 |
+| GET | `/api/admin/ai-config` | 管理员 | 获取脱敏后的配置；响应永远不包含 Key |
+| POST | `/api/admin/ai-config/test` | 管理员 | 使用已保存配置测试模型连接 |
+| POST | `/api/ai/questions/generate` | 已登录 | 根据当前账号进度生成 5 或 10 道题 |
+| POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
+
+生成题目请求：
+
+```json
+{
+  "model": "管理员允许的模型 ID",
+  "reasoningEffort": "medium",
+  "count": 5
+}
+```
+
+`reasoningEffort` 允许 `low`、`medium`、`high`。模型必须位于管理员网页配置的允许列表中。
