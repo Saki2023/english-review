@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=10">
+  <link rel="stylesheet" href="styles.css?v=11">
 </head>
 <body>
   <div class="app-shell">
@@ -154,8 +154,8 @@
               <h1 id="aiTitle">AI 出题</h1>
               <p class="heading-note" id="aiStatus">正在读取 AI 配置…</p>
             </div>
-            <button class="icon-button" type="button" id="openAiConfigButton" data-tooltip="AI 连接设置" aria-label="AI 连接设置" hidden>
-              <i data-lucide="settings-2" aria-hidden="true"></i>
+            <button class="secondary-button ai-settings-button" type="button" id="openAiConfigButton" aria-label="AI 连接设置" hidden>
+              <i data-lucide="settings-2" aria-hidden="true"></i><span>AI 设置</span>
             </button>
           </div>
 
@@ -340,10 +340,24 @@
           <span>API Key</span>
           <input id="aiApiKey" type="password" maxlength="500" autocomplete="new-password">
         </label>
-        <label class="settings-field full-field">
-          <span>可用模型</span>
-          <textarea id="aiModels" rows="4" required placeholder="每行填写一个模型名"></textarea>
-        </label>
+        <div class="settings-field full-field model-settings-field">
+          <div class="settings-field-heading">
+            <label for="aiCustomModel">模型白名单</label>
+            <button class="secondary-button model-sync-button" type="button" id="fetchAiModelsButton">
+              <i data-lucide="refresh-cw" aria-hidden="true"></i>获取上游模型
+            </button>
+          </div>
+          <div class="model-list" id="aiModelList" role="list" aria-label="已选择的模型"></div>
+          <div class="model-list-meta">
+            <span id="aiModelCount" aria-live="polite">0 个模型</span>
+            <span>可移除不需要的模型</span>
+          </div>
+          <div class="model-add-row">
+            <input id="aiCustomModel" type="text" maxlength="120" placeholder="输入自定义模型名称" autocomplete="off">
+            <button class="secondary-button" type="button" id="addAiModelButton"><i data-lucide="plus" aria-hidden="true"></i>添加</button>
+          </div>
+          <textarea id="aiModels" hidden aria-hidden="true"></textarea>
+        </div>
         <label class="settings-field full-field">
           <span>默认模型</span>
           <select id="aiDefaultModel" required></select>
@@ -367,9 +381,9 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=10"></script>
-  <script src="data.js?v=10"></script>
-  <script src="answer-utils.js?v=10"></script>
+  <script src="vendor/lucide.min.js?v=11"></script>
+  <script src="data.js?v=11"></script>
+  <script src="answer-utils.js?v=11"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -385,7 +399,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=10";
+      appScript.src = "app.js?v=11";
       document.body.appendChild(appScript);
     })();
   </script>

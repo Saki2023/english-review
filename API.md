@@ -178,6 +178,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | GET | `/api/ai/options` | 已登录 | 获取允许使用的模型、强度和当前账号选择 |
 | PUT | `/api/admin/ai-config` | 管理员 | 保存 Base URL、Key、模型和调用限制 |
 | GET | `/api/admin/ai-config` | 管理员 | 获取脱敏后的配置；响应永远不包含 Key |
+| POST | `/api/admin/ai-config/models` | 管理员 | 使用当前或已保存的连接信息获取上游模型列表，不保存配置 |
 | POST | `/api/admin/ai-config/test` | 管理员 | 使用已保存配置测试模型连接 |
 | POST | `/api/ai/questions/generate` | 已登录 | 根据当前账号进度生成 5 或 10 道题 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
@@ -193,3 +194,5 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 ```
 
 `reasoningEffort` 允许 `low`、`medium`、`high`。模型必须位于管理员网页配置的允许列表中。
+
+获取上游模型时可发送 `baseUrl`、`apiKey` 和 `timeoutMs`。`apiKey` 留空时使用服务器已保存的 Key；响应只包含模型 ID 和数量，不返回 Key。服务端请求 OpenAI 兼容的 `GET /v1/models`。

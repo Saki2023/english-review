@@ -1,19 +1,34 @@
 "use strict";
 
 const MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024;
+const MAX_MODEL_RESPONSE_BYTES = 512 * 1024;
 
-function buildChatCompletionsUrl(baseUrl) {
+function normalizeProviderUrl(baseUrl) {
   const url = new URL(String(baseUrl || "").trim());
   if (!["http:", "https:"].includes(url.protocol)) throw new Error("Base URL must use http or https");
   url.username = "";
   url.password = "";
   url.search = "";
   url.hash = "";
+  return url;
+}
 
+function buildChatCompletionsUrl(baseUrl) {
+  const url = normalizeProviderUrl(baseUrl);
   const pathname = url.pathname.replace(/\/+$/, "");
   if (pathname.endsWith("/chat/completions")) url.pathname = pathname;
   else if (!pathname) url.pathname = "/v1/chat/completions";
   else url.pathname = `${pathname}/chat/completions`;
+  return url.toString();
+}
+
+function buildModelsUrl(baseUrl) {
+  const url = normalizeProviderUrl(baseUrl);
+  let pathname = url.pathname.replace(/\/+$/, "");
+  if (pathname.endsWith("/chat/completions")) pathname = pathname.slice(0, -"/chat/completions".length);
+  if (pathname.endsWith("/models")) url.pathname = pathname;
+  else if (!pathname) url.pathname = "/v1/models";
+  else url.pathname = `${pathname}/models`;
   return url.toString();
 }
 
@@ -72,6 +87,55 @@ function providerError(status) {
   const error = new Error(`AI provider request failed with status ${status}`);
   error.providerStatus = status;
   return error;
+}
+
+function parseModelList(payload, maximum = 200) {
+  const source = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload && payload.data)
+      ? payload.data
+      : Array.isArray(payload && payload.models)
+        ? payload.models
+        : [];
+  const models = [];
+  const seen = new Set();
+  source.forEach(item => {
+    const id = String(typeof item === "string" ? item : (item && (item.id || item.name)) || "").trim();
+    if (!id || id.length > 120 || seen.has(id)) return;
+    seen.add(id);
+    models.push(id);
+  });
+  models.sort((left, right) => left.localeCompare(right, "en", { numeric: true, sensitivity: "base" }));
+  if (!models.length) throw new Error("AI provider returned no models");
+  return models.slice(0, maximum);
+}
+
+function createAiModelFetcher(config, options = {}) {
+  const fetchImpl = options.fetchImpl || globalThis.fetch;
+  if (typeof fetchImpl !== "function") throw new Error("fetch is required for AI model discovery");
+  return async function fetchModels() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+    try {
+      const response = await fetchImpl(config.endpoint, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${config.apiKey}`,
+          "Accept": "application/json"
+        },
+        signal: controller.signal
+      });
+      if (!response.ok) throw providerError(response.status);
+      const text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > MAX_MODEL_RESPONSE_BYTES) throw new Error("AI model response is too large");
+      return parseModelList(JSON.parse(text));
+    } catch (error) {
+      if (error && error.name === "AbortError") throw new Error("AI provider request timed out");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
 }
 
 async function postCompletion(config, messages, fetchImpl, options = {}) {
@@ -265,13 +329,16 @@ function createRateLimiter(limit, windowMs = 60000, now = () => Date.now()) {
 
 module.exports = {
   buildChatCompletionsUrl,
+  buildModelsUrl,
   buildMessages,
   buildQuestionMessages,
   createAiConnectionTester,
   createAiGrader,
+  createAiModelFetcher,
   createAiQuestionGenerator,
   createRateLimiter,
   parseGeneratedQuestions,
   parseGradeResponse,
+  parseModelList,
   requestCompletion
 };

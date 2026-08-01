@@ -454,7 +454,47 @@
   }
 
   function configModelNames() {
-    return Array.from(new Set($("#aiModels").value.split(/[\n,]/).map(value => value.trim()).filter(Boolean)));
+    return Array.from(new Set($("#aiModels").value.split(/[\n,]/).map(value => value.trim()).filter(value => value && value.length <= 120))).slice(0, 200);
+  }
+
+  function renderConfigModelList() {
+    const models = configModelNames();
+    const list = $("#aiModelList");
+    if (!models.length) {
+      const empty = document.createElement("div");
+      empty.className = "model-list-empty";
+      empty.textContent = "尚未获取模型";
+      list.replaceChildren(empty);
+    } else {
+      list.replaceChildren(...models.map(modelName => {
+        const item = document.createElement("div");
+        item.className = "model-list-item";
+        item.setAttribute("role", "listitem");
+        const name = document.createElement("span");
+        name.textContent = modelName;
+        name.title = modelName;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "model-remove-button";
+        remove.dataset.model = modelName;
+        remove.setAttribute("aria-label", `移除模型 ${modelName}`);
+        const icon = document.createElement("i");
+        icon.dataset.lucide = "x";
+        icon.setAttribute("aria-hidden", "true");
+        remove.append(icon);
+        item.append(name, remove);
+        return item;
+      }));
+    }
+    $("#aiModelCount").textContent = `${models.length} 个模型`;
+    refreshIcons();
+  }
+
+  function setConfigModels(models, preferred = "") {
+    const normalized = Array.from(new Set((Array.isArray(models) ? models : []).map(value => String(value || "").trim()).filter(value => value && value.length <= 120))).slice(0, 200);
+    $("#aiModels").value = normalized.join("\n");
+    renderConfigModelList();
+    syncDefaultModelOptions(preferred);
   }
 
   function syncDefaultModelOptions(preferred = "") {
@@ -468,6 +508,50 @@
       return option;
     }));
     if (models.includes(current)) select.value = current;
+    select.disabled = !models.length;
+  }
+
+  function addCustomAiModel() {
+    const input = $("#aiCustomModel");
+    const modelName = input.value.trim();
+    if (!modelName) return;
+    if (modelName.length > 120) return setAiConfigFeedback("模型名称不能超过 120 个字符", true);
+    setConfigModels([...configModelNames(), modelName], $("#aiDefaultModel").value || modelName);
+    input.value = "";
+    setAiConfigFeedback(`已添加模型：${modelName}`);
+  }
+
+  function removeConfigAiModel(modelName) {
+    const currentDefault = $("#aiDefaultModel").value;
+    setConfigModels(configModelNames().filter(value => value !== modelName), currentDefault);
+  }
+
+  async function fetchUpstreamAiModels() {
+    const button = $("#fetchAiModelsButton");
+    const baseUrl = $("#aiBaseUrl");
+    const apiKey = $("#aiApiKey");
+    if (!baseUrl.value.trim()) return baseUrl.reportValidity();
+    if (apiKey.required && !apiKey.value.trim()) return apiKey.reportValidity();
+    setBusyButton(button, true, "正在获取…");
+    setAiConfigFeedback("正在读取上游模型…");
+    try {
+      const data = await responseJson(await fetch("/api/admin/ai-config/models", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          baseUrl: baseUrl.value.trim(),
+          apiKey: apiKey.value.trim(),
+          timeoutMs: Number($("#aiTimeout").value) || 10000
+        })
+      }));
+      setConfigModels(data.models, $("#aiDefaultModel").value);
+      setAiConfigFeedback(`已获取 ${data.count} 个上游模型，保存后生效`);
+    } catch (error) {
+      setAiConfigFeedback(error.message, true);
+    } finally {
+      setBusyButton(button, false, "");
+    }
   }
 
   function setAiConfigFeedback(message, error = false) {
@@ -488,8 +572,8 @@
       $("#aiApiKey").value = "";
       $("#aiApiKey").required = !config.hasApiKey;
       $("#aiApiKey").placeholder = config.hasApiKey ? "已保存，留空则不修改" : "输入 API Key";
-      $("#aiModels").value = (config.models || []).join("\n");
-      syncDefaultModelOptions(config.defaultModel);
+      setConfigModels(config.models || [], config.defaultModel);
+      $("#aiCustomModel").value = "";
       $("#aiTimeout").value = String(config.timeoutMs || 10000);
       $("#aiRateLimit").value = String(config.rateLimitPerMinute || 20);
       setAiConfigFeedback(config.configured ? "配置已保存" : "尚未配置");
@@ -501,12 +585,18 @@
 
   async function saveAiConfiguration(closeAfterSave = false) {
     const form = $("#aiConfigForm");
+    const models = configModelNames();
+    if (!models.length) {
+      setAiConfigFeedback("请先获取上游模型，或手动添加至少一个模型", true);
+      $("#fetchAiModelsButton").focus();
+      return null;
+    }
     syncDefaultModelOptions();
     if (!form.reportValidity()) return null;
     const body = {
       baseUrl: $("#aiBaseUrl").value.trim(),
       apiKey: $("#aiApiKey").value.trim(),
-      models: configModelNames(),
+      models,
       defaultModel: $("#aiDefaultModel").value,
       timeoutMs: Number($("#aiTimeout").value),
       rateLimitPerMinute: Number($("#aiRateLimit").value)
@@ -947,7 +1037,17 @@
     $("#openAiConfigButton").addEventListener("click", openAiConfiguration);
     $("#closeAiConfigButton").addEventListener("click", () => $("#aiConfigDialog").close());
     $("#aiConfigForm").addEventListener("submit", submitAiConfiguration);
-    $("#aiModels").addEventListener("input", () => syncDefaultModelOptions());
+    $("#fetchAiModelsButton").addEventListener("click", fetchUpstreamAiModels);
+    $("#addAiModelButton").addEventListener("click", addCustomAiModel);
+    $("#aiCustomModel").addEventListener("keydown", event => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      addCustomAiModel();
+    });
+    $("#aiModelList").addEventListener("click", event => {
+      const button = event.target.closest("[data-model]");
+      if (button) removeConfigAiModel(button.dataset.model);
+    });
     $("#testAiConfigButton").addEventListener("click", testAiConfiguration);
     $("#answerForm").addEventListener("submit", submitAnswer);
     $("#nextButton").addEventListener("click", () => advance(false));
@@ -959,7 +1059,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=10").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=11").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

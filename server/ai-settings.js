@@ -2,10 +2,11 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { buildChatCompletionsUrl } = require("./ai-grader");
+const { buildChatCompletionsUrl, buildModelsUrl } = require("./ai-grader");
 
 const SETTINGS_FILE = "ai-settings.json";
 const AI_EFFORTS = ["low", "medium", "high"];
+const MAX_AI_MODELS = 200;
 
 function boundedInteger(value, fallback, minimum, maximum) {
   const parsed = Number(value);
@@ -23,37 +24,48 @@ function normalizeModels(value) {
     seen.add(model);
     models.push(model);
   });
-  return models.slice(0, 50);
+  return models.slice(0, MAX_AI_MODELS);
 }
 
 function configurationError(message) {
   return Object.assign(new Error(message), { statusCode: 400 });
 }
 
+function resolveAiConnection(settings, requested = {}) {
+  const previous = settings && typeof settings === "object" ? settings : {};
+  const source = requested && typeof requested === "object" ? requested : {};
+  const baseUrl = String(source.baseUrl ?? previous.baseUrl ?? "").trim();
+  const apiKey = String(source.apiKey || previous.apiKey || "").trim();
+  const timeoutMs = boundedInteger(source.timeoutMs, boundedInteger(previous.timeoutMs, 10000, 1000, 30000), 1000, 30000);
+
+  if (!baseUrl) throw configurationError("Base URL is required");
+  if (baseUrl.length > 2048) throw configurationError("Base URL is too long");
+  let endpoint;
+  try { endpoint = buildModelsUrl(baseUrl); }
+  catch (_) { throw configurationError("Base URL must be a valid HTTP or HTTPS URL"); }
+  if (!apiKey) throw configurationError("API key is required");
+  if (apiKey.length > 500) throw configurationError("API key is too long");
+
+  return { apiKey, configured: true, endpoint, timeoutMs };
+}
+
 function normalizeSettings(input, previous = {}) {
   const source = input && typeof input === "object" ? input : {};
-  const baseUrl = String(source.baseUrl ?? previous.baseUrl ?? "").trim();
-  const apiKeyInput = String(source.apiKey || "").trim();
-  const apiKey = apiKeyInput || String(previous.apiKey || "").trim();
+  const connection = resolveAiConnection(previous, source);
   const models = normalizeModels(source.models !== undefined ? source.models : previous.models);
   const requestedDefault = String(source.defaultModel ?? previous.defaultModel ?? "").trim();
   const defaultModel = models.includes(requestedDefault) ? requestedDefault : (models[0] || "");
-  const timeoutMs = boundedInteger(source.timeoutMs, boundedInteger(previous.timeoutMs, 10000, 1000, 30000), 1000, 30000);
   const rateLimitPerMinute = boundedInteger(source.rateLimitPerMinute, boundedInteger(previous.rateLimitPerMinute, 20, 1, 60), 1, 60);
 
-  if (!baseUrl) throw configurationError("Base URL is required");
-  try { buildChatCompletionsUrl(baseUrl); }
-  catch (_) { throw configurationError("Base URL must be a valid HTTP or HTTPS URL"); }
-  if (!apiKey) throw configurationError("API key is required");
   if (!models.length) throw configurationError("at least one model is required");
 
   return {
     schema: 1,
-    baseUrl,
-    apiKey,
+    baseUrl: String(source.baseUrl ?? previous.baseUrl ?? "").trim(),
+    apiKey: connection.apiKey,
     models,
     defaultModel,
-    timeoutMs,
+    timeoutMs: connection.timeoutMs,
     rateLimitPerMinute,
     updatedAt: String(source.updatedAt || previous.updatedAt || new Date().toISOString())
   };
@@ -138,5 +150,6 @@ module.exports = {
   normalizeModels,
   normalizeSettings,
   publicSettings,
+  resolveAiConnection,
   selectAiSettings
 };

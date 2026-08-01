@@ -6,9 +6,9 @@ const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
 const { chineseAnswerMatches, englishAnswerMatches } = require("./answer-utils");
-const { createAiConnectionTester, createAiGrader, createAiQuestionGenerator, createRateLimiter } = require("./server/ai-grader");
+const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiQuestionGenerator, createRateLimiter } = require("./server/ai-grader");
 const { buildLearningProfile, createQuestionSet, sanitizeAiPractice } = require("./server/ai-practice");
-const { createAiSettingsStore, selectAiSettings } = require("./server/ai-settings");
+const { createAiSettingsStore, resolveAiConnection, selectAiSettings } = require("./server/ai-settings");
 
 const ROOT = __dirname;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, "server", "data"));
@@ -354,6 +354,17 @@ async function handleAiAdmin(req, res, url, user) {
       return sendJson(res, 200, aiSettingsStore.public());
     } catch (error) {
       return sendError(res, error.statusCode || 400, error.message);
+    }
+  }
+  if (url.pathname === "/api/admin/ai-config/models" && req.method === "POST") {
+    try {
+      const config = resolveAiConnection(aiSettings, await readBody(req));
+      const models = await createAiModelFetcher(config)();
+      return sendJson(res, 200, { models, count: models.length });
+    } catch (error) {
+      if (error && error.statusCode === 400) return sendError(res, 400, error.message);
+      console.warn(`AI model discovery failed: ${error && error.message ? error.message : "unknown error"}`);
+      return sendJson(res, 502, { error: "获取上游模型失败", providerStatus: Number(error && error.providerStatus) || null });
     }
   }
   if (url.pathname === "/api/admin/ai-config/test" && req.method === "POST") {

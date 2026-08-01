@@ -10,7 +10,7 @@ const { once } = require("node:events");
 const { spawn } = require("node:child_process");
 const { test } = require("node:test");
 const { createUser, loadUsers, saveUsers } = require("../server/accounts");
-const { buildChatCompletionsUrl, createAiGrader, createRateLimiter, parseGeneratedQuestions, parseGradeResponse } = require("../server/ai-grader");
+const { buildChatCompletionsUrl, buildModelsUrl, createAiGrader, createRateLimiter, parseGeneratedQuestions, parseGradeResponse, parseModelList } = require("../server/ai-grader");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -58,6 +58,15 @@ test("AI configuration builds an OpenAI-compatible chat completions endpoint", (
   assert.equal(buildChatCompletionsUrl("https://sub2api.example/v1"), "https://sub2api.example/v1/chat/completions");
   assert.equal(buildChatCompletionsUrl("https://sub2api.example"), "https://sub2api.example/v1/chat/completions");
   assert.equal(buildChatCompletionsUrl("https://sub2api.example/v1/chat/completions"), "https://sub2api.example/v1/chat/completions");
+  assert.equal(buildModelsUrl("https://sub2api.example/v1"), "https://sub2api.example/v1/models");
+  assert.equal(buildModelsUrl("https://sub2api.example"), "https://sub2api.example/v1/models");
+  assert.equal(buildModelsUrl("https://sub2api.example/v1/chat/completions"), "https://sub2api.example/v1/models");
+});
+
+test("upstream model lists accept OpenAI and common proxy response shapes", () => {
+  assert.deepEqual(parseModelList({ data: [{ id: "model-10" }, { id: "model-2" }, { id: "model-2" }] }), ["model-2", "model-10"]);
+  assert.deepEqual(parseModelList({ models: ["model-b", { name: "model-a" }] }), ["model-a", "model-b"]);
+  assert.throws(() => parseModelList({ data: [{ object: "model" }] }), /no models/);
 });
 
 test("AI grade parsing requires a boolean result and a Chinese explanation", () => {
@@ -134,10 +143,16 @@ test("admin configures AI on the web and progress-based questions use the select
   saveUsers(dataDir, store);
 
   const providerRequests = [];
+  const modelRequests = [];
   const provider = http.createServer((req, res) => {
     const chunks = [];
     req.on("data", chunk => chunks.push(chunk));
     req.on("end", () => {
+      if (req.method === "GET" && req.url === "/v1/models") {
+        modelRequests.push({ authorization: req.headers.authorization, accept: req.headers.accept });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ data: [{ id: "test-model" }, { id: "strong-model" }, { id: "test-model" }] }));
+      }
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       providerRequests.push({ authorization: req.headers.authorization, body, url: req.url });
       const system = String(body.messages && body.messages[0] && body.messages[0].content || "");
@@ -186,6 +201,20 @@ test("admin configures AI on the web and progress-based questions use the select
     });
     assert.equal(login.status, 200);
     const cookie = login.headers.get("set-cookie").split(";")[0];
+
+    const discovered = await fetch(`${baseUrl}/api/admin/ai-config/models`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "private-test-key", timeoutMs: 10000 })
+    });
+    assert.equal(discovered.status, 200);
+    const discoveredBody = await discovered.json();
+    assert.deepEqual(discoveredBody, { models: ["strong-model", "test-model"], count: 2 });
+    assert.equal(JSON.stringify(discoveredBody).includes("private-test-key"), false);
+    assert.equal(modelRequests.length, 1);
+    assert.equal(modelRequests[0].authorization, "Bearer private-test-key");
+    assert.match(modelRequests[0].accept, /application\/json/);
+    assert.equal((await (await fetch(`${baseUrl}/api/health`)).json()).aiGrading, false);
 
     const configured = await fetch(`${baseUrl}/api/admin/ai-config`, {
       method: "PUT",
@@ -290,6 +319,8 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(memberOptions.selectedEffort, "medium");
     const forbidden = await fetch(`${baseUrl}/api/admin/ai-config`, { headers: { "Cookie": memberCookie } });
     assert.equal(forbidden.status, 403);
+    const forbiddenModels = await fetch(`${baseUrl}/api/admin/ai-config/models`, { method: "POST", headers: { "Content-Type": "application/json", "Cookie": memberCookie }, body: "{}" });
+    assert.equal(forbiddenModels.status, 403);
   } finally {
     child.kill();
     if (child.exitCode === null) await Promise.race([once(child, "exit"), new Promise(resolve => setTimeout(resolve, 2000))]);
