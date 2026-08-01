@@ -22,6 +22,7 @@
   let authEventsBound = false;
   let model = loadModel();
   let toastTimer;
+  let gradingInProgress = false;
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -363,6 +364,43 @@
     return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese]);
   }
 
+  function setGradingState(active) {
+    gradingInProgress = active;
+    const input = $("#answerInput");
+    const button = $("#submitAnswer");
+    if (active) {
+      button.dataset.idleHtml = button.innerHTML;
+      button.textContent = "AI \u6b63\u5728\u5224\u65ad...";
+    } else if (button.dataset.idleHtml) {
+      button.innerHTML = button.dataset.idleHtml;
+      delete button.dataset.idleHtml;
+      refreshIcons();
+    }
+    input.disabled = active;
+    button.disabled = active;
+  }
+
+  async function requestAiGrade(task, answer) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch("/api/ai/grade", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId: task.taskId, answer }),
+        signal: controller.signal
+      });
+      if (response.status === 401) showAuthView();
+      if (!response.ok) throw new Error("AI grading request failed");
+      const result = await response.json();
+      if (typeof result.correct !== "boolean" || typeof result.explanation !== "string") throw new Error("AI grading response is invalid");
+      return { correct: result.correct, explanation: result.explanation.trim(), source: result.source === "ai" ? "ai" : "local" };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   function correctAnswer(task) {
     if (task.direction === "zh-en") return task.item.english;
     return task.item.chinese;
@@ -382,31 +420,45 @@
     }
   }
 
-  function submitAnswer(event) {
+  async function submitAnswer(event) {
     event.preventDefault();
+    if (gradingInProgress) return;
     const task = currentTask();
     if (!task) return;
     const answer = $("#answerInput").value.trim();
-    const correct = answerMatches(task, answer);
+    let correct = answerMatches(task, answer);
+    let grading = { source: "local", explanation: "" };
+    if (!correct && answer && API_ENABLED && task.item.type === "sentence") {
+      setGradingState(true);
+      try {
+        grading = await requestAiGrade(task, answer);
+        correct = grading.correct;
+      } catch (_) {
+        grading = { source: "local-fallback", explanation: "AI \u5224\u9898\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u5df2\u6309\u672c\u5730\u7b54\u6848\u5224\u5b9a\u3002" };
+      } finally {
+        setGradingState(false);
+      }
+    }
     updateSchedule(task, correct);
     const today = localDate();
     model.history[today] = model.history[today] || { reviewed: 0, correct: 0 };
     model.history[today].reviewed += 1;
     if (correct) model.history[today].correct += 1;
-    model.attempts.push({ taskId: task.taskId, date: today, answer, correct, expected: correctAnswer(task) });
-    if (!correct) model.mistakes = [...(model.mistakes || []), { id: `attempt-${Date.now()}`, taskId: task.taskId, day: task.item.day, prompt: task.direction === "en-zh" ? task.item.english : task.item.chinese, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: "本次复习未答对。" }].slice(-80);
+    model.attempts.push({ taskId: task.taskId, date: today, answer, correct, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation });
+    if (!correct) model.mistakes = [...(model.mistakes || []), { id: `attempt-${Date.now()}`, taskId: task.taskId, day: task.item.day, prompt: task.direction === "en-zh" ? task.item.english : task.item.chinese, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: grading.explanation || "本次复习未答对。" }].slice(-80);
     const session = getSession();
     session.currentTaskId = task.taskId;
     session.doneTaskIds = Array.from(new Set([...(session.doneTaskIds || []), task.taskId]));
     saveModel();
-    showFeedback(task, correct, answer);
+    showFeedback(task, correct, answer, grading);
   }
 
-  function showFeedback(task, correct, answer) {
+  function showFeedback(task, correct, answer, grading = {}) {
     const feedback = $("#feedback");
     feedback.hidden = false;
     feedback.className = `feedback ${correct ? "is-correct" : "is-wrong"}`;
     feedback.innerHTML = `<span class="feedback-title">${correct ? "答对了" : "再看一次"}</span><span class="feedback-answer">正确答案：${escapeHtml(correctAnswer(task))}</span>${correct ? "" : `<span class="feedback-note">你的答案：${escapeHtml(answer || "（未填写）")}</span>`}`;
+    if (grading.explanation) feedback.insertAdjacentHTML("beforeend", `<span class="feedback-note">${escapeHtml(grading.explanation)}</span>`);
     $("#answerInput").disabled = true;
     $("#submitAnswer").disabled = true;
     $("#feedbackActions").hidden = false;
@@ -527,7 +579,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=7").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=8").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

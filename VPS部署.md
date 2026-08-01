@@ -155,3 +155,7 @@ journalctl -u english-review-update.service -n 100 --no-pager
 ```bash
 sudo systemctl start english-review-update.service
 ```
+
+## 十、配置 sub2api AI 判题
+
+AI Key 只保存在 VPS 的 `.env`，不会进入网页或 GitHub。Base URL、模型名、重建容器和检查方法见 [AI判题配置.md](AI判题配置.md)。

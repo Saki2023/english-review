@@ -145,3 +145,28 @@ API_TOKEN=一段足够长的随机字符串
 Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/data`，由 `docker-compose.yml` 映射到宿主机，不会因为容器重新创建而丢失。
 
 不要把 8080 端口直接暴露到公网。VPS 使用 `docker-compose.vps.yml` 运行 Cloudflare Tunnel；应用容器没有宿主机端口映射，公网 API 地址为 `https://你的域名/api/...`。
+
+## AI 判题接口
+
+`POST /api/ai/grade` 只允许已登录账号调用，并且只接受句子任务。服务器会根据 `taskId` 从自己的题库读取参考答案，网页不能提交或替换参考答案。
+
+请求：
+
+```json
+{
+  "taskId": "d2-s4:en-zh",
+  "answer": "它是一只很大的猫"
+}
+```
+
+响应：
+
+```json
+{
+  "correct": true,
+  "explanation": "意思相同，只是说法不同。",
+  "source": "ai"
+}
+```
+
+服务端 sub2api 设置见 [AI判题配置.md](AI判题配置.md)。不要向这个接口发送 `AI_API_KEY`，也不要把 Key 放入前端代码。

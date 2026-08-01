@@ -5,6 +5,8 @@ const vm = require("vm");
 const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
+const { chineseAnswerMatches, englishAnswerMatches } = require("./answer-utils");
+const { createAiGrader, createRateLimiter, loadAiConfig } = require("./server/ai-grader");
 
 const ROOT = __dirname;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, "server", "data"));
@@ -18,6 +20,10 @@ const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const APP_TIMEZONE = process.env.TZ || "Asia/Shanghai";
 const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const MAX_BODY = 2 * 1024 * 1024;
+const MAX_AI_ANSWER_LENGTH = 500;
+const aiConfig = loadAiConfig();
+const aiGrader = createAiGrader(aiConfig);
+const takeAiRequest = createRateLimiter(aiConfig.rateLimitPerMinute);
 
 ensureDataDir();
 let content = loadContent();
@@ -285,6 +291,54 @@ function handleState(req, res, user) {
   return sendError(res, 404, "state endpoint not found");
 }
 
+function findSentenceTask(taskId) {
+  const value = String(taskId || "");
+  const separator = value.lastIndexOf(":");
+  if (separator <= 0) return null;
+  const id = value.slice(0, separator);
+  const direction = value.slice(separator + 1);
+  if (!["en-zh", "zh-en"].includes(direction)) return null;
+  const item = content.sentences.find(sentence => sentence.id === id);
+  return item ? { item, direction, taskId: value } : null;
+}
+
+function localSentenceAnswerMatches(task, answer) {
+  if (task.direction === "zh-en") return englishAnswerMatches(answer, task.item.acceptedEnglish || [task.item.english]);
+  return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese]);
+}
+
+async function handleAiGrade(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "POST") return sendError(res, 404, "AI endpoint not found");
+  if (!aiGrader.configured) return sendError(res, 503, "AI grading is not configured");
+
+  try {
+    const body = await readBody(req);
+    const answer = String(body.answer || "").trim();
+    if (!answer) return sendError(res, 400, "answer is required");
+    if (answer.length > MAX_AI_ANSWER_LENGTH) return sendError(res, 400, "answer is too long");
+    const task = findSentenceTask(body.taskId);
+    if (!task) return sendError(res, 404, "sentence task not found");
+    if (localSentenceAnswerMatches(task, answer)) {
+      return sendJson(res, 200, { correct: true, explanation: "\u672c\u5730\u89c4\u5219\u5df2\u63a5\u53d7\u8fd9\u4e2a\u7b54\u6848\u3002", source: "local" });
+    }
+
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) {
+      return sendJson(res, 429, { error: "AI grading rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+    }
+
+    const acceptedAnswers = task.direction === "zh-en" ? (task.item.acceptedEnglish || [task.item.english]) : (task.item.acceptedChinese || [task.item.chinese]);
+    const sourceText = task.direction === "zh-en" ? task.item.chinese : task.item.english;
+    const result = await aiGrader.grade({ answer, acceptedAnswers, direction: task.direction, sourceText });
+    return sendJson(res, 200, { ...result, source: "ai" });
+  } catch (error) {
+    if (error && [400, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+    console.warn(`AI grading failed: ${error && error.message ? error.message : "unknown error"}`);
+    return sendError(res, 503, "AI grading is temporarily unavailable");
+  }
+}
+
 function mimeType(filePath) { return { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".webmanifest": "application/manifest+json; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon" }[path.extname(filePath).toLowerCase()] || "application/octet-stream"; }
 
 function serveStatic(req, res, url) {
@@ -300,8 +354,9 @@ const server = http.createServer((req, res) => {
   if (url.pathname.startsWith("/api/auth/")) return handleAuth(req, res, url);
   if (url.pathname === "/api/health" && req.method === "GET") {
     refreshUsers();
-    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, authRequired: true, time: new Date().toISOString() });
+    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, authRequired: true, aiGrading: aiGrader.configured, time: new Date().toISOString() });
   }
+  if (url.pathname === "/api/ai/grade") return handleAiGrade(req, res, user);
   if (url.pathname === "/api/export" && req.method === "GET") return user ? sendJson(res, 200, { content, state: getUserState(user), user: publicUser(user) }) : sendError(res, 401, "login required");
   if (url.pathname === "/api/state") return handleState(req, res, user);
   if (url.pathname === "/api/content" || url.pathname.startsWith("/api/content/")) return handleContent(req, res, url, user);
