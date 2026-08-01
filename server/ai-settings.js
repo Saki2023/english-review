@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { buildChatCompletionsUrl, buildModelsUrl } = require("./ai-grader");
+const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl } = require("./ai-grader");
 
 const SETTINGS_FILE = "ai-settings.json";
 const AI_EFFORTS = ["low", "medium", "high"];
@@ -137,6 +137,7 @@ function selectAiSettings(settings, requested = {}) {
     apiKey: settings.apiKey,
     configured: true,
     endpoint: buildChatCompletionsUrl(settings.baseUrl),
+    responsesEndpoint: buildResponsesUrl(settings.baseUrl),
     model,
     reasoningEffort,
     timeoutMs: settings.timeoutMs,

@@ -15,10 +15,23 @@ function normalizeProviderUrl(baseUrl) {
 
 function buildChatCompletionsUrl(baseUrl) {
   const url = normalizeProviderUrl(baseUrl);
-  const pathname = url.pathname.replace(/\/+$/, "");
+  let pathname = url.pathname.replace(/\/+$/, "");
+  if (pathname.endsWith("/responses")) pathname = pathname.slice(0, -"/responses".length);
+  if (pathname.endsWith("/models")) pathname = pathname.slice(0, -"/models".length);
   if (pathname.endsWith("/chat/completions")) url.pathname = pathname;
   else if (!pathname) url.pathname = "/v1/chat/completions";
   else url.pathname = `${pathname}/chat/completions`;
+  return url.toString();
+}
+
+function buildResponsesUrl(baseUrl) {
+  const url = normalizeProviderUrl(baseUrl);
+  let pathname = url.pathname.replace(/\/+$/, "");
+  if (pathname.endsWith("/chat/completions")) pathname = pathname.slice(0, -"/chat/completions".length);
+  if (pathname.endsWith("/models")) pathname = pathname.slice(0, -"/models".length);
+  if (pathname.endsWith("/responses")) url.pathname = pathname;
+  else if (!pathname) url.pathname = "/v1/responses";
+  else url.pathname = `${pathname}/responses`;
   return url.toString();
 }
 
@@ -26,6 +39,7 @@ function buildModelsUrl(baseUrl) {
   const url = normalizeProviderUrl(baseUrl);
   let pathname = url.pathname.replace(/\/+$/, "");
   if (pathname.endsWith("/chat/completions")) pathname = pathname.slice(0, -"/chat/completions".length);
+  if (pathname.endsWith("/responses")) pathname = pathname.slice(0, -"/responses".length);
   if (pathname.endsWith("/models")) url.pathname = pathname;
   else if (!pathname) url.pathname = "/v1/models";
   else url.pathname = `${pathname}/models`;
@@ -61,11 +75,27 @@ function buildMessages(input) {
 
 function extractMessageContent(payload) {
   const message = payload && payload.choices && payload.choices[0] && payload.choices[0].message;
-  if (!message || message.refusal) throw new Error("AI provider did not return a grade");
-  if (typeof message.content === "string") return message.content;
-  if (Array.isArray(message.content)) {
-    return message.content.map(part => typeof part === "string" ? part : String(part && part.text || "")).join("");
+  if (message) {
+    if (message.refusal) throw new Error("AI provider refused the request");
+    if (typeof message.content === "string") return message.content;
+    if (Array.isArray(message.content)) {
+      const content = message.content.map(part => typeof part === "string" ? part : String(part && part.text || "")).join("");
+      if (content) return content;
+    }
   }
+
+  if (typeof (payload && payload.output_text) === "string" && payload.output_text) return payload.output_text;
+  const output = Array.isArray(payload && payload.output) ? payload.output : [];
+  const responseText = output.flatMap(item => {
+    if (item && item.type === "refusal") throw new Error("AI provider refused the request");
+    if (item && item.type === "output_text" && typeof item.text === "string") return [item.text];
+    const content = Array.isArray(item && item.content) ? item.content : [];
+    return content.map(part => {
+      if (part && part.type === "refusal") throw new Error("AI provider refused the request");
+      return typeof part === "string" ? part : String(part && part.text || "");
+    });
+  }).join("");
+  if (responseText) return responseText;
   throw new Error("AI provider returned an unsupported response");
 }
 
@@ -138,7 +168,7 @@ function createAiModelFetcher(config, options = {}) {
   };
 }
 
-async function postCompletion(config, messages, fetchImpl, options = {}) {
+async function postChatCompletion(config, messages, fetchImpl, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
   const body = { model: config.model, messages, stream: false };
@@ -167,7 +197,44 @@ async function postCompletion(config, messages, fetchImpl, options = {}) {
   }
 }
 
-async function requestCompletion(config, messages, fetchImpl) {
+async function postResponsesCompletion(config, messages, fetchImpl, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+  const instructions = messages
+    .filter(message => ["system", "developer"].includes(message.role))
+    .map(message => String(message.content || ""))
+    .filter(Boolean)
+    .join("\n\n");
+  const input = messages
+    .filter(message => !["system", "developer"].includes(message.role))
+    .map(message => ({ role: message.role, content: message.content }));
+  const body = { model: config.model, input, stream: false };
+  if (instructions) body.instructions = instructions;
+  if (options.useReasoningEffort && config.reasoningEffort) body.reasoning = { effort: config.reasoningEffort };
+
+  try {
+    const response = await fetchImpl(config.responsesEndpoint || buildResponsesUrl(config.endpoint), {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    if (!response.ok) throw providerError(response.status);
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > MAX_PROVIDER_RESPONSE_BYTES) throw new Error("AI provider response is too large");
+    return JSON.parse(text);
+  } catch (error) {
+    if (error && error.name === "AbortError") throw new Error("AI provider request timed out");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function requestChatCompletion(config, messages, fetchImpl) {
   const attempts = config.reasoningEffort
     ? [
         { useJsonMode: true, useReasoningEffort: true },
@@ -180,13 +247,35 @@ async function requestCompletion(config, messages, fetchImpl) {
       ];
   let lastError;
   for (const attempt of attempts) {
-    try { return await postCompletion(config, messages, fetchImpl, attempt); }
+    try { return await postChatCompletion(config, messages, fetchImpl, attempt); }
     catch (error) {
       lastError = error;
       if (![400, 422].includes(error.providerStatus)) throw error;
     }
   }
   throw lastError;
+}
+
+async function requestResponsesCompletion(config, messages, fetchImpl) {
+  const attempts = config.reasoningEffort ? [{ useReasoningEffort: true }, { useReasoningEffort: false }] : [{ useReasoningEffort: false }];
+  let lastError;
+  for (const attempt of attempts) {
+    try { return await postResponsesCompletion(config, messages, fetchImpl, attempt); }
+    catch (error) {
+      lastError = error;
+      if (![400, 422].includes(error.providerStatus)) throw error;
+    }
+  }
+  throw lastError;
+}
+
+async function requestCompletion(config, messages, fetchImpl) {
+  try {
+    return await requestChatCompletion(config, messages, fetchImpl);
+  } catch (error) {
+    if (![400, 404, 405, 422, 501].includes(Number(error && error.providerStatus))) throw error;
+    return requestResponsesCompletion(config, messages, fetchImpl);
+  }
 }
 
 function createAiGrader(config, options = {}) {
@@ -330,6 +419,7 @@ function createRateLimiter(limit, windowMs = 60000, now = () => Date.now()) {
 module.exports = {
   buildChatCompletionsUrl,
   buildModelsUrl,
+  buildResponsesUrl,
   buildMessages,
   buildQuestionMessages,
   createAiConnectionTester,

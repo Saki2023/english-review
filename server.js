@@ -342,6 +342,27 @@ function publicAiOptions(user) {
   };
 }
 
+function publicAiGenerationFailure(error) {
+  const providerStatus = Number(error && error.providerStatus) || null;
+  const detail = String(error && error.message || "");
+  let message = "AI 生成题目失败，请稍后重试或更换模型";
+  let statusCode = 502;
+
+  if ([401, 403].includes(providerStatus)) message = "AI 上游拒绝了请求，请检查 API Key 和模型权限";
+  else if ([404, 405, 501].includes(providerStatus)) message = "AI 上游不支持该模型的生成接口，请更换模型";
+  else if (providerStatus === 429) message = "AI 上游请求过多或额度不足，请稍后再试";
+  else if ([400, 422].includes(providerStatus)) message = "AI 上游拒绝了当前模型或强度参数，请更换模型或降低强度";
+  else if (providerStatus && providerStatus >= 500) message = "AI 上游服务暂时不可用，请稍后再试";
+  else if (/timed out/i.test(detail)) {
+    message = "AI 请求超时，请稍后重试或在 AI 设置中增加超时时间";
+    statusCode = 504;
+  } else if (/too few valid questions/i.test(detail)) message = "AI 返回的题目超出了已学词汇，请重试或更换模型";
+  else if (/invalid question JSON|did not return questions|unsupported response/i.test(detail)) message = "AI 返回格式不符合出题要求，请重试或更换模型";
+  else if (/response is too large/i.test(detail)) message = "AI 返回内容过长，请重试或更换模型";
+
+  return { message, providerStatus, statusCode };
+}
+
 async function handleAiAdmin(req, res, url, user) {
   if (!user) return sendError(res, 401, "login required");
   if (user.role !== "admin") return sendError(res, 403, "admin role required");
@@ -475,7 +496,8 @@ async function handleAiGenerate(req, res, user) {
   } catch (error) {
     if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI question generation failed: ${error && error.message ? error.message : "unknown error"}`);
-    return sendError(res, 503, "AI question generation is temporarily unavailable");
+    const failure = publicAiGenerationFailure(error);
+    return sendJson(res, failure.statusCode, { error: failure.message, providerStatus: failure.providerStatus });
   }
 }
 

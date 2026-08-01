@@ -24,6 +24,7 @@
   let toastTimer;
   let gradingInProgress = false;
   let aiRequestInProgress = false;
+  let aiStatusMessage = "";
   let aiOptions = { configured: false, models: [], defaultModel: "", efforts: ["low", "medium", "high"], admin: false };
 
   const $ = selector => document.querySelector(selector);
@@ -265,6 +266,7 @@
   }
 
   async function loadAiOptions() {
+    aiStatusMessage = "";
     if (!API_ENABLED) {
       aiOptions = { configured: false, models: [], defaultModel: "", efforts: ["low", "medium", "high"], admin: false };
       renderAiView();
@@ -311,7 +313,7 @@
     if (!model.aiPractice) model.aiPractice = normalizeClientAiPractice(null);
     populateAiModelSelect();
     $("#openAiConfigButton").hidden = !currentUser || currentUser.role !== "admin";
-    $("#aiStatus").textContent = aiOptions.configured ? "AI 已连接" : "AI 尚未配置";
+    $("#aiStatus").textContent = aiStatusMessage || (aiOptions.configured ? "AI 已配置" : "AI 尚未配置");
     const empty = $("#aiEmptyState");
     const panel = $("#aiPracticePanel");
     const complete = $("#aiPracticeComplete");
@@ -383,7 +385,8 @@
     updateAiPreferences(settings);
     aiRequestInProgress = true;
     setBusyButton(button, true, "正在生成…");
-    $("#aiStatus").textContent = "正在分析学习进度…";
+    aiStatusMessage = "正在分析学习进度…";
+    $("#aiStatus").textContent = aiStatusMessage;
     try {
       const response = await fetch("/api/ai/questions/generate", {
         method: "POST",
@@ -398,9 +401,9 @@
       practice.updatedAt = new Date().toISOString();
       model.aiPractice = practice;
       saveModel();
-      $("#aiStatus").textContent = "题目已生成";
+      aiStatusMessage = "题目已生成";
     } catch (error) {
-      $("#aiStatus").textContent = error.message;
+      aiStatusMessage = error.message;
       showToast(error.message);
     } finally {
       aiRequestInProgress = false;
@@ -1019,12 +1022,21 @@
     $$("[data-library-type]").forEach(button => button.addEventListener("click", () => { libraryType = button.dataset.libraryType; renderLibrary(); }));
     $("#librarySearch").addEventListener("input", renderLibrary);
     $("#dayFilter").addEventListener("change", renderLibrary);
-    $("#aiModelSelect").addEventListener("change", event => updateAiPreferences({ model: event.target.value }));
+    $("#aiModelSelect").addEventListener("change", event => {
+      aiStatusMessage = "";
+      updateAiPreferences({ model: event.target.value });
+      renderAiView();
+    });
     $$('[data-ai-effort]').forEach(button => button.addEventListener("click", () => {
+      aiStatusMessage = "";
       updateAiPreferences({ reasoningEffort: button.dataset.aiEffort });
       renderAiView();
     }));
-    $("#aiQuestionCount").addEventListener("change", event => updateAiPreferences({ count: Number(event.target.value) }));
+    $("#aiQuestionCount").addEventListener("change", event => {
+      aiStatusMessage = "";
+      updateAiPreferences({ count: Number(event.target.value) });
+      renderAiView();
+    });
     $("#generateAiQuestions").addEventListener("click", generateAiQuestions);
     $("#generateAnotherAiSet").addEventListener("click", generateAiQuestions);
     $("#aiAnswerForm").addEventListener("submit", submitAiAnswer);
@@ -1059,7 +1071,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=11").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=12").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

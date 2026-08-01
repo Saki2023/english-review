@@ -196,3 +196,5 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 `reasoningEffort` 允许 `low`、`medium`、`high`。模型必须位于管理员网页配置的允许列表中。
 
 获取上游模型时可发送 `baseUrl`、`apiKey` 和 `timeoutMs`。`apiKey` 留空时使用服务器已保存的 Key；响应只包含模型 ID 和数量，不返回 Key。服务端请求 OpenAI 兼容的 `GET /v1/models`。
+
+出题和判题默认调用 OpenAI 兼容的 `POST /v1/chat/completions`。当该接口返回 `400`、`404`、`405`、`422` 或 `501` 且兼容参数重试仍失败时，服务端自动改试 `POST /v1/responses`。上游鉴权、限流、超时、接口不兼容和返回格式错误会转换为不包含 Key 的中文错误响应。

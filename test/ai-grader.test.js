@@ -10,7 +10,7 @@ const { once } = require("node:events");
 const { spawn } = require("node:child_process");
 const { test } = require("node:test");
 const { createUser, loadUsers, saveUsers } = require("../server/accounts");
-const { buildChatCompletionsUrl, buildModelsUrl, createAiGrader, createRateLimiter, parseGeneratedQuestions, parseGradeResponse, parseModelList } = require("../server/ai-grader");
+const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl, createAiGrader, createRateLimiter, parseGeneratedQuestions, parseGradeResponse, parseModelList } = require("../server/ai-grader");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -23,6 +23,7 @@ function aiConfig(overrides = {}) {
     apiKey: "secret",
     configured: true,
     endpoint: buildChatCompletionsUrl("https://sub2api.example/v1"),
+    responsesEndpoint: buildResponsesUrl("https://sub2api.example/v1"),
     model: "test-model",
     reasoningEffort: "",
     timeoutMs: 10000,
@@ -54,10 +55,13 @@ async function waitForHealth(url, child) {
   throw new Error("server did not become healthy");
 }
 
-test("AI configuration builds an OpenAI-compatible chat completions endpoint", () => {
+test("AI configuration builds OpenAI-compatible chat, responses, and model endpoints", () => {
   assert.equal(buildChatCompletionsUrl("https://sub2api.example/v1"), "https://sub2api.example/v1/chat/completions");
   assert.equal(buildChatCompletionsUrl("https://sub2api.example"), "https://sub2api.example/v1/chat/completions");
   assert.equal(buildChatCompletionsUrl("https://sub2api.example/v1/chat/completions"), "https://sub2api.example/v1/chat/completions");
+  assert.equal(buildResponsesUrl("https://sub2api.example/v1"), "https://sub2api.example/v1/responses");
+  assert.equal(buildResponsesUrl("https://sub2api.example"), "https://sub2api.example/v1/responses");
+  assert.equal(buildResponsesUrl("https://sub2api.example/v1/chat/completions"), "https://sub2api.example/v1/responses");
   assert.equal(buildModelsUrl("https://sub2api.example/v1"), "https://sub2api.example/v1/models");
   assert.equal(buildModelsUrl("https://sub2api.example"), "https://sub2api.example/v1/models");
   assert.equal(buildModelsUrl("https://sub2api.example/v1/chat/completions"), "https://sub2api.example/v1/models");
@@ -109,6 +113,27 @@ test("AI grader drops unsupported reasoning effort while retaining JSON mode", a
   assert.deepEqual(requests[1].response_format, { type: "json_object" });
 });
 
+test("AI grader falls back to the Responses API when chat completions are unavailable", async () => {
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push({ body, url });
+    if (url.endsWith("/chat/completions")) return new Response("not found", { status: 404 });
+    return new Response(JSON.stringify({ output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "{\"correct\":true,\"explanation\":\"意思相同。\"}" }] }] }), { status: 200 });
+  };
+  const grader = createAiGrader(aiConfig({ reasoningEffort: "high" }), { fetchImpl });
+  const result = await grader.grade({ direction: "en-zh", sourceText: "It is big.", acceptedAnswers: ["它很大"], answer: "它很大" });
+
+  assert.deepEqual(result, { correct: true, explanation: "意思相同。" });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].url, "https://sub2api.example/v1/chat/completions");
+  assert.equal(requests[1].url, "https://sub2api.example/v1/responses");
+  assert.equal(requests[1].body.instructions.includes("translation answer"), true);
+  assert.deepEqual(requests[1].body.reasoning, { effort: "high" });
+  assert.equal(Array.isArray(requests[1].body.input), true);
+  assert.equal(Object.hasOwn(requests[1].body, "messages"), false);
+});
+
 test("generated questions reject unlearned English words and duplicates", () => {
   const payload = { choices: [{ message: { content: JSON.stringify({ questions: [
     { direction: "en-zh", english: "big cat", chinese: "\u5927\u732b", acceptedEnglish: ["big cat", "large cat"], acceptedChinese: ["\u5927\u732b"], focus: "big" },
@@ -155,6 +180,10 @@ test("admin configures AI on the web and progress-based questions use the select
       }
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       providerRequests.push({ authorization: req.headers.authorization, body, url: req.url });
+      if (body.model === "missing-model") {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify({ error: { message: "model endpoint not found" } }));
+      }
       const system = String(body.messages && body.messages[0] && body.messages[0].content || "");
       let content;
       if (system.includes("Create personalized translation exercises")) {
@@ -222,7 +251,7 @@ test("admin configures AI on the web and progress-based questions use the select
       body: JSON.stringify({
         baseUrl: `http://127.0.0.1:${providerPort}/v1`,
         apiKey: "private-test-key",
-        models: ["test-model", "strong-model"],
+        models: ["test-model", "strong-model", "missing-model"],
         defaultModel: "test-model",
         timeoutMs: 10000,
         rateLimitPerMinute: 20
@@ -304,6 +333,14 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(questionResult.correct, true);
     assert.equal(questionResult.practice.history.length, 1);
     assert.equal(providerRequests.length, 4);
+
+    const unavailableGeneration = await fetch(`${baseUrl}/api/ai/questions/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ model: "missing-model", reasoningEffort: "high", count: 5 })
+    });
+    assert.equal(unavailableGeneration.status, 502);
+    assert.deepEqual(await unavailableGeneration.json(), { error: "AI 上游不支持该模型的生成接口，请更换模型", providerStatus: 404 });
 
     const memberLogin = await fetch(`${baseUrl}/api/auth/login`, {
       method: "POST",
