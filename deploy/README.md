@@ -1,6 +1,6 @@
 # 自动更新
 
-自动更新使用 Debian 的 `systemd` timer，每 5 分钟检查一次 GitHub `main` 分支。只有远端提交变化时才会执行 Docker 构建。
+自动更新使用 Debian 的 `systemd` timer，每 1 分钟检查一次 GitHub `main` 分支。只有远端提交变化时才会执行 Docker 构建。
 
 ## 安装
 

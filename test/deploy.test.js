@@ -35,7 +35,10 @@ test("systemd timer and installer use the expected updater", () => {
 
   assert.match(service, /ExecStart=\/usr\/local\/sbin\/english-review-update/);
   assert.match(service, /TimeoutStartSec=15min/);
-  assert.match(timer, /OnUnitInactiveSec=5min/);
+  assert.match(timer, /OnBootSec=1min/);
+  assert.match(timer, /OnUnitInactiveSec=1min/);
+  assert.match(timer, /AccuracySec=5s/);
+  assert.doesNotMatch(timer, /RandomizedDelaySec/);
   assert.match(installer, /systemctl enable --now english-review-update\.timer/);
   assert.match(installer, /systemd-analyze verify/);
   assert.match(installer, /bash -n/);

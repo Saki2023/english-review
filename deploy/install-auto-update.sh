@@ -33,7 +33,7 @@ if ! systemctl start english-review-update.service; then
 fi
 
 echo
-echo "自动更新已启用，每 5 分钟检查一次 GitHub。"
+echo "自动更新已启用，每 1 分钟检查一次 GitHub。"
 systemctl list-timers english-review-update.timer --no-pager
 echo
 echo "查看日志：journalctl -u english-review-update.service -n 100 --no-pager"
