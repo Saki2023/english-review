@@ -36,6 +36,21 @@ async function waitForHealth(baseUrl, child) {
   throw new Error("server did not become healthy");
 }
 
+async function waitForExamGeneration(baseUrl, headers, generationId, expectedStatus = "completed") {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await fetch(`${baseUrl}/api/ai/exams`, { headers: { Cookie: headers.Cookie } });
+    assert.equal(response.status, 200);
+    const state = await response.json();
+    if (state.generation?.id !== generationId) throw new Error("exam generation ID changed unexpectedly");
+    if (state.generation.status !== "pending") {
+      assert.equal(state.generation.status, expectedStatus);
+      return state;
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error("exam generation did not finish");
+}
+
 function examFixture() {
   return {
     title: "阶段测试卷",
@@ -134,8 +149,10 @@ test("exam APIs preserve private state, redact draft answers, grade once, and sy
     assert.equal(config.status, 200);
 
     const generatedResponse = await fetch(`${baseUrl}/api/ai/exams/generate`, { method: "POST", headers, body: JSON.stringify({ model: "exam-model", reasoningEffort: "medium", totalPoints: 150, includeListening: true, includeEssay: false }) });
-    assert.equal(generatedResponse.status, 201);
-    let examState = await generatedResponse.json();
+    assert.equal(generatedResponse.status, 202);
+    const pendingState = await generatedResponse.json();
+    assert.equal(pendingState.generation.status, "pending");
+    let examState = await waitForExamGeneration(baseUrl, headers, pendingState.generation.id);
     const exam = examState.currentExam;
     assert.equal(exam.totalPoints, 150);
     assert.equal(exam.includeListening, true);
@@ -184,6 +201,95 @@ test("exam APIs preserve private state, redact draft answers, grade once, and sy
     assert.equal(profile.examHistory[0].questions.some(question => question.type === "cloze" && question.sourceText.includes("[4]")), true);
     assert.equal(profile.examHistory[0].questions.some(question => question.type === "reading-comprehension" && question.sourceText === "A big cat sat on a mat."), true);
   } finally {
+    child.kill();
+    if (child.exitCode === null) await Promise.race([once(child, "exit"), new Promise(resolve => setTimeout(resolve, 2000))]);
+    await new Promise(resolve => provider.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("exam generation runs in the background and rejects incomplete replacement papers", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "english-review-exam-job-"));
+  const users = loadUsers(dataDir);
+  createUser(users, { username: "owner", password: "exam-job-test-password" });
+  saveUsers(dataDir, users);
+
+  let providerCallCount = 0;
+  let releaseFirstGeneration = null;
+  let markFirstProviderRequest;
+  const firstProviderRequest = new Promise(resolve => { markFirstProviderRequest = resolve; });
+  const provider = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", chunk => chunks.push(chunk));
+    req.on("end", () => {
+      JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      providerCallCount += 1;
+      const send = exam => {
+        if (res.writableEnded) return;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(exam) } }] }));
+      };
+      if (providerCallCount === 1) {
+        releaseFirstGeneration = () => send(examFixture());
+        markFirstProviderRequest();
+        return;
+      }
+      const incomplete = examFixture();
+      incomplete.questions = incomplete.questions.filter(question => question.type !== "translation");
+      send(incomplete);
+    });
+  });
+  await new Promise((resolve, reject) => provider.listen(0, "127.0.0.1", error => error ? reject(error) : resolve()));
+
+  const appPort = await freePort();
+  const baseUrl = `http://127.0.0.1:${appPort}`;
+  const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
+    cwd: ROOT,
+    env: { ...process.env, DATA_DIR: dataDir, PORT: String(appPort), COOKIE_SECURE: "false" },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  try {
+    await waitForHealth(baseUrl, child);
+    const login = await fetch(`${baseUrl}/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "owner", password: "exam-job-test-password" }) });
+    const cookie = login.headers.get("set-cookie").split(";")[0];
+    const headers = { "Content-Type": "application/json", Cookie: cookie };
+    const providerPort = provider.address().port;
+    const config = await fetch(`${baseUrl}/api/admin/ai-config`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ mode: "manual", providers: [{ id: "exam-provider", name: "Exam Provider", enabled: true, baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "test-key", models: ["exam-model"], timeoutMs: 5000 }], manualProviderId: "exam-provider", defaultModel: "exam-model", rateLimitPerMinute: 20 })
+    });
+    assert.equal(config.status, 200);
+
+    const generationRequest = fetch(`${baseUrl}/api/ai/exams/generate`, { method: "POST", headers, body: JSON.stringify({ model: "exam-model", reasoningEffort: "max", totalPoints: 100, includeListening: true, includeEssay: false }) });
+    await Promise.race([firstProviderRequest, new Promise((_, reject) => setTimeout(() => reject(new Error("provider request did not start")), 1500))]);
+    const pendingResponse = await Promise.race([generationRequest, new Promise((_, reject) => setTimeout(() => reject(new Error("generation endpoint waited for the provider")), 1500))]);
+    assert.equal(pendingResponse.status, 202);
+    const pendingState = await pendingResponse.json();
+    assert.equal(pendingState.generation.status, "pending");
+    assert.equal(pendingState.currentExam, null);
+
+    const duplicate = await fetch(`${baseUrl}/api/ai/exams/generate`, { method: "POST", headers, body: JSON.stringify({ model: "exam-model" }) });
+    assert.equal(duplicate.status, 409);
+    assert.equal((await duplicate.json()).error, "试卷正在后台生成，请等待完成");
+
+    releaseFirstGeneration();
+    releaseFirstGeneration = null;
+    const completedState = await waitForExamGeneration(baseUrl, headers, pendingState.generation.id);
+    const completedExamId = completedState.currentExam.id;
+    assert.equal(completedState.generation.examId, completedExamId);
+    assert.equal(completedState.currentExam.reasoningEffort, "max");
+
+    const invalidResponse = await fetch(`${baseUrl}/api/ai/exams/generate`, { method: "POST", headers, body: JSON.stringify({ model: "exam-model", reasoningEffort: "max", totalPoints: 100, includeListening: true, includeEssay: false }) });
+    assert.equal(invalidResponse.status, 202);
+    const invalidPending = await invalidResponse.json();
+    const failedState = await waitForExamGeneration(baseUrl, headers, invalidPending.generation.id, "failed");
+    assert.match(failedState.generation.error, /缺少必需题型或题量/);
+    assert.equal(failedState.currentExam.id, completedExamId);
+    assert.equal(providerCallCount, 2);
+  } finally {
+    if (releaseFirstGeneration) releaseFirstGeneration();
     child.kill();
     if (child.exitCode === null) await Promise.race([once(child, "exit"), new Promise(resolve => setTimeout(resolve, 2000))]);
     await new Promise(resolve => provider.close(resolve));

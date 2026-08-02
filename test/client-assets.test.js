@@ -51,6 +51,10 @@ test("exam UI uses dedicated APIs, optional listening, and whole-paper submissio
   assert.match(app, /\/api\/ai\/exams\/listening/);
   assert.match(app, /\/api\/ai\/exams\/current/);
   assert.match(app, /\/api\/ai\/exams\/submit/);
+  assert.match(app, /EXAM_GENERATION_POLL_MS/);
+  assert.match(app, /monitorExamGeneration\(examState\.generation\.id\)/);
+  assert.match(app, /generation\.status === "failed"/);
+  assert.match(app, /\[504, 524\]\.includes\(response\.status\)/);
   assert.match(app, /exam\.questions\.find\(question => !examAnswerComplete/);
   assert.match(app, /完形填空材料/);
   assert.match(app, /exam\.clozePassage/);
@@ -88,7 +92,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use cache version 20", () => {
+test("PWA client assets consistently use cache version 21", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -96,6 +100,6 @@ test("PWA client assets consistently use cache version 20", () => {
   const versions = Array.from(versionedSources.matchAll(/\?v=(\d+)/g), match => match[1]);
 
   assert.ok(versions.length > 0);
-  assert.deepEqual(new Set(versions), new Set(["20"]));
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v20"/);
+  assert.deepEqual(new Set(versions), new Set(["21"]));
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v21"/);
 });

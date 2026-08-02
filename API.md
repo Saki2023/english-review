@@ -50,7 +50,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | PUT | `/api/sync/teaching-profile?username=账号名` | 上传本地教学档案，需要独立的教学写入令牌 |
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
 | GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
-| POST | `/api/ai/exams/generate` | 按学习进度生成一张完整试卷，需要登录 |
+| POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录，返回 `202` |
 | PUT | `/api/ai/exams/current` | 保存当前试卷草稿答案，需要登录 |
 | POST | `/api/ai/exams/listening` | 获取当前听力题的语音合成文本，需要登录 |
 | POST | `/api/ai/exams/photo-grade` | 识别纸质答卷图片并统一判分，需要登录 |
@@ -238,7 +238,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | POST | `/api/ai/questions/ask` | 已登录 | 询问当前或历史 AI 题目，并按账号及题目追加长期问答记录 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
 | GET | `/api/ai/exams` | 已登录 | 获取脱敏后的试卷状态和历史 |
-| POST | `/api/ai/exams/generate` | 已登录 | 生成 100 分或 150 分完整试卷 |
+| POST | `/api/ai/exams/generate` | 已登录 | 创建 100 分或 150 分完整试卷的后台生成任务，返回 `202` |
 | PUT | `/api/ai/exams/current` | 已登录 | 保存整卷草稿，不触发判分 |
 | POST | `/api/ai/exams/listening` | 已登录 | 获取当前试卷中一题的英文朗读文本 |
 | POST | `/api/ai/exams/photo-grade` | 已登录 | 识别最多 6 张纸质答卷图片并完成统一判分 |
@@ -277,7 +277,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 }
 ```
 
-`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。AI 超时配置范围为 1 至 120 秒，默认 30 秒。
+`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。AI 超时配置范围为 1 至 120 秒，默认 30 秒；由于完整试卷输出较长，试卷生成任务会把本次上游等待时间提高到 120 秒。
 
 生成试卷请求：
 
@@ -290,6 +290,22 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
   "includeListening": true
 }
 ```
+
+接口会立即返回 HTTP `202`，不会让浏览器和 Cloudflare 一直等待 AI 完成。响应中的 `generation` 示例：
+
+```json
+{
+  "id": "examgen-任务 ID",
+  "status": "pending",
+  "startedAt": "2026-08-02T00:00:00.000Z",
+  "finishedAt": "",
+  "examId": "",
+  "error": "",
+  "providerStatus": null
+}
+```
+
+随后轮询 `GET /api/ai/exams`。`generation.status` 为 `completed` 时，`generation.examId` 对应新的 `currentExam.id`；为 `failed` 时，`generation.error` 提供经过脱敏的超时、上游状态或格式校验说明。任务进行中再次生成会返回 `409`。服务重启会把未完成任务标记为失败，已有试卷不会被覆盖。
 
 `totalPoints` 只能选择 `100` 或 `150`。单选 3 题、多选 2 题、填空 3 题、判断 3 题、完形填空 4 题、材料题 3 题和翻译 3 题是固定部分，共 21 题；听力可选，开启后增加 3 题；作文可选，开启后增加 1 题。AI 返回的题型或数量不足时整卷生成失败，不会保存残缺试卷。听力题答题时不返回可见原文，网页点击播放后通过 `/api/ai/exams/listening` 取得文本，并使用设备的英文语音合成慢速朗读。设备不支持语音合成时，网页会禁用听力选项。
 

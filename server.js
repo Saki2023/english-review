@@ -69,6 +69,7 @@ const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_AI_ANSWER_LENGTH = 500;
 const MAX_AI_TUTOR_MESSAGE_LENGTH = 500;
+const EXAM_GENERATION_TIMEOUT_MS = 120000;
 
 ensureDataDir();
 const aiSettingsStore = createAiSettingsStore(DATA_DIR);
@@ -78,6 +79,7 @@ let content = loadContent();
 let users = loadUsers(DATA_DIR);
 let sessions = loadSessions();
 let userStates = loadUserStates();
+const activeExamGenerationJobs = new Map();
 const legacyState = sanitizeState(readJson(LEGACY_STATE_FILE, {}));
 
 function ensureDataDir() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
@@ -489,8 +491,10 @@ function publicAiGenerationFailure(error) {
   else if (/timed out/i.test(detail)) {
     message = "AI 请求超时，请稍后重试或在 AI 设置中增加超时时间";
     statusCode = 504;
-  } else if (/too few valid questions/i.test(detail)) message = "AI 返回的题目超出了已学词汇，请重试或更换模型";
-  else if (/invalid question JSON|did not return questions|unsupported response/i.test(detail)) message = "AI 返回格式不符合出题要求，请重试或更换模型";
+  } else if (/AI exam returned too few|missing numbered blanks|missing a cloze passage|missing a reading passage|point allocation is invalid/i.test(detail)) message = "AI 返回的试卷缺少必需题型或题量，系统未采用，请重新生成或更换模型";
+  else if (/AI exam used unlearned English|AI exam returned no English/i.test(detail)) message = "AI 返回的试卷含有未学英语，系统未采用，请重新生成或更换模型";
+  else if (/too few valid questions/i.test(detail)) message = "AI 返回的题目超出了已学词汇，请重试或更换模型";
+  else if (/invalid (question|exam) JSON|did not return questions|unsupported response|Unexpected (end|token)/i.test(detail)) message = "AI 返回格式不符合出题要求，请重试或更换模型";
   else if (/response is too large/i.test(detail)) message = "AI 返回内容过长，请重试或更换模型";
 
   return { message, providerStatus, statusCode };
@@ -814,34 +818,114 @@ function aiExamSelectionForState(state, requested = {}) {
   return { route, examState, includeEssay, includeListening, totalPoints };
 }
 
+function reconcileAiExamGeneration(state) {
+  const examState = sanitizeAiExamState(state.aiExam);
+  const generation = examState.generation;
+  if (generation && generation.status === "pending" && !activeExamGenerationJobs.has(generation.id)) {
+    const finishedAt = new Date().toISOString();
+    examState.generation = {
+      ...generation,
+      status: "failed",
+      finishedAt,
+      error: "服务器更新中断了试卷生成，请重新生成",
+      providerStatus: null
+    };
+    examState.updatedAt = finishedAt;
+    state.aiExam = examState;
+    persistUserStates();
+  }
+  return examState;
+}
+
+function startAiExamGeneration(user, state, selection, profile) {
+  const generationId = `examgen-${crypto.randomUUID()}`;
+  const startedAt = new Date().toISOString();
+  selection.examState.generation = {
+    id: generationId,
+    status: "pending",
+    startedAt,
+    finishedAt: "",
+    examId: "",
+    error: "",
+    providerStatus: null
+  };
+  selection.examState.updatedAt = startedAt;
+  state.aiExam = selection.examState;
+  persistUserStates();
+
+  const examOptions = {
+    includeEssay: selection.includeEssay,
+    includeListening: selection.includeListening,
+    totalPoints: selection.totalPoints
+  };
+  const job = (async () => {
+    try {
+      const routed = await runAiRoute(selection.route, config => createAiExamGenerator({
+        ...config,
+        timeoutMs: Math.max(Number(config.timeoutMs) || 0, EXAM_GENERATION_TIMEOUT_MS)
+      }).generate(profile, examOptions));
+      const currentState = getUserState(user);
+      const examState = sanitizeAiExamState(currentState.aiExam);
+      if (!examState.generation || examState.generation.id !== generationId) return;
+      const exam = createExam(routed.value, routed.config);
+      const finishedAt = new Date().toISOString();
+      examState.currentExam = exam;
+      examState.generation = {
+        ...examState.generation,
+        status: "completed",
+        finishedAt,
+        examId: exam.id,
+        error: "",
+        providerStatus: null
+      };
+      examState.updatedAt = finishedAt;
+      currentState.aiExam = examState;
+      persistUserStates();
+    } catch (error) {
+      console.warn(`AI exam generation failed: ${error && error.message ? error.message : "unknown error"}`);
+      const currentState = getUserState(user);
+      const examState = sanitizeAiExamState(currentState.aiExam);
+      if (!examState.generation || examState.generation.id !== generationId) return;
+      const failure = publicAiGenerationFailure(error);
+      const finishedAt = new Date().toISOString();
+      examState.generation = {
+        ...examState.generation,
+        status: "failed",
+        finishedAt,
+        error: failure.message,
+        providerStatus: failure.providerStatus
+      };
+      examState.updatedAt = finishedAt;
+      currentState.aiExam = examState;
+      persistUserStates();
+    }
+  })().finally(() => activeExamGenerationJobs.delete(generationId));
+  activeExamGenerationJobs.set(generationId, job);
+  return generationId;
+}
+
 async function handleAiExams(req, res, url, user) {
   if (!user) return sendError(res, 401, "login required");
   const state = getUserState(user);
 
   if (url.pathname === "/api/ai/exams" && req.method === "GET") {
-    return sendJson(res, 200, publicAiExamState(state.aiExam));
+    return sendJson(res, 200, publicAiExamState(reconcileAiExamGeneration(state)));
   }
 
   if (url.pathname === "/api/ai/exams/generate" && req.method === "POST") {
     if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
     try {
       const body = await readBody(req);
+      const existingExamState = reconcileAiExamGeneration(state);
+      if (existingExamState.generation && existingExamState.generation.status === "pending") return sendError(res, 409, "试卷正在后台生成，请等待完成");
       const selection = aiExamSelectionForState(state, body);
       const rate = takeAiRequest(user.id);
       if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
       refreshContent();
       const profile = buildLearningProfile(content, state, today());
       if (!profile.allowedWords.length) return sendError(res, 409, "no learned words are available");
-      const routed = await runAiRoute(selection.route, config => createAiExamGenerator(config).generate(profile, {
-        includeEssay: selection.includeEssay,
-        includeListening: selection.includeListening,
-        totalPoints: selection.totalPoints
-      }));
-      selection.examState.currentExam = createExam(routed.value, routed.config);
-      selection.examState.updatedAt = new Date().toISOString();
-      state.aiExam = selection.examState;
-      persistUserStates();
-      return sendJson(res, 201, publicAiExamState(state.aiExam));
+      startAiExamGeneration(user, state, selection, profile);
+      return sendJson(res, 202, publicAiExamState(state.aiExam));
     } catch (error) {
       if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
       console.warn(`AI exam generation failed: ${error && error.message ? error.message : "unknown error"}`);

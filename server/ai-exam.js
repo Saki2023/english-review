@@ -10,6 +10,7 @@ const EXAM_TYPES = ["listening", "single-choice", "multiple-choice", "fill-blank
 const SUBJECTIVE_TYPES = new Set(["translation", "essay"]);
 const MAX_EXAM_HISTORY = 20;
 const MAX_EXAM_WEAK_POINTS = 200;
+const EXAM_GENERATION_STATUSES = new Set(["pending", "completed", "failed"]);
 const TYPE_LABELS = {
   "fill-blank": "填空题",
   "single-choice": "单选题",
@@ -576,6 +577,23 @@ function sanitizeWeakRecord(value) {
   };
 }
 
+function sanitizeExamGeneration(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const id = cleanText(source.id, 100);
+  const status = EXAM_GENERATION_STATUSES.has(source.status) ? source.status : "";
+  if (!id || !status) return null;
+  const providerStatus = Number(source.providerStatus);
+  return {
+    id,
+    status,
+    startedAt: cleanText(source.startedAt, 40),
+    finishedAt: cleanText(source.finishedAt, 40),
+    examId: cleanText(source.examId, 80),
+    error: status === "failed" ? cleanText(source.error, 240) : "",
+    providerStatus: Number.isInteger(providerStatus) && providerStatus >= 100 && providerStatus <= 599 ? providerStatus : null
+  };
+}
+
 function sanitizeAiExamState(value) {
   const source = value && typeof value === "object" ? value : {};
   const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
@@ -588,6 +606,7 @@ function sanitizeAiExamState(value) {
       totalPoints: normalizeTotalPoints(settings.totalPoints)
     },
     currentExam: sanitizeExam(source.currentExam),
+    generation: sanitizeExamGeneration(source.generation),
     history: (Array.isArray(source.history) ? source.history : []).map(sanitizeExam).filter(exam => exam && exam.status === "completed").slice(-MAX_EXAM_HISTORY),
     weakPoints: (Array.isArray(source.weakPoints) ? source.weakPoints : []).map(sanitizeWeakRecord).filter(Boolean).slice(-MAX_EXAM_WEAK_POINTS),
     updatedAt: cleanText(source.updatedAt, 40)
@@ -726,6 +745,7 @@ function publicAiExamState(value) {
   return {
     settings: state.settings,
     currentExam: publicExam(state.currentExam),
+    generation: state.generation,
     history: state.history.map(publicExam),
     weakPoints: state.weakPoints,
     updatedAt: state.updatedAt

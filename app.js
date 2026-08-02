@@ -12,6 +12,7 @@
   const FOCUSED_TYPE_LABELS = { listening: "听力", choice: "选择", "fill-blank": "填空", "true-false": "判断", translation: "翻译", cloze: "完形填空", reading: "材料题", essay: "作文" };
   const DEFAULT_AI_TIMEOUT_MS = 30000;
   const AI_CLIENT_TIMEOUT_MS = 125000;
+  const EXAM_GENERATION_POLL_MS = 2000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
   let remoteReady = !API_ENABLED;
   let remoteSaveTimer;
@@ -41,6 +42,8 @@
   let examState = normalizeClientAiExam(null);
   let examStatusMessage = "";
   let examRequestInProgress = false;
+  let examGenerationMonitorId = "";
+  let examGenerationMonitorPromise = null;
   let examDraftSaveTimer = null;
   let examSpeechQuestionId = "";
   const examListeningCache = new Map();
@@ -163,6 +166,15 @@
         totalPoints: Number(settings.totalPoints) === 150 ? 150 : 100
       },
       currentExam: source.currentExam && Array.isArray(source.currentExam.questions) ? source.currentExam : null,
+      generation: source.generation && ["pending", "completed", "failed"].includes(source.generation.status) ? {
+        id: String(source.generation.id || ""),
+        status: source.generation.status,
+        startedAt: String(source.generation.startedAt || ""),
+        finishedAt: String(source.generation.finishedAt || ""),
+        examId: String(source.generation.examId || ""),
+        error: String(source.generation.error || ""),
+        providerStatus: Number(source.generation.providerStatus) || null
+      } : null,
       history: Array.isArray(source.history) ? source.history.slice(-20) : [],
       weakPoints: Array.isArray(source.weakPoints) ? source.weakPoints.slice(-200) : [],
       updatedAt: String(source.updatedAt || "")
@@ -1126,6 +1138,7 @@
 
   async function loadAiExams() {
     examStatusMessage = "";
+    let pendingGenerationId = "";
     if (!API_ENABLED) {
       examState = normalizeClientAiExam(null);
       renderExamView();
@@ -1135,10 +1148,15 @@
       const response = await fetch("/api/ai/exams", { credentials: "same-origin", cache: "no-store" });
       examState = normalizeClientAiExam(await responseJson(response));
       preloadCurrentListening();
+      if (examState.generation?.status === "pending") {
+        pendingGenerationId = examState.generation.id;
+        examStatusMessage = "AI 正在后台生成整张试卷，最高强度可能需要几分钟，可暂时离开本页";
+      } else if (examState.generation?.status === "failed") examStatusMessage = examState.generation.error || "上次试卷生成失败，请重新生成";
     } catch (error) {
       examStatusMessage = error.message;
     }
     renderExamView();
+    if (pendingGenerationId) void monitorExamGeneration(pendingGenerationId);
   }
 
   function currentAiQuestion() {
@@ -1570,8 +1588,23 @@
   }
 
   async function responseJson(response) {
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "请求失败，请稍后重试");
+    const text = await response.text().catch(() => "");
+    let data = {};
+    if (text) {
+      try { data = JSON.parse(text); }
+      catch (_) { data = {}; }
+    }
+    if (!response.ok) {
+      let fallback = "请求失败，请稍后重试";
+      if (response.status === 401) fallback = "登录状态已失效，请重新登录";
+      else if (response.status === 429) fallback = "请求过于频繁，请稍后再试";
+      else if ([504, 524].includes(response.status)) fallback = "请求经过网关时超时，请稍后重试";
+      else if ([502, 503, 520, 521, 522, 523].includes(response.status)) fallback = "服务器或 AI 上游暂时不可用，请稍后重试";
+      const error = new Error(data && typeof data.error === "string" && data.error.trim() ? data.error.trim() : fallback);
+      error.statusCode = response.status;
+      throw error;
+    }
+    if (!text || !data || typeof data !== "object") throw new Error("服务器返回格式异常，请刷新后重试");
     return data;
   }
 
@@ -1880,7 +1913,15 @@
     if (!exam) {
       empty.hidden = false;
       paper.hidden = true;
-      $("#examEmptyTitle").textContent = aiOptions.configured ? "准备生成试卷" : currentUser && currentUser.role === "admin" ? "请先完成 AI 连接设置" : "AI 尚未配置";
+      $("#examEmptyTitle").textContent = examState.generation?.status === "pending"
+        ? "AI 正在后台生成整张试卷"
+        : examState.generation?.status === "failed"
+          ? "上次试卷生成未完成"
+          : aiOptions.configured
+            ? "准备生成试卷"
+            : currentUser && currentUser.role === "admin"
+              ? "请先完成 AI 连接设置"
+              : "AI 尚未配置";
       refreshIcons();
       return;
     }
@@ -2068,6 +2109,79 @@
     }
   }
 
+  function finishExamGenerationSuccess() {
+    examListeningCache.clear();
+    examAbilityChanges = [];
+    clearExamPhotos();
+    preloadCurrentListening();
+    examStatusMessage = "试卷已生成，草稿会自动保存";
+  }
+
+  async function pollExamGeneration(generationId) {
+    let transientFailures = 0;
+    while (examGenerationMonitorId === generationId) {
+      await new Promise(resolve => setTimeout(resolve, EXAM_GENERATION_POLL_MS));
+      let nextState;
+      try {
+        nextState = normalizeClientAiExam(await responseJson(await fetch("/api/ai/exams", {
+          credentials: "same-origin",
+          cache: "no-store"
+        })));
+        transientFailures = 0;
+      } catch (error) {
+        transientFailures += 1;
+        if (transientFailures < 5) {
+          examStatusMessage = "网站连接短暂中断，正在继续查询后台生成结果…";
+          $("#examStatus").textContent = examStatusMessage;
+          continue;
+        }
+        throw error;
+      }
+
+      examState = nextState;
+      const generation = examState.generation;
+      if (!generation || generation.id !== generationId) throw new Error("试卷生成任务状态已变化，请重新生成");
+      if (generation.status === "pending") {
+        examStatusMessage = "AI 正在后台生成整张试卷，最高强度可能需要几分钟，可暂时离开本页";
+        $("#examStatus").textContent = examStatusMessage;
+        continue;
+      }
+      if (generation.status === "failed") throw new Error(generation.error || "AI 生成试卷失败，请重新生成或更换模型");
+      if (!examState.currentExam || examState.currentExam.id !== generation.examId) throw new Error("试卷生成结果不完整，请重新生成");
+      return;
+    }
+    throw new Error("试卷生成任务已停止，请重新查看试卷页面");
+  }
+
+  function monitorExamGeneration(generationId) {
+    if (!generationId) return Promise.resolve();
+    if (examGenerationMonitorId === generationId && examGenerationMonitorPromise) return examGenerationMonitorPromise;
+    examGenerationMonitorId = generationId;
+    const button = $("#generateExamButton");
+    const wasBusy = examRequestInProgress;
+    examRequestInProgress = true;
+    examStatusMessage = "AI 正在后台生成整张试卷，最高强度可能需要几分钟，可暂时离开本页";
+    if (!wasBusy) setBusyButton(button, true, "后台生成中…");
+    else button.textContent = "后台生成中…";
+    renderExamView();
+
+    examGenerationMonitorPromise = pollExamGeneration(generationId)
+      .then(() => finishExamGenerationSuccess())
+      .catch(error => {
+        examStatusMessage = error.message;
+        showToast(error.message);
+      })
+      .finally(() => {
+        if (examGenerationMonitorId !== generationId) return;
+        examGenerationMonitorId = "";
+        examGenerationMonitorPromise = null;
+        examRequestInProgress = false;
+        setBusyButton(button, false, "");
+        renderExamView();
+      });
+    return examGenerationMonitorPromise;
+  }
+
   async function generateExam() {
     if (examRequestInProgress || !aiOptions.configured) return;
     const current = examState.currentExam;
@@ -2077,9 +2191,10 @@
     const settings = selectedExamSettings();
     examState.settings = settings;
     examRequestInProgress = true;
-    examStatusMessage = "正在根据学习进度生成整张试卷…";
-    setBusyButton($("#generateExamButton"), true, "正在生成…");
+    examStatusMessage = "正在创建后台试卷生成任务…";
+    setBusyButton($("#generateExamButton"), true, "正在创建…");
     renderExamView();
+    let handedToMonitor = false;
     try {
       examState = normalizeClientAiExam(await responseJson(await fetch("/api/ai/exams/generate", {
         method: "POST",
@@ -2087,18 +2202,19 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(settings)
       })));
-      examListeningCache.clear();
-      examAbilityChanges = [];
-      clearExamPhotos();
-      preloadCurrentListening();
-      examStatusMessage = "试卷已生成，草稿会自动保存";
+      if (examState.generation?.status === "pending") {
+        handedToMonitor = true;
+        await monitorExamGeneration(examState.generation.id);
+      } else finishExamGenerationSuccess();
     } catch (error) {
       examStatusMessage = error.message;
       showToast(error.message);
     } finally {
-      examRequestInProgress = false;
-      setBusyButton($("#generateExamButton"), false, "");
-      renderExamView();
+      if (!handedToMonitor) {
+        examRequestInProgress = false;
+        setBusyButton($("#generateExamButton"), false, "");
+        renderExamView();
+      }
     }
   }
 
@@ -3129,7 +3245,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=20").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=21").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
