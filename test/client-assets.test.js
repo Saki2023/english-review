@@ -47,7 +47,8 @@ test("exam weaknesses jump to and highlight their related wrong questions", () =
   assert.match(app, /function examWeaknessQuestionId\(exam, weakness\)/);
   assert.match(app, /data-exam-jump-question/);
   assert.match(app, /function jumpToExamQuestion\(questionId\)/);
-  assert.match(app, /target\.scrollIntoView\(\{ behavior: "smooth", block: "center" \}\)/);
+  assert.match(app, /const scrollTop = Math\.max\(0, window\.scrollY \+ targetRect\.top - desiredTop\)/);
+  assert.match(app, /window\.scrollTo\(\{ top: scrollTop, behavior: "smooth" \}\)/);
   assert.match(app, /summary !== "\[object Object\]"/);
   assert.match(css, /\.exam-question\.is-weakness-target/);
   assert.match(css, /\.exam-weakness-link/);
@@ -122,7 +123,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use cache version 23", () => {
+test("PWA client assets consistently use cache version 24", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -130,6 +131,6 @@ test("PWA client assets consistently use cache version 23", () => {
   const versions = Array.from(versionedSources.matchAll(/\?v=(\d+)/g), match => match[1]);
 
   assert.ok(versions.length > 0);
-  assert.deepEqual(new Set(versions), new Set(["23"]));
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v23"/);
+  assert.deepEqual(new Set(versions), new Set(["24"]));
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v24"/);
 });

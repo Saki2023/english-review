@@ -1990,8 +1990,12 @@
     $$(".exam-question.is-weakness-target").forEach(item => item.classList.remove("is-weakness-target"));
     void target.offsetWidth;
     target.classList.add("is-weakness-target");
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
     target.focus({ preventScroll: true });
+    const targetRect = target.getBoundingClientRect();
+    const visibleHeight = Math.min(targetRect.height, Math.max(1, window.innerHeight - 160));
+    const desiredTop = Math.max(80, (window.innerHeight - visibleHeight) / 2);
+    const scrollTop = Math.max(0, window.scrollY + targetRect.top - desiredTop);
+    window.scrollTo({ top: scrollTop, behavior: "smooth" });
     examQuestionHighlightTimer = setTimeout(() => target.classList.remove("is-weakness-target"), 2800);
   }
 
@@ -3413,7 +3417,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=23", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=24", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
