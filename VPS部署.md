@@ -1,5 +1,7 @@
 # Debian VPS + Cloudflare Tunnel 部署
 
+GitHub 仓库首页的 [README.md](README.md) 提供了从空白 Debian 开始的完整教程，包括 Docker、Cloudflare Tunnel、账号、AI、双向同步、自动更新、备份恢复和故障排查。本文件保留为简明命令参考。
+
 ## 部署结构
 
 VPS 不需要开放 80、443 或 8080 端口：
