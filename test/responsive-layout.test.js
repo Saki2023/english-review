@@ -14,6 +14,10 @@ test("mobile styles keep AI, exam, ability, dictation, focused, and notes contro
 
   assert.match(tablet, /\.side-nav\s*\{[^}]*grid-auto-flow:\s*column[^}]*grid-auto-columns:\s*minmax\(62px, 1fr\)[^}]*overflow-x:\s*auto/s);
   assert.match(tablet, /\.ai-tutor-window\s*\{[^}]*right:\s*10px[^}]*left:\s*10px[^}]*resize:\s*none/s);
+  assert.match(css, /\.brand-name\s*\{[^}]*white-space:\s*nowrap/s);
+  assert.match(mobile, /\.topbar-actions\s*\{[^}]*gap:\s*8px/s);
+  assert.match(mobile, /\.brand-mark\s*\{[^}]*width:\s*30px[^}]*height:\s*30px/s);
+  assert.match(mobile, /\.user-badge\s*\{[^}]*max-width:\s*64px/s);
   assert.match(mobile, /\.ai-controls\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.exam-controls\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.exam-options,\s*\.exam-generate-button\s*\{[^}]*grid-column:\s*1/s);

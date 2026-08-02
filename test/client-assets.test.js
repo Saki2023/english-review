@@ -123,7 +123,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 25", () => {
+test("PWA client assets consistently use the displayed cache version 26", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -134,6 +134,6 @@ test("PWA client assets consistently use the displayed cache version 25", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "25");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v25"/);
+  assert.equal(displayedVersion[1], "26");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v26"/);
 });
