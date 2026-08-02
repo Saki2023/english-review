@@ -2,7 +2,7 @@
   "use strict";
 
   const DATA = window.ENGLISH_REVIEW_DATA;
-  const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
+  const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const STORAGE_KEY = "daily-english-review-v1";
   const EXAM_GENERATION_API_VERSION = "2";
   const DAILY_TARGET = 10;
@@ -925,7 +925,7 @@
       const state = next.taskStates[mistake.taskId];
       if (state && !state.reviewCount && state.lastResult === null) state.lastResult = false;
     });
-    return next;
+    return repairReviewEvidence(DATA, next).state;
   }
 
   function saveModel() {
@@ -969,7 +969,7 @@
       const localSession = merged.sessions[date];
       if (!localSession || (remoteSession.doneTaskIds || []).length >= (localSession.doneTaskIds || []).length) merged.sessions[date] = remoteSession;
     });
-    return merged;
+    return repairReviewEvidence(DATA, merged).state;
   }
 
   async function syncRemoteState() {
@@ -3417,7 +3417,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=26", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=27", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

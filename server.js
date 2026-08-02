@@ -13,6 +13,7 @@ const { buildLearningSyncProfile } = require("./server/learning-sync");
 const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./server/learning-sync-token");
 const { publicTeachingProfile, sanitizeTeachingProfile } = require("./server/teaching-profile");
 const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis");
+const { repairLearningEvidence } = require("./server/evidence-repair");
 const {
   completeDictation,
   createAiDictationAnalyzer,
@@ -81,7 +82,8 @@ let users = loadUsers(DATA_DIR);
 let sessions = loadSessions();
 let userStates = loadUserStates();
 const activeExamGenerationJobs = new Map();
-const legacyState = sanitizeState(readJson(LEGACY_STATE_FILE, {}));
+const legacyState = repairLearningEvidence(content, sanitizeState(readJson(LEGACY_STATE_FILE, {}))).state;
+repairStoredUserStates();
 
 function ensureDataDir() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
 
@@ -155,6 +157,7 @@ function sanitizeState(value) {
   const source = value && typeof value === "object" ? value : {};
   return {
     schema: 1,
+    evidenceRepairVersion: Math.max(0, Number(source.evidenceRepairVersion) || 0),
     taskStates: source.taskStates && typeof source.taskStates === "object" ? source.taskStates : {},
     history: source.history && typeof source.history === "object" ? source.history : {},
     attempts: Array.isArray(source.attempts) ? source.attempts.slice(-120) : [],
@@ -173,7 +176,7 @@ function publicReviewState(value) {
   return reviewState;
 }
 
-function defaultState() { return sanitizeState({}); }
+function defaultState() { return repairLearningEvidence(content, sanitizeState({})).state; }
 function isEmptyState(value) { return !value || (!Object.keys(value.taskStates || {}).length && !Object.keys(value.history || {}).length && !value.attempts?.length && !value.mistakes?.length); }
 
 function loadSessions() {
@@ -200,6 +203,16 @@ function aiConfigured() { return Boolean(aiSettings && getAvailableModels(aiSett
 function advanceAiRotation(config, mode) {
   if (mode !== "auto") return;
   aiSettings = aiSettingsStore.advanceRotation(config.providerId) || aiSettings;
+}
+
+function repairStoredUserStates() {
+  let changed = false;
+  Object.entries(userStates.users).forEach(([userId, value]) => {
+    const repaired = repairLearningEvidence(content, sanitizeState(value));
+    userStates.users[userId] = repaired.state;
+    if (repaired.changed) changed = true;
+  });
+  if (changed) persistUserStates();
 }
 
 async function runAiRoute(route, operation) {
@@ -285,7 +298,11 @@ function getUserState(user) {
     const canMigrate = user.role === "admin" && users.users.length === 1 && !isEmptyState(legacyState);
     userStates.users[user.id] = canMigrate ? legacyState : defaultState();
     persistUserStates();
-  } else userStates.users[user.id] = sanitizeState(userStates.users[user.id]);
+  } else {
+    const repaired = repairLearningEvidence(content, sanitizeState(userStates.users[user.id]));
+    userStates.users[user.id] = repaired.state;
+    if (repaired.changed) persistUserStates();
+  }
   return userStates.users[user.id];
 }
 
@@ -389,7 +406,7 @@ function handleState(req, res, user) {
   if (req.method === "GET") return sendJson(res, 200, publicReviewState(getUserState(user)));
   if (req.method === "PUT") return readBody(req).then(body => {
     const existing = getUserState(user);
-    userStates.users[user.id] = sanitizeState({ ...body, aiExam: existing.aiExam, dictation: existing.dictation, focusedPractice: existing.focusedPractice, teachingProfile: existing.teachingProfile });
+    userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({ ...body, aiExam: existing.aiExam, dictation: existing.dictation, focusedPractice: existing.focusedPractice, teachingProfile: existing.teachingProfile })).state;
     persistUserStates();
     sendJson(res, 200, publicReviewState(userStates.users[user.id]));
   }).catch(error => sendError(res, error.statusCode || 400, error.message));

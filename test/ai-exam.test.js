@@ -155,3 +155,38 @@ test("exam generation rejects missing required types and incomplete cloze passag
   incompleteClozePayload.choices[0].message.content = JSON.stringify(incompleteClozeExam);
   assert.throws(() => parseGeneratedExam(incompleteClozePayload, { allowedWords: ALLOWED_WORDS, totalPoints: 100, includeEssay: false, includeListening: false }), /missing numbered blanks/);
 });
+
+test("exam generation rejects a claimed same-meaning option that adds object information", () => {
+  const payload = generatedPayload();
+  const parsed = JSON.parse(payload.choices[0].message.content);
+  const question = parsed.questions.find(item => item.type === "single-choice");
+  Object.assign(question, {
+    prompt: "选择意思相近的句子。",
+    sourceText: "It is big.",
+    options: ["It is a big cat.", "I am a man."],
+    correctOption: 0
+  });
+  payload.choices[0].message.content = JSON.stringify(parsed);
+
+  assert.throws(
+    () => parseGeneratedExam(payload, { allowedWords: ALLOWED_WORDS, totalPoints: 100, includeEssay: false, includeListening: false }),
+    /semantic-equivalence answer changes sentence information/
+  );
+});
+
+test("exam grading removes full credit when a Chinese-to-English translation omits a required article", () => {
+  const generated = parseGeneratedExam(generatedPayload(), { allowedWords: ALLOWED_WORDS, totalPoints: 100, includeEssay: false, includeListening: false });
+  const exam = createExam(generated, { providerId: "p1", providerName: "Test", model: "test-model", reasoningEffort: "high" });
+  const answers = answersFor(exam);
+  const target = exam.questions.find(question => question.type === "translation" && question.direction === "zh-en");
+  answers[target.id] = "It is cat.";
+  const subjectiveGrades = exam.questions.filter(question => question.type === "translation").map(question => ({ questionId: question.id, score: question.points, explanation: "表达正确。" }));
+  const payload = { choices: [{ message: { content: JSON.stringify({ subjectiveGrades, weakPoints: [], summary: "完成。" }) } }] };
+
+  const grading = parseExamGrade(payload, { exam, answers, allowedWords: ALLOWED_WORDS });
+  const grade = grading.subjectiveGrades.find(item => item.questionId === target.id);
+  assert.equal(grade.score, target.points - 1);
+  assert.equal(grade.correct, false);
+  assert.match(grade.explanation, /冠词/);
+  assert.equal(grading.weakPoints.some(item => item.category === "grammar" && item.questionIds.includes(target.id)), true);
+});

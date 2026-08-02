@@ -81,6 +81,25 @@ test("AI grade parsing requires a boolean result and a Chinese explanation", () 
   assert.throws(() => parseGradeResponse({ choices: [{ message: { content: "{\"correct\":\"yes\",\"explanation\":\"ok\"}" } }] }), /invalid grade/);
 });
 
+test("AI grader cannot approve a Chinese-to-English answer with a missing article", async () => {
+  let requestBody;
+  const fetchImpl = async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ correct: true, explanation: "语义一致。" }) } }] }), { status: 200 });
+  };
+  const grader = createAiGrader(aiConfig(), { fetchImpl });
+  const result = await grader.grade({
+    direction: "zh-en",
+    sourceText: "一头大猪坐在一张垫子上。",
+    acceptedAnswers: ["A big pig sat on a mat."],
+    answer: "a big pig sat on mat"
+  });
+
+  assert.equal(result.correct, false);
+  assert.match(result.explanation, /冠词/);
+  assert.match(requestBody.messages[0].content, /missing or extra a, an, the/);
+});
+
 test("AI grader retries once without JSON mode when a compatible proxy rejects it", async () => {
   const requests = [];
   const fetchImpl = async (_url, options) => {

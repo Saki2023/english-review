@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, shouldSubmitOnEnter } = require("../answer-utils");
+const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, englishFunctionWordsMatch, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
 
 test("Chinese answers accept explicit equivalent location wording", () => {
   const accepted = ["一只猫坐在一张垫子上", "一只猫坐在垫子上"];
@@ -22,6 +22,49 @@ test("Chinese normalization does not accept changed meaning", () => {
 test("English matching remains case and punctuation tolerant", () => {
   assert.equal(englishAnswerMatches("I AM SAM!", ["i am sam"]), true);
   assert.equal(englishAnswerMatches("I am a man", ["i am sam"]), false);
+});
+
+test("English structure comparison requires every learned function word", () => {
+  const accepted = ["A big pig sat on a mat."];
+  assert.equal(englishFunctionWordsMatch("a big pig sat on a mat", accepted), true);
+  assert.equal(englishFunctionWordsMatch("a big pig sat on mat", accepted), false);
+  assert.equal(englishFunctionWordsMatch("a big pig sat in a mat", accepted), false);
+  assert.equal(englishFunctionWordsMatch("the big pig sat on a mat", accepted), false);
+});
+
+test("review evidence repair corrects equivalent Chinese, restores daily counts, and rejects missing articles", () => {
+  const content = {
+    words: [],
+    sentences: [
+      { id: "cat-s", day: 2, english: "A cat sat on a mat.", chinese: "一只猫坐在一张垫子上。", directions: ["en-zh"] },
+      { id: "pig-s", day: 2, english: "A big pig sat on a mat.", chinese: "一头大猪坐在一张垫子上。", directions: ["zh-en"] }
+    ]
+  };
+  const input = {
+    taskStates: {
+      "cat-s:en-zh": { level: 0, lastResult: false, reviewCount: 1, lastReviewed: "2026-08-02" },
+      "pig-s:zh-en": { level: 2, lastResult: true, reviewCount: 1, lastReviewed: "2026-08-02" }
+    },
+    history: { "2026-08-02": { reviewed: 2, correct: 1 } },
+    attempts: [
+      { taskId: "cat-s:en-zh", date: "2026-08-02", answer: "一只猫坐在一张垫子上面", correct: false },
+      { taskId: "pig-s:zh-en", date: "2026-08-02", answer: "a big pig sat on mat", correct: true }
+    ],
+    mistakes: [{ id: "old-error", taskId: "cat-s:en-zh", prompt: "A cat sat on a mat.", userAnswer: "一只猫坐在一张垫子上面", correctAnswer: "一只猫坐在一张垫子上。" }]
+  };
+
+  const repaired = repairReviewEvidence(content, input);
+  assert.equal(repaired.changed, true);
+  assert.deepEqual(repaired.state.attempts.map(item => item.correct), [true, false]);
+  assert.equal(repaired.state.history["2026-08-02"].correct, 1);
+  assert.equal(repaired.state.taskStates["cat-s:en-zh"].lastResult, true);
+  assert.equal(repaired.state.taskStates["pig-s:zh-en"].lastResult, false);
+  assert.equal(repaired.state.mistakes.some(item => item.id === "old-error"), false);
+  assert.equal(repaired.state.mistakes.some(item => item.taskId === "pig-s:zh-en"), true);
+
+  const secondPass = repairReviewEvidence(content, repaired.state);
+  assert.equal(secondPass.changed, false);
+  assert.deepEqual(secondPass.state, repaired.state);
 });
 
 test("mistake practice starts at the selected row and continues through unique mistakes", () => {

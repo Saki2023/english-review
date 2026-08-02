@@ -108,8 +108,10 @@ test("SSH-created account can log in and public registration is absent", async (
     const contentResponse = await fetch(`${baseUrl}/api/content`);
     assert.equal(contentResponse.status, 200);
     const content = await contentResponse.json();
-    assert.equal(content.notes.length, 2);
-    assert.match(content.notes[1].review, /cat/);
+    assert.equal(content.notes.length, 3);
+    assert.match(content.notes[2].review, /pen/);
+    assert.equal(content.words.length, 22);
+    assert.equal(content.sentences.length, 15);
 
     const blockedSync = await fetch(`${baseUrl}/api/sync/profile?username=sshowner`);
     assert.equal(blockedSync.status, 401);
@@ -120,7 +122,7 @@ test("SSH-created account can log in and public registration is absent", async (
     assert.equal(syncResponse.status, 200);
     const syncProfile = await syncResponse.json();
     assert.equal(syncProfile.user.username, "sshowner");
-    assert.equal(syncProfile.course.currentDay, 2);
+    assert.equal(syncProfile.course.currentDay, 3);
     assert.equal(syncProfile.summary.aiQuestions, 0);
     assert.equal(Object.hasOwn(syncProfile.user, "passwordHash"), false);
     assert.equal(JSON.stringify(syncProfile).includes("profile-sync-test-token"), false);
@@ -128,20 +130,20 @@ test("SSH-created account can log in and public registration is absent", async (
 
     const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
     assert.doesNotMatch(html, /data-auth-mode|confirmPasswordWrap|>注册</);
-    assert.match(html, /app\.js\?v=26/);
+    assert.match(html, /app\.js\?v=27/);
     assert.match(html, /data-view="notes"/);
     assert.match(html, /id="aiTutorWindow"/);
     assert.match(html, /id="aiHistoryList"/);
     assert.doesNotMatch(html, /\?v=(?:[7-9]|1[0-4])(?:\D|$)/);
 
-    const appResponse = await fetch(`${baseUrl}/app.js?v=26`);
+    const appResponse = await fetch(`${baseUrl}/app.js?v=27`);
     assert.equal(appResponse.status, 200);
     assert.equal(appResponse.headers.get("cache-control"), "no-cache");
 
     const appSource = await appResponse.text();
     assert.match(appSource, /nextButton"\)\.focus\(\{ preventScroll: true \}\)/);
     assert.match(appSource, /nextAiQuestion"\)\.addEventListener\("keydown"/);
-    assert.match(appSource, /sw\.js\?v=26/);
+    assert.match(appSource, /sw\.js\?v=27/);
     assert.match(appSource, /api\/admin\/ai-config\/models/);
     assert.match(appSource, /api\/ai\/questions\/ask/);
     assert.match(appSource, /function renderAiHistory/);
