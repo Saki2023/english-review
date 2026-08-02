@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=16">
+  <link rel="stylesheet" href="styles.css?v=19">
 </head>
 <body>
   <div class="app-shell">
@@ -58,6 +58,18 @@
         </button>
         <button class="nav-item" type="button" data-view="ai" id="aiNavItem">
           <i data-lucide="sparkles" aria-hidden="true"></i><span>AI 出题</span>
+        </button>
+        <button class="nav-item" type="button" data-view="exam" id="examNavItem">
+          <i data-lucide="clipboard-check" aria-hidden="true"></i><span>试卷</span>
+        </button>
+        <button class="nav-item" type="button" data-view="abilities" id="abilitiesNavItem">
+          <i data-lucide="radar" aria-hidden="true"></i><span>能力分析</span>
+        </button>
+        <button class="nav-item" type="button" data-view="dictation" id="dictationNavItem">
+          <i data-lucide="audio-lines" aria-hidden="true"></i><span>听写</span>
+        </button>
+        <button class="nav-item" type="button" data-view="focused" id="focusedNavItem">
+          <i data-lucide="crosshair" aria-hidden="true"></i><span>定向增强</span>
         </button>
         <button class="nav-item" type="button" data-view="library">
           <i data-lucide="library" aria-hidden="true"></i><span>词句库</span>
@@ -124,7 +136,7 @@
             </div>
             <div class="question-area" id="questionArea">
               <p class="direction-label" id="directionLabel">英译中</p>
-              <div class="prompt-text" id="promptText">准备中…</div>
+              <div class="prompt-with-audio"><div class="prompt-text" id="promptText">准备中…</div><span id="promptSpeech"></span></div>
               <div class="phonetic-line" id="phoneticLine"></div>
               <div class="example-line" id="exampleLine"></div>
               <form class="answer-form" id="answerForm">
@@ -204,7 +216,7 @@
             </div>
             <div class="question-area">
               <p class="direction-label" id="aiDirectionLabel">英译中</p>
-              <div class="prompt-text" id="aiPromptText">准备中…</div>
+              <div class="prompt-with-audio"><div class="prompt-text" id="aiPromptText">准备中…</div><span id="aiPromptSpeech"></span></div>
               <form class="answer-form" id="aiAnswerForm">
                 <label class="sr-only" for="aiAnswerInput">你的答案</label>
                 <input id="aiAnswerInput" class="answer-input" type="text" autocomplete="off" spellcheck="false" placeholder="输入答案">
@@ -235,6 +247,286 @@
               <p id="aiHistorySummary">暂无做题记录</p>
             </div>
             <div class="ai-history-list" id="aiHistoryList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-exam" aria-labelledby="examTitle" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">AI EXAM</p>
+              <h1 id="examTitle">阶段试卷</h1>
+              <p class="heading-note" id="examStatus">正在读取试卷…</p>
+            </div>
+            <div class="exam-page-actions">
+              <button class="secondary-button" type="button" id="printExamButton" disabled><i data-lucide="printer" aria-hidden="true"></i>打印 / 保存 PDF</button>
+              <button class="secondary-button" type="button" id="openExamPhotoButton" disabled><i data-lucide="scan-line" aria-hidden="true"></i>上传纸质答卷</button>
+              <input id="examPhotoInput" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+            </div>
+          </div>
+
+          <div class="exam-controls" id="examControls">
+            <label class="ai-control-field">
+              <span>模型</span>
+              <select id="examModelSelect" aria-label="选择试卷 AI 模型"></select>
+            </label>
+            <div class="ai-control-field exam-effort-field">
+              <span>强度</span>
+              <div class="segmented-control ai-effort-control" role="group" aria-label="试卷 AI 推理强度">
+                <button type="button" class="segment" data-exam-effort="low" aria-pressed="false" title="速度优先">轻度</button>
+                <button type="button" class="segment is-selected" data-exam-effort="medium" aria-pressed="true" title="平衡速度与质量">中</button>
+                <button type="button" class="segment" data-exam-effort="high" aria-pressed="false" title="更充分推理">高</button>
+                <button type="button" class="segment" data-exam-effort="xhigh" aria-pressed="false" title="更深推理，响应更慢">极高</button>
+                <button type="button" class="segment" data-exam-effort="max" aria-pressed="false" title="最深推理，耗时最长">最高</button>
+              </div>
+            </div>
+            <div class="ai-control-field exam-score-field">
+              <span>总分</span>
+              <div class="segmented-control" role="group" aria-label="选择试卷总分">
+                <button type="button" class="segment is-selected" data-exam-points="100" aria-pressed="true">100 分</button>
+                <button type="button" class="segment" data-exam-points="150" aria-pressed="false">150 分</button>
+              </div>
+            </div>
+            <div class="exam-options" aria-label="可选题型">
+              <label class="toggle-option" for="examIncludeEssay">
+                <input id="examIncludeEssay" type="checkbox">
+                <span class="toggle-track" aria-hidden="true"><span></span></span>
+                <span>加入作文</span>
+              </label>
+              <label class="toggle-option" for="examIncludeListening">
+                <input id="examIncludeListening" type="checkbox">
+                <span class="toggle-track" aria-hidden="true"><span></span></span>
+                <span>加入听力</span>
+              </label>
+            </div>
+            <button class="primary-button exam-generate-button" type="button" id="generateExamButton">
+              <i data-lucide="file-plus-2" aria-hidden="true"></i>生成试卷
+            </button>
+          </div>
+          <p class="exam-support-note" id="examListeningSupport" aria-live="polite"></p>
+          <div class="exam-photo-panel" id="examPhotoPanel" hidden>
+            <div><strong>纸质答卷图片</strong><p id="examPhotoSummary">尚未选择图片</p></div>
+            <div class="exam-photo-actions">
+              <button class="text-button" type="button" id="cancelExamPhotoButton">取消</button>
+              <button class="primary-button" type="button" id="gradeExamPhotoButton" disabled><i data-lucide="scan-text" aria-hidden="true"></i>上传并统一判卷</button>
+            </div>
+          </div>
+
+          <div class="ai-state exam-empty-state" id="examEmptyState">
+            <i data-lucide="clipboard-list" aria-hidden="true"></i>
+            <strong id="examEmptyTitle">准备生成试卷</strong>
+          </div>
+
+          <section class="exam-paper" id="examPaper" aria-labelledby="examPaperTitle" hidden>
+            <header class="exam-paper-header">
+              <div>
+                <p class="eyebrow" id="examPaperMeta">DRAFT</p>
+                <h2 id="examPaperTitle">阶段综合试卷</h2>
+                <p id="examInstructions"></p>
+              </div>
+              <strong class="exam-total" id="examTotalReadout">满分 100</strong>
+            </header>
+            <form id="examForm">
+              <div class="exam-question-list" id="examQuestionList"></div>
+              <div class="exam-submit-row" id="examSubmitRow">
+                <span id="examDraftStatus" aria-live="polite">草稿会自动保存</span>
+                <button class="primary-button" type="submit" id="submitExamButton"><i data-lucide="send" aria-hidden="true"></i>完成整卷并交卷</button>
+              </div>
+            </form>
+            <section class="exam-result" id="examResult" aria-labelledby="examResultTitle" hidden>
+              <div class="exam-result-heading">
+                <div><p class="eyebrow">RESULT</p><h2 id="examResultTitle">判卷结果</h2></div>
+                <div class="exam-result-score"><strong id="examResultScore">0</strong><span id="examResultPossible">/ 100</span></div>
+              </div>
+              <p id="examResultSummary"></p>
+              <div class="exam-type-scores" id="examTypeScores"></div>
+              <div class="exam-weaknesses" id="examWeaknesses"></div>
+            </section>
+          </section>
+
+          <section class="ai-history-section exam-history-section" aria-labelledby="examHistoryTitle">
+            <div class="ai-history-heading">
+              <div><p class="eyebrow">EXAM HISTORY</p><h2 id="examHistoryTitle">试卷历史</h2></div>
+              <p id="examHistorySummary">暂无交卷记录</p>
+            </div>
+            <div class="exam-history-list" id="examHistoryList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-abilities" aria-labelledby="abilitiesTitle" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">ABILITY PROFILE</p>
+              <h1 id="abilitiesTitle">能力分析</h1>
+              <p class="heading-note" id="abilitiesStatus">正在汇总学习证据…</p>
+            </div>
+            <button class="icon-button" type="button" id="refreshAbilitiesButton" data-tooltip="重新计算能力" aria-label="重新计算能力">
+              <i data-lucide="refresh-cw" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="ability-overview" aria-label="能力总览">
+            <div><span>综合能力</span><strong id="abilityOverall">—</strong></div>
+            <div><span>已测评维度</span><strong id="abilityPracticed">0 / 7</strong></div>
+            <div><span>有效证据</span><strong id="abilityEvidence">0</strong></div>
+          </div>
+
+          <div class="ability-layout">
+            <figure class="ability-radar-wrap">
+              <canvas id="abilityRadar" width="620" height="460" role="img" aria-label="七项英语能力雷达图"></canvas>
+              <figcaption>外圈为 100 分；证据不足时分数会保守显示，避免少量题目夸大能力。</figcaption>
+            </figure>
+            <div class="ability-detail-list" id="abilityDetailList" aria-live="polite"></div>
+          </div>
+        </section>
+
+        <section class="view" id="view-dictation" aria-labelledby="dictationTitle" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">WORD DICTATION</p>
+              <h1 id="dictationTitle">单词听写</h1>
+              <p class="heading-note" id="dictationStatus">正在读取听写记录…</p>
+            </div>
+          </div>
+
+          <div class="dictation-controls" id="dictationControls">
+            <label class="ai-control-field">
+              <span>模型</span>
+              <select id="dictationModelSelect" aria-label="选择听写分析模型"></select>
+            </label>
+            <div class="ai-control-field">
+              <span>强度</span>
+              <div class="segmented-control ai-effort-control" role="group" aria-label="听写分析强度">
+                <button type="button" class="segment" data-dictation-effort="low" aria-pressed="false">轻度</button>
+                <button type="button" class="segment is-selected" data-dictation-effort="medium" aria-pressed="true">中</button>
+                <button type="button" class="segment" data-dictation-effort="high" aria-pressed="false">高</button>
+                <button type="button" class="segment" data-dictation-effort="xhigh" aria-pressed="false">极高</button>
+                <button type="button" class="segment" data-dictation-effort="max" aria-pressed="false">最高</button>
+              </div>
+            </div>
+            <label class="ai-control-field compact-control">
+              <span>词数</span>
+              <select id="dictationCount" aria-label="选择听写单词数量">
+                <option value="5">5 个</option>
+                <option value="10">10 个</option>
+                <option value="20">20 个</option>
+              </select>
+            </label>
+            <button class="primary-button" type="button" id="generateDictationButton">
+              <i data-lucide="audio-lines" aria-hidden="true"></i>生成听写
+            </button>
+          </div>
+          <p class="exam-support-note" id="dictationSpeechSupport" aria-live="polite"></p>
+
+          <div class="ai-state" id="dictationEmptyState">
+            <i data-lucide="headphones" aria-hidden="true"></i>
+            <strong>准备开始听写</strong>
+          </div>
+
+          <form class="dictation-sheet" id="dictationForm" hidden>
+            <div class="dictation-list" id="dictationList"></div>
+            <div class="exam-submit-row" id="dictationSubmitRow">
+              <span id="dictationDraftStatus">草稿会自动保存</span>
+              <button class="primary-button" type="submit" id="submitDictationButton"><i data-lucide="send" aria-hidden="true"></i>完成后统一分析</button>
+            </div>
+          </form>
+
+          <section class="exam-result dictation-result" id="dictationResult" aria-labelledby="dictationResultTitle" hidden>
+            <div class="exam-result-heading">
+              <div><p class="eyebrow">RESULT</p><h2 id="dictationResultTitle">听写分析</h2></div>
+              <div class="exam-result-score"><strong id="dictationResultScore">0</strong><span id="dictationResultPossible">/ 5</span></div>
+            </div>
+            <p id="dictationResultSummary"></p>
+            <div class="dictation-analysis" id="dictationAnalysis"></div>
+          </section>
+
+          <section class="ai-history-section" aria-labelledby="dictationHistoryTitle">
+            <div class="ai-history-heading">
+              <div><p class="eyebrow">DICTATION HISTORY</p><h2 id="dictationHistoryTitle">听写历史</h2></div>
+              <p id="dictationHistorySummary">暂无听写记录</p>
+            </div>
+            <div class="dictation-history-list" id="dictationHistoryList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-focused" aria-labelledby="focusedTitle" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">FOCUSED PRACTICE</p>
+              <h1 id="focusedTitle">定向增强</h1>
+              <p class="heading-note" id="focusedStatus">选择一个题型进行专项训练。</p>
+            </div>
+          </div>
+
+          <div class="focused-controls" id="focusedControls">
+            <label class="ai-control-field">
+              <span>专项</span>
+              <select id="focusedTypeSelect" aria-label="选择专项题型">
+                <option value="listening">听力</option>
+                <option value="choice">选择</option>
+                <option value="fill-blank">填空</option>
+                <option value="true-false">判断</option>
+                <option value="translation">翻译</option>
+                <option value="cloze">完形填空</option>
+                <option value="reading">材料题</option>
+                <option value="essay">作文</option>
+              </select>
+            </label>
+            <label class="ai-control-field">
+              <span>模型</span>
+              <select id="focusedModelSelect" aria-label="选择专项 AI 模型"></select>
+            </label>
+            <div class="ai-control-field">
+              <span>强度</span>
+              <div class="segmented-control ai-effort-control" role="group" aria-label="专项 AI 推理强度">
+                <button type="button" class="segment" data-focused-effort="low" aria-pressed="false">轻度</button>
+                <button type="button" class="segment is-selected" data-focused-effort="medium" aria-pressed="true">中</button>
+                <button type="button" class="segment" data-focused-effort="high" aria-pressed="false">高</button>
+                <button type="button" class="segment" data-focused-effort="xhigh" aria-pressed="false">极高</button>
+                <button type="button" class="segment" data-focused-effort="max" aria-pressed="false">最高</button>
+              </div>
+            </div>
+            <button class="primary-button" type="button" id="generateFocusedButton"><i data-lucide="crosshair" aria-hidden="true"></i>生成专项</button>
+          </div>
+          <p class="exam-support-note" id="focusedSupport" aria-live="polite"></p>
+
+          <section class="focused-skill-section" aria-labelledby="focusedSkillsTitle">
+            <div class="section-heading"><h2 id="focusedSkillsTitle">专项能力</h2><span class="text-muted">每项最高 5 分</span></div>
+            <div class="focused-skill-grid" id="focusedSkillGrid"></div>
+          </section>
+
+          <div class="ai-state" id="focusedEmptyState">
+            <i data-lucide="target" aria-hidden="true"></i>
+            <strong>准备生成专项训练</strong>
+          </div>
+
+          <form class="focused-sheet" id="focusedForm" hidden>
+            <header class="focused-sheet-header">
+              <div><p class="eyebrow" id="focusedSheetMeta">DRAFT</p><h2 id="focusedSheetTitle">专项训练</h2><p id="focusedInstructions"></p></div>
+              <strong class="exam-total">满分 5</strong>
+            </header>
+            <section class="exam-reading-passage" id="focusedPassage" hidden><span id="focusedPassageLabel">专项材料</span><p id="focusedPassageText"></p></section>
+            <div class="focused-question-list" id="focusedQuestionList"></div>
+            <div class="exam-submit-row" id="focusedSubmitRow">
+              <span id="focusedDraftStatus">草稿会自动保存</span>
+              <button class="primary-button" type="submit" id="submitFocusedButton"><i data-lucide="send" aria-hidden="true"></i>完成后统一分析</button>
+            </div>
+          </form>
+
+          <section class="exam-result focused-result" id="focusedResult" aria-labelledby="focusedResultTitle" hidden>
+            <div class="exam-result-heading">
+              <div><p class="eyebrow">RESULT</p><h2 id="focusedResultTitle">专项分析</h2></div>
+              <div class="exam-result-score"><strong id="focusedResultScore">0</strong><span>/ 5</span></div>
+            </div>
+            <p id="focusedResultSummary"></p>
+            <div class="exam-weaknesses" id="focusedWeaknesses"></div>
+          </section>
+
+          <section class="ai-history-section" aria-labelledby="focusedHistoryTitle">
+            <div class="ai-history-heading">
+              <div><p class="eyebrow">FOCUSED HISTORY</p><h2 id="focusedHistoryTitle">专项历史</h2></div>
+              <p id="focusedHistorySummary">暂无专项记录</p>
+            </div>
+            <div class="focused-history-list" id="focusedHistoryList"></div>
           </section>
         </section>
 
@@ -490,9 +782,9 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=16"></script>
-  <script src="data.js?v=16"></script>
-  <script src="answer-utils.js?v=16"></script>
+  <script src="vendor/lucide.min.js?v=19"></script>
+  <script src="data.js?v=19"></script>
+  <script src="answer-utils.js?v=19"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -508,7 +800,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=16";
+      appScript.src = "app.js?v=19";
       document.body.appendChild(appScript);
     })();
   </script>

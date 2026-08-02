@@ -47,6 +47,24 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | PUT | `/api/state` | 保存当前账号的复习记录，需要登录 |
 | GET | `/api/export` | 导出当前账号的词库和复习记录，需要登录 |
 | GET | `/api/sync/profile?username=账号名` | 获取供本地学习窗口使用的学习档案，需要只读同步令牌 |
+| PUT | `/api/sync/teaching-profile?username=账号名` | 上传本地教学档案，需要独立的教学写入令牌 |
+| GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
+| GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
+| POST | `/api/ai/exams/generate` | 按学习进度生成一张完整试卷，需要登录 |
+| PUT | `/api/ai/exams/current` | 保存当前试卷草稿答案，需要登录 |
+| POST | `/api/ai/exams/listening` | 获取当前听力题的语音合成文本，需要登录 |
+| POST | `/api/ai/exams/photo-grade` | 识别纸质答卷图片并统一判分，需要登录 |
+| POST | `/api/ai/exams/submit` | 完成整卷后统一 AI 判分，需要登录 |
+| GET | `/api/ai/dictation` | 获取听写草稿、权重摘要和历史，需要登录 |
+| POST | `/api/ai/dictation/generate` | 从已学单词生成 5/10/20 词听写，需要登录 |
+| PUT | `/api/ai/dictation/current` | 保存当前听写草稿，需要登录 |
+| POST | `/api/ai/dictation/speech` | 获取一项听写的受控英文朗读文本，需要登录 |
+| POST | `/api/ai/dictation/submit` | 完成听写后统一分析并更新权重，需要登录 |
+| GET | `/api/ai/focused` | 获取定向增强草稿、八项评分和历史，需要登录 |
+| POST | `/api/ai/focused/generate` | 生成指定题型的专项训练，需要登录 |
+| PUT | `/api/ai/focused/current` | 保存当前专项草稿，需要登录 |
+| POST | `/api/ai/focused/listening` | 获取听力专项的受控英文朗读文本，需要登录 |
+| POST | `/api/ai/focused/submit` | 完成专项后统一分析，需要登录 |
 
 登录和复习状态使用 HTTP-only Cookie。网页不提供注册接口，账号只能在服务器终端创建。内容新增、修改、删除只允许管理员账号，或使用服务器配置的 `API_TOKEN`。本地学习档案使用由 `API_TOKEN` 派生的只读令牌，不能修改词库。
 
@@ -143,7 +161,7 @@ API_TOKEN=一段足够长的随机字符串
 
 ## 同步到本地学习窗口
 
-`GET /api/sync/profile` 使用只读同步令牌鉴权，并按账号名返回学习档案。响应只包含课程内容、复习状态、AI 做题历史、错题和薄弱点统计，不包含密码、Cookie、会话令牌或 AI Key。
+`GET /api/sync/profile` 使用只读同步令牌鉴权，并按账号名返回学习档案。响应包含课程内容、复习状态、AI 做题历史、试卷成绩与逐题证据、听写和专项历史、七维能力、错题、薄弱点统计及网站保存的本地教学档案，不包含密码、Cookie、会话令牌或 AI Key。
 
 在 VPS 生成只读令牌：
 
@@ -154,18 +172,27 @@ docker compose -f docker-compose.vps.yml exec english-review npm run sync:token
 
 该命令不会显示原始 `API_TOKEN`。只读令牌只能调用学习档案接口，不能新增、修改或删除内容。
 
+如需让本地英语教学窗口把 `学习进度.md`、`错题本.md`、最近三份每日笔记和最新预习上传给网站 AI，再生成一个权限独立的教学档案写入令牌：
+
+```bash
+cd /opt/english-review
+docker compose -f docker-compose.vps.yml exec english-review npm run sync:write-token
+```
+
+只读令牌不能上传，写入令牌也不能读取学习档案或管理词库；两者不可互换。
+
 ```powershell
 $headers = @{ Authorization = "Bearer 你的只读同步令牌" }
 Invoke-RestMethod -Uri "https://你的域名/api/sync/profile?username=你的账号名" -Headers $headers
 ```
 
-本项目同时提供本地同步脚本。把父目录 `学习同步\.sync.env.example` 复制为 `.sync.env` 并填写三项配置后，在“三年英语学习计划”目录运行：
+本项目同时提供本地同步脚本。把父目录 `学习同步\.sync.env.example` 复制为 `.sync.env`，填写 `SYNC_BASE_URL`、`SYNC_USERNAME`、`SYNC_READ_TOKEN` 和 `SYNC_WRITE_TOKEN` 后，在“三年英语学习计划”目录运行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File ".\每日英语复习\scripts\sync-learning-profile.ps1"
 ```
 
-同步结果保存为 `学习同步\网站学习档案.json`，供独立的英语学习窗口读取。不要提交 `.sync.env`，也不要把任何令牌发到聊天中。
+脚本会先上传本地教学档案，再把网站档案保存为 `学习同步\网站学习档案.json`，供独立的英语学习窗口读取。省略 `SYNC_WRITE_TOKEN` 时会退化为只下载模式。不要提交 `.sync.env`，也不要把任何令牌发到聊天中。
 
 ## 数据保存位置
 
@@ -210,6 +237,23 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | POST | `/api/ai/questions/generate` | 已登录 | 根据当前账号进度生成 5 或 10 道题 |
 | POST | `/api/ai/questions/ask` | 已登录 | 询问当前 AI 题目并保存该题的简短问答记录 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
+| GET | `/api/ai/exams` | 已登录 | 获取脱敏后的试卷状态和历史 |
+| POST | `/api/ai/exams/generate` | 已登录 | 生成 100 分或 150 分完整试卷 |
+| PUT | `/api/ai/exams/current` | 已登录 | 保存整卷草稿，不触发判分 |
+| POST | `/api/ai/exams/listening` | 已登录 | 获取当前试卷中一题的英文朗读文本 |
+| POST | `/api/ai/exams/photo-grade` | 已登录 | 识别最多 6 张纸质答卷图片并完成统一判分 |
+| POST | `/api/ai/exams/submit` | 已登录 | 检查整卷完成后发起一次统一判分 |
+| GET | `/api/abilities` | 已登录 | 获取七维 0-100 能力、综合分和证据量 |
+| GET | `/api/ai/dictation` | 已登录 | 获取听写草稿、历史和错词权重摘要 |
+| POST | `/api/ai/dictation/generate` | 已登录 | 按权重抽取 5/10/20 个已学单词 |
+| PUT | `/api/ai/dictation/current` | 已登录 | 保存听写草稿 |
+| POST | `/api/ai/dictation/speech` | 已登录 | 获取一个听写单词的朗读文本 |
+| POST | `/api/ai/dictation/submit` | 已登录 | 统一分析听写并更新错词权重 |
+| GET | `/api/ai/focused` | 已登录 | 获取专项草稿、历史和八项 0-5 分能力 |
+| POST | `/api/ai/focused/generate` | 已登录 | 生成指定题型的专项训练 |
+| PUT | `/api/ai/focused/current` | 已登录 | 保存专项草稿 |
+| POST | `/api/ai/focused/listening` | 已登录 | 获取听力专项的朗读文本 |
+| POST | `/api/ai/focused/submit` | 已登录 | 统一分析专项并更新能力 |
 
 生成题目请求：
 
@@ -234,6 +278,68 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 ```
 
 `reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。AI 超时配置范围为 1 至 120 秒，默认 30 秒。
+
+生成试卷请求：
+
+```json
+{
+  "model": "管理员允许的模型 ID",
+  "reasoningEffort": "medium",
+  "totalPoints": 150,
+  "includeEssay": true,
+  "includeListening": true
+}
+```
+
+`totalPoints` 只能选择 `100` 或 `150`。单选 3 题、多选 2 题、填空 3 题、判断 3 题、完形填空 4 题、材料题 3 题和翻译 3 题是固定部分，共 21 题；听力可选，开启后增加 3 题；作文可选，开启后增加 1 题。AI 返回的题型或数量不足时整卷生成失败，不会保存残缺试卷。听力题答题时不返回可见原文，网页点击播放后通过 `/api/ai/exams/listening` 取得文本，并使用设备的英文语音合成慢速朗读。设备不支持语音合成时，网页会禁用听力选项。
+
+草稿保存请求：
+
+```json
+{
+  "examId": "当前试卷 ID",
+  "answers": {
+    "题目 ID": "文本、选项 ID、布尔值或多选 ID 数组"
+  }
+}
+```
+
+交卷使用同样的 `examId` 和 `answers` 请求 `/api/ai/exams/submit`。服务器先验证每题均已完成，再计算客观题，并只向 AI 发起一次整卷主观题判分与薄弱点分析。未交卷时，所有答案键留在服务端；普通 `/api/state` 和 `/api/export` 不返回试卷内部状态，`PUT /api/state` 也会保留已有试卷数据。
+
+纸质答卷请求 `/api/ai/exams/photo-grade`：
+
+```json
+{
+  "examId": "当前试卷 ID",
+  "images": ["data:image/jpeg;base64,..."]
+}
+```
+
+只接受 JPEG、PNG 或 WebP，最多 6 张；每张解码后不超过 3 MiB，全部图片解码后合计不超过 12 MiB。HTTP 请求解析上限为 18 MiB，用于容纳 Base64 的额外体积。服务器不会把图片写入账号状态，只保存识别出的答案、成绩和薄弱点。所选模型必须支持图片输入。
+
+听写生成请求：
+
+```json
+{
+  "model": "管理员允许的模型 ID",
+  "reasoningEffort": "medium",
+  "count": 10
+}
+```
+
+`count` 只能为 `5`、`10` 或 `20`。朗读接口只接收当前 `sessionId` 和 `itemId`；草稿及提交接口发送 `sessionId` 与按项目 ID 保存的 `answers`。答错权重加 2，答对权重减 1，权重限制在 1-20。
+
+定向增强生成请求：
+
+```json
+{
+  "model": "管理员允许的模型 ID",
+  "reasoningEffort": "medium",
+  "focusedType": "reading"
+}
+```
+
+`focusedType` 允许 `listening`、`choice`、`fill-blank`、`true-false`、`translation`、`cloze`、`reading` 和 `essay`。除作文为 1 题外，其余专项每次 5 题；完成后统一换算为 0-5 分，并写入专项历史、七维能力和学习同步档案。
 
 服务端从当前账号状态读取题目，不接受客户端伪造的参考答案。每个当前题目最多保留最近 12 条问答消息。
 

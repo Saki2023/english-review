@@ -61,3 +61,42 @@ test("AI set summaries group question history and calculate scores", () => {
   assert.equal(groups[0].accuracy, 50);
   assert.equal(groups[0].completed, true);
 });
+
+test("learning sync includes normalized exam scores and weakness evidence without private answer keys", () => {
+  const question = {
+    id: "examq-1",
+    type: "listening",
+    prompt: "听音后选择意思。",
+    speechText: "A cat sat on a mat.",
+    options: [{ id: "A", text: "一只猫坐在垫子上" }, { id: "B", text: "一只猪坐在垫子上" }],
+    points: 150,
+    answerKey: { kind: "option", correctOption: "A" }
+  };
+  const state = {
+    aiExam: {
+      history: [{
+        id: "exam-1",
+        title: "听力测试",
+        status: "completed",
+        totalPoints: 150,
+        includeListening: true,
+        createdAt: "2026-08-02T10:00:00Z",
+        submittedAt: "2026-08-02T10:10:00Z",
+        questions: [question],
+        answers: { "examq-1": "B" },
+        result: { grades: [{ questionId: "examq-1", score: 0, correct: false, explanation: "需要再听。", correctAnswer: "一只猫坐在垫子上" }], summary: "听力需要加强。", weakPoints: [{ category: "listening", severity: "high", detail: "听音辨句不稳定。", recommendation: "复习后重听。", questionIds: ["examq-1"], relatedWords: ["cat"] }] }
+      }],
+      weakPoints: [{ examId: "exam-1", recordedAt: "2026-08-02T10:10:00Z", category: "listening", severity: "high", detail: "听音辨句不稳定。", recommendation: "复习后重听。", questionIds: ["examq-1"], relatedWords: ["cat"] }]
+    }
+  };
+  const profile = buildLearningSyncProfile({ currentDay: 2, words: [], sentences: [] }, state, { username: "learner", role: "member" });
+
+  assert.equal(profile.schemaVersion, 3);
+  assert.equal(profile.summary.exams, 1);
+  assert.equal(profile.summary.latestExamScore, 0);
+  assert.equal(profile.summary.latestExamPossible, 150);
+  assert.equal(profile.examHistory[0].questions[0].sourceText, "A cat sat on a mat.");
+  assert.equal(profile.weakPoints.recentExamWeakPoints[0].category, "listening");
+  assert.equal(profile.abilities.abilities.find(item => item.id === "listening").evidenceCount, 1);
+  assert.equal(JSON.stringify(profile).includes("answerKey"), false);
+});

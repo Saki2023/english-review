@@ -2,6 +2,11 @@
 
 const { sanitizeAiPractice } = require("./ai-practice");
 const { englishTokens } = require("./ai-question-utils");
+const { sanitizeAiExamState } = require("./ai-exam");
+const { analyzeAbilities } = require("./ability-analysis");
+const { sanitizeDictationState } = require("./dictation");
+const { sanitizeFocusedState, skillSummaries } = require("./focused-practice");
+const { publicTeachingProfile } = require("./teaching-profile");
 
 function accuracy(correct, total) {
   return total ? Math.round((correct / total) * 100) : null;
@@ -127,6 +132,93 @@ function aiWordSignals(content, history) {
   })).sort((left, right) => right.wrong - left.wrong || left.accuracy - right.accuracy || right.attempts - left.attempts);
 }
 
+function examEvidence(exam) {
+  const result = exam.result || {};
+  const grades = new Map((result.grades || []).map(item => [item.questionId, item]));
+  const possible = Number(result.possible) || Number(exam.totalPoints) || 100;
+  const score = Number(result.score) || 0;
+  return {
+    id: exam.id,
+    title: exam.title,
+    createdAt: exam.createdAt,
+    submittedAt: exam.submittedAt,
+    model: exam.model,
+    reasoningEffort: exam.reasoningEffort,
+    includeEssay: exam.includeEssay,
+    includeListening: exam.includeListening,
+    clozePassage: exam.clozePassage,
+    readingPassage: exam.readingPassage,
+    score,
+    possible,
+    percentage: possible ? Math.round((score / possible) * 100) : null,
+    typeScores: result.typeScores || [],
+    summary: result.summary || "",
+    weakPoints: result.weakPoints || [],
+    questions: exam.questions.map(question => {
+      const grade = grades.get(question.id) || {};
+      return {
+        id: question.id,
+        type: question.type,
+        typeLabel: question.typeLabel,
+        prompt: question.prompt,
+        sourceText: question.type === "listening"
+          ? question.speechText
+          : question.type === "cloze"
+            ? exam.clozePassage
+            : question.type === "reading-comprehension"
+              ? exam.readingPassage
+              : question.sourceText,
+        options: question.options,
+        points: question.points,
+        learnerAnswer: exam.answers[question.id],
+        score: Number(grade.score) || 0,
+        correct: grade.correct === true,
+        explanation: grade.explanation || "",
+        correctAnswer: grade.correctAnswer || ""
+      };
+    })
+  };
+}
+
+function dictationEvidence(state) {
+  const dictation = sanitizeDictationState(state.dictation);
+  return {
+    sessions: dictation.history.map(session => ({
+      id: session.id,
+      createdAt: session.createdAt,
+      completedAt: session.completedAt,
+      score: session.score,
+      possible: session.items.length,
+      percentage: accuracy(session.score, session.items.length),
+      summary: session.analysis?.summary || "",
+      weakWords: session.analysis?.weakWords || [],
+      recommendations: session.analysis?.recommendations || [],
+      items: session.items.map(item => ({ wordId: item.wordId, day: item.day, english: item.english, chinese: item.chinese, phonetic: item.phonetic, learnerAnswer: item.answer, correct: item.correct }))
+    })),
+    weights: dictation.weights
+  };
+}
+
+function focusedEvidence(state) {
+  const focused = sanitizeFocusedState(state.focusedPractice);
+  return {
+    skills: skillSummaries(focused.history),
+    sessions: focused.history.map(session => ({
+      id: session.id,
+      focusedType: session.focusedType,
+      label: session.label,
+      title: session.title,
+      createdAt: session.createdAt,
+      completedAt: session.completedAt,
+      score: session.result?.score || 0,
+      possible: session.result?.possible || 5,
+      levelScore: session.result?.levelScore || 0,
+      summary: session.result?.summary || "",
+      weakPoints: session.result?.weakPoints || []
+    }))
+  };
+}
+
 function buildLearningSyncProfile(content, state, user) {
   const aiPractice = sanitizeAiPractice(state.aiPractice);
   const aiHistory = aiPractice.history;
@@ -137,9 +229,20 @@ function buildLearningSyncProfile(content, state, user) {
   const mistakes = Array.isArray(state.mistakes) ? state.mistakes.slice(-80) : [];
   const recentAiMistakes = aiHistory.filter(item => !item.correct).slice(-100).reverse();
   const aiSets = summarizeAiSets(aiHistory);
+  const aiExam = sanitizeAiExamState(state.aiExam);
+  const examHistory = aiExam.history.map(examEvidence);
+  const examPercentages = examHistory.map(exam => exam.percentage).filter(value => Number.isFinite(value));
+  const latestExam = examHistory[examHistory.length - 1] || null;
+  const recentExamWeakPoints = aiExam.weakPoints.slice(-100).reverse();
+  const abilities = analyzeAbilities(content, state);
+  const dictation = dictationEvidence(state);
+  const focused = focusedEvidence(state);
+  const dictationScores = dictation.sessions.map(session => session.percentage).filter(value => Number.isFinite(value));
+  const dictationWrong = dictation.sessions.flatMap(session => session.items).filter(item => item.correct === false).length;
+  const focusedWeakPoints = focused.sessions.flatMap(session => session.weakPoints);
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
     generatedAt: new Date().toISOString(),
     user: { username: user.username, role: user.role },
     course: {
@@ -156,12 +259,20 @@ function buildLearningSyncProfile(content, state, user) {
       aiQuestions: aiHistory.length,
       aiCorrect,
       aiAccuracy: accuracy(aiCorrect, aiHistory.length),
+      exams: examHistory.length,
+      examAveragePercentage: examPercentages.length ? Math.round(examPercentages.reduce((sum, value) => sum + value, 0) / examPercentages.length) : null,
+      latestExamScore: latestExam ? latestExam.score : null,
+      latestExamPossible: latestExam ? latestExam.possible : null,
+      latestExamPercentage: latestExam ? latestExam.percentage : null,
+      dictations: dictation.sessions.length,
+      dictationAveragePercentage: dictationScores.length ? Math.round(dictationScores.reduce((sum, value) => sum + value, 0) / dictationScores.length) : null,
+      focusedSessions: focused.sessions.length,
       itemsNeedingReview: itemProgress.filter(item => item.needsReview).length,
       weakItems: itemProgress.filter(item => item.status === "weak").length,
       developingItems: itemProgress.filter(item => item.status === "developing").length,
       strongItems: itemProgress.filter(item => item.status === "strong").length,
       unpracticedItems: itemProgress.filter(item => item.status === "unpracticed").length,
-      recordedMistakes: mistakes.length + recentAiMistakes.length
+      recordedMistakes: mistakes.length + recentAiMistakes.length + recentExamWeakPoints.length + dictationWrong + focusedWeakPoints.length
     },
     weakPoints: {
       reviewItems: itemProgress.filter(item => item.status === "weak"),
@@ -169,15 +280,28 @@ function buildLearningSyncProfile(content, state, user) {
       unpracticedItems: itemProgress.filter(item => item.status === "unpracticed"),
       aiWordSignals: aiWordSignals(content, aiHistory),
       recentMistakes: mistakes,
-      recentAiMistakes
+      recentAiMistakes,
+      recentExamWeakPoints,
+      dictationWrongItems: dictation.sessions.flatMap(session => session.items.filter(item => !item.correct).map(item => ({ ...item, sessionId: session.id, completedAt: session.completedAt }))).slice(-100).reverse(),
+      recentFocusedWeakPoints: focusedWeakPoints.slice(-100).reverse()
     },
     activity: {
       dailyReview: state.history && typeof state.history === "object" ? state.history : {},
-      aiSets
+      aiSets,
+      exams: examHistory.map(exam => ({ id: exam.id, title: exam.title, submittedAt: exam.submittedAt, score: exam.score, possible: exam.possible, percentage: exam.percentage })),
+      dictations: dictation.sessions.map(session => ({ id: session.id, completedAt: session.completedAt, score: session.score, possible: session.possible, percentage: session.percentage })),
+      focusedSessions: focused.sessions.map(session => ({ id: session.id, focusedType: session.focusedType, completedAt: session.completedAt, levelScore: session.levelScore }))
     },
     learnedContent: itemProgress,
-    aiHistory
+    abilities,
+    localTeachingProfile: publicTeachingProfile(state.teachingProfile),
+    aiHistory,
+    examHistory,
+    dictationHistory: dictation.sessions,
+    dictationWeights: dictation.weights,
+    focusedSkills: focused.skills,
+    focusedHistory: focused.sessions
   };
 }
 
-module.exports = { accuracy, aiWordSignals, buildLearningSyncProfile, summarizeAiSets };
+module.exports = { accuracy, aiWordSignals, buildLearningSyncProfile, dictationEvidence, examEvidence, focusedEvidence, summarizeAiSets };

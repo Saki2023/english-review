@@ -112,7 +112,7 @@ sudo docker compose -f docker-compose.vps.yml exec -it english-review npm run us
 sudo docker compose -f docker-compose.vps.yml exec -it english-review npm run user:add -- --admin
 ```
 
-## 七、生成本地学习同步只读令牌
+## 七、生成本地学习双向同步令牌
 
 网站更新完成后，在 VPS 项目目录运行：
 
@@ -122,6 +122,17 @@ sudo docker compose -f docker-compose.vps.yml exec english-review npm run sync:t
 ```
 
 把输出填入本地 `学习同步\.sync.env` 的 `SYNC_READ_TOKEN`。该令牌只能读取指定账号的学习档案，不能管理词库，也不会暴露原始 `API_TOKEN`。不要把输出发到聊天中。
+
+再生成教学档案写入令牌：
+
+```bash
+cd /opt/english-review
+sudo docker compose -f docker-compose.vps.yml exec english-review npm run sync:write-token
+```
+
+把输出填入 `SYNC_WRITE_TOKEN`。它只允许本地同步脚本上传学习进度、错题、最近笔记和最新预习，不能下载网站档案、修改词库或读取账号数据。两个令牌权限不同，不要互换，也不要发到聊天中。
+
+配置完成后，本地执行一次同步会先上传教学档案，再下载网站的复习、试卷、听写、专项、能力和薄弱点数据。未填写 `SYNC_WRITE_TOKEN` 时仍可只下载网站档案。
 
 ## 八、安装到荣耀手机
 
@@ -138,7 +149,7 @@ sudo docker compose -f docker-compose.vps.yml exec english-review npm run sync:t
 /opt/english-review/server/data
 ```
 
-这里保存账号、密码哈希、会话、用户学习进度以及通过 API 添加的词句。重新创建容器不会清空这个目录。
+这里保存账号、密码哈希、会话、用户学习进度、AI 设置、试卷、听写、专项能力、本地教学档案以及通过 API 添加的词句。重新创建容器不会清空这个目录。纸质答卷原始照片不会写入该目录，只保存识别出的答案和成绩。
 
 ## 十、自动更新
 
@@ -170,3 +181,5 @@ sudo systemctl start english-review-update.service
 ## 十一、配置多套 AI 连接
 
 登录管理员账号后，在“AI 出题”页面右上角打开设置，可以添加 sub2api、NewAPI、DeepSeek、OneAPI 或其他 OpenAI 兼容连接，并选择手动固定或自动轮换，不需要通过 SSH 修改 `.env`。完整说明见 [AI判题配置.md](AI判题配置.md)。
+
+使用“上传纸质答卷”时应选择支持图片输入的模型；普通纯文本模型仍可用于出题、听写分析和网页作答判卷，但无法识别答卷照片。

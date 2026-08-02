@@ -2,6 +2,10 @@
 
 const crypto = require("node:crypto");
 const { safeQuestionFocus } = require("./ai-question-utils");
+const { sanitizeAiExamState } = require("./ai-exam");
+const { teachingProfileForAi } = require("./teaching-profile");
+const { sanitizeDictationState } = require("./dictation");
+const { sanitizeFocusedState } = require("./focused-practice");
 
 const MAX_AI_HISTORY = 1000;
 const MAX_QUESTION_COUNT = 10;
@@ -177,6 +181,29 @@ function buildLearningProfile(content, state, studyDate = "") {
     const english = item.direction === "zh-en" ? item.correctAnswer : item.prompt;
     return englishTokens(english).every(token => allowedSet.has(token));
   }).slice(-12);
+  const aiExam = sanitizeAiExamState(state.aiExam);
+  const recentExamWeakPoints = aiExam.weakPoints.filter(item => {
+    const relatedTokens = item.relatedWords.flatMap(englishTokens);
+    return relatedTokens.every(token => allowedSet.has(token));
+  }).slice(-20).map(item => ({
+    category: item.category,
+    severity: item.severity,
+    detail: item.detail,
+    recommendation: item.recommendation,
+    relatedWords: item.relatedWords
+  }));
+  const localTeachingProfile = teachingProfileForAi(state.teachingProfile);
+  const recentDictationMistakes = sanitizeDictationState(state.dictation).history.slice(-10).flatMap(session => session.items.filter(item => item.correct === false).map(item => ({
+    english: item.english,
+    learnerAnswer: item.answer,
+    completedAt: session.completedAt
+  }))).slice(-20);
+  const recentFocusedWeakPoints = sanitizeFocusedState(state.focusedPractice).history.slice(-10).flatMap(session => (session.result?.weakPoints || []).map(item => ({
+    focusedType: session.focusedType,
+    detail: item.detail,
+    recommendation: item.recommendation,
+    relatedWords: item.relatedWords
+  }))).slice(-20);
 
   return {
     currentDay: Number(content.currentDay) || 1,
@@ -186,6 +213,10 @@ function buildLearningProfile(content, state, studyDate = "") {
     weakItems,
     recentMistakes: recentMistakes.map(item => ({ prompt: cleanText(item.prompt), userAnswer: cleanText(item.userAnswer), correctAnswer: cleanText(item.correctAnswer), note: cleanText(item.note, 100) })),
     recentAiPractice: recentAiPractice.map(item => ({ prompt: item.prompt, userAnswer: item.userAnswer, correctAnswer: item.correctAnswer, correct: item.correct, focus: item.focus })),
+    recentExamWeakPoints,
+    recentDictationMistakes,
+    recentFocusedWeakPoints,
+    localTeachingProfile,
     recentAccuracy: recentAttempts.length ? Math.round((correctAttempts / recentAttempts.length) * 100) : null
   };
 }

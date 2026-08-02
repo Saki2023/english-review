@@ -7,6 +7,7 @@
     "start": "node server.js",
     "test": "node --test",
     "sync:token": "node server/show-sync-token.js",
+    "sync:write-token": "node server/show-sync-write-token.js",
     "user:add": "node server/create-user.js"
   },
   "engines": {

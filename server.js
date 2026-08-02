@@ -10,7 +10,50 @@ const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAi
 const { MAX_AI_HISTORY, MAX_TUTOR_MESSAGES, buildLearningProfile, createQuestionSet, sanitizeAiPractice } = require("./server/ai-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
 const { buildLearningSyncProfile } = require("./server/learning-sync");
-const { validLearningSyncToken } = require("./server/learning-sync-token");
+const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./server/learning-sync-token");
+const { publicTeachingProfile, sanitizeTeachingProfile } = require("./server/teaching-profile");
+const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis");
+const {
+  completeDictation,
+  createAiDictationAnalyzer,
+  createDictationSession,
+  dictationComplete,
+  dictationSpeech,
+  gradeDictation,
+  publicDictationState,
+  recordCompletedDictation,
+  sanitizeDictationState,
+  saveDictationAnswers,
+  selectDictationWords
+} = require("./server/dictation");
+const {
+  completeFocusedSession,
+  createAiFocusedGenerator,
+  createFocusedSession,
+  examForFocusedGrading,
+  focusedAnswersComplete,
+  focusedListeningSpeech,
+  normalizeFocusedType,
+  publicFocusedState,
+  recordCompletedFocused,
+  sanitizeFocusedState,
+  saveFocusedAnswers
+} = require("./server/focused-practice");
+const { createAiPaperRecognizer } = require("./server/paper-exam");
+const {
+  completeExam,
+  createAiExamGenerator,
+  createAiExamGrader,
+  createExam,
+  examAnswersComplete,
+  listeningSpeech,
+  normalizeTotalPoints,
+  publicAiExamState,
+  publicExam,
+  recordCompletedExam,
+  sanitizeAiExamState,
+  sanitizeAnswers
+} = require("./server/ai-exam");
 
 const ROOT = __dirname;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(ROOT, "server", "data"));
@@ -114,8 +157,17 @@ function sanitizeState(value) {
     attempts: Array.isArray(source.attempts) ? source.attempts.slice(-120) : [],
     sessions: source.sessions && typeof source.sessions === "object" ? source.sessions : {},
     mistakes: Array.isArray(source.mistakes) ? source.mistakes.slice(-80) : [],
-    aiPractice: sanitizeAiPractice(source.aiPractice)
+    aiPractice: sanitizeAiPractice(source.aiPractice),
+    aiExam: sanitizeAiExamState(source.aiExam),
+    dictation: sanitizeDictationState(source.dictation),
+    focusedPractice: sanitizeFocusedState(source.focusedPractice),
+    teachingProfile: sanitizeTeachingProfile(source.teachingProfile)
   };
+}
+
+function publicReviewState(value) {
+  const { aiExam, dictation, focusedPractice, teachingProfile, ...reviewState } = sanitizeState(value);
+  return reviewState;
 }
 
 function defaultState() { return sanitizeState({}); }
@@ -208,6 +260,11 @@ function isLearningSyncToken(req) {
   return authorization.startsWith("Bearer ") && validLearningSyncToken(authorization.slice(7), API_TOKEN);
 }
 
+function isTeachingProfileWriteToken(req) {
+  const authorization = String(req.headers.authorization || "");
+  return authorization.startsWith("Bearer ") && validTeachingProfileWriteToken(authorization.slice(7), API_TOKEN);
+}
+
 function canManageContent(req, user) { return Boolean(isApiToken(req) || (user && user.role === "admin")); }
 
 function isSecureRequest(req) { return process.env.COOKIE_SECURE === "true" || String(req.headers["x-forwarded-proto"] || "").toLowerCase() === "https"; }
@@ -241,10 +298,10 @@ function setCommonHeaders(res, contentType = "application/json; charset=utf-8") 
 function sendJson(res, status, value, extraHeaders = {}) { setCommonHeaders(res); Object.entries(extraHeaders).forEach(([key, value]) => res.setHeader(key, value)); res.writeHead(status); res.end(JSON.stringify(value)); }
 function sendError(res, status, message) { sendJson(res, status, { error: message }); }
 
-function readBody(req) {
+function readBody(req, maximum = MAX_BODY) {
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
-    req.on("data", chunk => { size += chunk.length; if (size > MAX_BODY) { reject(Object.assign(new Error("request body too large"), { statusCode: 413 })); req.destroy(); return; } chunks.push(chunk); });
+    req.on("data", chunk => { size += chunk.length; if (size > maximum) { reject(Object.assign(new Error("request body too large"), { statusCode: 413 })); req.destroy(); return; } chunks.push(chunk); });
     req.on("end", () => { try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}); } catch (_) { reject(Object.assign(new Error("request body must be valid JSON"), { statusCode: 400 })); } });
     req.on("error", reject);
   });
@@ -326,8 +383,13 @@ function handleContent(req, res, url, user) {
 
 function handleState(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
-  if (req.method === "GET") return sendJson(res, 200, getUserState(user));
-  if (req.method === "PUT") return readBody(req).then(body => { userStates.users[user.id] = sanitizeState(body); persistUserStates(); sendJson(res, 200, userStates.users[user.id]); }).catch(error => sendError(res, error.statusCode || 400, error.message));
+  if (req.method === "GET") return sendJson(res, 200, publicReviewState(getUserState(user)));
+  if (req.method === "PUT") return readBody(req).then(body => {
+    const existing = getUserState(user);
+    userStates.users[user.id] = sanitizeState({ ...body, aiExam: existing.aiExam, dictation: existing.dictation, focusedPractice: existing.focusedPractice, teachingProfile: existing.teachingProfile });
+    persistUserStates();
+    sendJson(res, 200, publicReviewState(userStates.users[user.id]));
+  }).catch(error => sendError(res, error.statusCode || 400, error.message));
   return sendError(res, 404, "state endpoint not found");
 }
 
@@ -341,6 +403,29 @@ function handleLearningSync(req, res, url) {
   const target = users.users.find(item => item.usernameKey === normalizeUsername(username));
   if (!target) return sendError(res, 404, "user not found");
   return sendJson(res, 200, buildLearningSyncProfile(content, getUserState(target), target));
+}
+
+function handleTeachingProfileSync(req, res, url) {
+  if (req.method !== "PUT") return sendError(res, 404, "teaching profile endpoint not found");
+  if (!isTeachingProfileWriteToken(req)) return sendError(res, 401, "valid teaching profile write token required");
+  const username = String(url.searchParams.get("username") || "").trim();
+  if (!username) return sendError(res, 400, "username is required");
+  refreshUsers();
+  const target = users.users.find(item => item.usernameKey === normalizeUsername(username));
+  if (!target) return sendError(res, 404, "user not found");
+  return readBody(req).then(body => {
+    const state = getUserState(target);
+    state.teachingProfile = sanitizeTeachingProfile({ ...body, updatedAt: body.updatedAt || new Date().toISOString() });
+    persistUserStates();
+    sendJson(res, 200, { ok: true, teachingProfile: publicTeachingProfile(state.teachingProfile) });
+  }).catch(error => sendError(res, error.statusCode || 400, error.message));
+}
+
+function handleAbilities(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "GET") return sendError(res, 404, "ability endpoint not found");
+  refreshContent();
+  return sendJson(res, 200, analyzeAbilities(content, getUserState(user)));
 }
 
 function findSentenceTask(taskId) {
@@ -692,6 +777,382 @@ async function handleAiQuestionGrade(req, res, user) {
   }
 }
 
+function aiExamSelectionForState(state, requested = {}) {
+  const examState = sanitizeAiExamState(state.aiExam);
+  const availableModels = getAvailableModels(aiSettings);
+  const storedModel = String(examState.settings.model || "").trim();
+  const model = String(requested.model || (availableModels.includes(storedModel) ? storedModel : aiSettings && aiSettings.defaultModel) || "").trim();
+  const reasoningEffort = AI_EFFORTS.includes(requested.reasoningEffort) ? requested.reasoningEffort : examState.settings.reasoningEffort;
+  const includeEssay = Object.hasOwn(requested, "includeEssay") ? Boolean(requested.includeEssay) : examState.settings.includeEssay;
+  const includeListening = Object.hasOwn(requested, "includeListening") ? Boolean(requested.includeListening) : examState.settings.includeListening;
+  const totalPoints = normalizeTotalPoints(Object.hasOwn(requested, "totalPoints") ? requested.totalPoints : examState.settings.totalPoints);
+  const route = selectAiCandidates(aiSettings, { model, reasoningEffort });
+  examState.settings = { model: route.model, reasoningEffort: route.reasoningEffort, includeEssay, includeListening, totalPoints };
+  examState.updatedAt = new Date().toISOString();
+  state.aiExam = examState;
+  return { route, examState, includeEssay, includeListening, totalPoints };
+}
+
+async function handleAiExams(req, res, url, user) {
+  if (!user) return sendError(res, 401, "login required");
+  const state = getUserState(user);
+
+  if (url.pathname === "/api/ai/exams" && req.method === "GET") {
+    return sendJson(res, 200, publicAiExamState(state.aiExam));
+  }
+
+  if (url.pathname === "/api/ai/exams/generate" && req.method === "POST") {
+    if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
+    try {
+      const body = await readBody(req);
+      const selection = aiExamSelectionForState(state, body);
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+      refreshContent();
+      const profile = buildLearningProfile(content, state, today());
+      if (!profile.allowedWords.length) return sendError(res, 409, "no learned words are available");
+      const routed = await runAiRoute(selection.route, config => createAiExamGenerator(config).generate(profile, {
+        includeEssay: selection.includeEssay,
+        includeListening: selection.includeListening,
+        totalPoints: selection.totalPoints
+      }));
+      selection.examState.currentExam = createExam(routed.value, routed.config);
+      selection.examState.updatedAt = new Date().toISOString();
+      state.aiExam = selection.examState;
+      persistUserStates();
+      return sendJson(res, 201, publicAiExamState(state.aiExam));
+    } catch (error) {
+      if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+      console.warn(`AI exam generation failed: ${error && error.message ? error.message : "unknown error"}`);
+      const failure = publicAiGenerationFailure(error);
+      return sendJson(res, failure.statusCode, { error: failure.message, providerStatus: failure.providerStatus });
+    }
+  }
+
+  if (url.pathname === "/api/ai/exams/current" && req.method === "PUT") {
+    try {
+      const body = await readBody(req);
+      const examState = sanitizeAiExamState(state.aiExam);
+      const exam = examState.currentExam;
+      if (!exam || exam.id !== String(body.examId || "")) return sendError(res, 404, "exam not found");
+      if (exam.status !== "draft") return sendError(res, 409, "exam has already been submitted");
+      exam.answers = sanitizeAnswers(exam, body.answers);
+      examState.currentExam = exam;
+      examState.updatedAt = new Date().toISOString();
+      state.aiExam = examState;
+      persistUserStates();
+      return sendJson(res, 200, publicAiExamState(examState));
+    } catch (error) {
+      return sendError(res, error.statusCode || 400, error.message);
+    }
+  }
+
+  if (url.pathname === "/api/ai/exams/listening" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const examState = sanitizeAiExamState(state.aiExam);
+      const exam = examState.currentExam;
+      if (!exam || exam.id !== String(body.examId || "")) return sendError(res, 404, "exam not found");
+      const text = listeningSpeech(exam, body.questionId);
+      if (!text) return sendError(res, 404, "listening question not found");
+      return sendJson(res, 200, { text, lang: "en-US", rate: 0.75 });
+    } catch (error) {
+      return sendError(res, error.statusCode || 400, error.message);
+    }
+  }
+
+  if (url.pathname === "/api/ai/exams/photo-grade" && req.method === "POST") {
+    if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
+    try {
+      const body = await readBody(req, 18 * 1024 * 1024);
+      const examState = sanitizeAiExamState(state.aiExam);
+      const exam = examState.currentExam;
+      if (!exam || exam.id !== String(body.examId || "")) return sendError(res, 404, "exam not found");
+      if (exam.status !== "draft") return sendError(res, 409, "exam has already been submitted");
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+      refreshContent();
+      const before = analyzeAbilities(content, state);
+      const availableModels = getAvailableModels(aiSettings);
+      const model = availableModels.includes(exam.model) ? exam.model : aiSettings.defaultModel;
+      const visionRoute = selectAiCandidates(aiSettings, { model, reasoningEffort: exam.reasoningEffort });
+      const recognized = await runAiRoute(visionRoute, config => createAiPaperRecognizer(config).recognize(exam, body.images));
+      exam.answers = sanitizeAnswers(exam, recognized.value.answers);
+      const profile = buildLearningProfile(content, state, today());
+      const gradingRoute = selectAiCandidates(aiSettings, { model, reasoningEffort: exam.reasoningEffort });
+      const graded = await runAiRoute(gradingRoute, config => createAiExamGrader(config).grade({ exam, answers: exam.answers, allowedWords: profile.allowedWords }));
+      const completed = completeExam(exam, graded.value, graded.config, profile.allowedWords);
+      if (recognized.value.recognitionNote) completed.result.summary = `${recognized.value.recognitionNote} ${completed.result.summary}`.trim();
+      state.aiExam = recordCompletedExam(examState, completed);
+      persistUserStates();
+      const abilities = analyzeAbilities(content, state);
+      return sendJson(res, 200, { ...publicAiExamState(state.aiExam), abilities, abilityChanges: abilityChanges(before, abilities), submissionMode: "photo" });
+    } catch (error) {
+      if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+      console.warn(`AI paper exam grading failed: ${error && error.message ? error.message : "unknown error"}`);
+      const providerStatus = Number(error && error.providerStatus) || null;
+      const message = [400, 422].includes(providerStatus) ? "当前模型可能不支持图片识别，请选择支持视觉的模型后重试" : "纸质答卷识别或判卷暂时不可用，原试卷草稿仍保留";
+      return sendJson(res, providerStatus === 429 ? 429 : 502, { error: message, providerStatus });
+    }
+  }
+
+  if (url.pathname === "/api/ai/exams/submit" && req.method === "POST") {
+    if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
+    try {
+      const body = await readBody(req);
+      const examState = sanitizeAiExamState(state.aiExam);
+      const exam = examState.currentExam;
+      if (!exam || exam.id !== String(body.examId || "")) return sendError(res, 404, "exam not found");
+      if (exam.status !== "draft") return sendError(res, 409, "exam has already been submitted");
+      exam.answers = sanitizeAnswers(exam, { ...exam.answers, ...(body.answers && typeof body.answers === "object" ? body.answers : {}) });
+      if (!examAnswersComplete(exam, exam.answers)) return sendError(res, 400, "请完成整张试卷后再交卷");
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+      refreshContent();
+      const before = analyzeAbilities(content, state);
+      const profile = buildLearningProfile(content, state, today());
+      const availableModels = getAvailableModels(aiSettings);
+      const model = availableModels.includes(exam.model) ? exam.model : aiSettings.defaultModel;
+      const route = selectAiCandidates(aiSettings, { model, reasoningEffort: exam.reasoningEffort });
+      const routed = await runAiRoute(route, config => createAiExamGrader(config).grade({ exam, answers: exam.answers, allowedWords: profile.allowedWords }));
+      const completed = completeExam(exam, routed.value, routed.config, profile.allowedWords);
+      state.aiExam = recordCompletedExam(examState, completed);
+      persistUserStates();
+      const abilities = analyzeAbilities(content, state);
+      return sendJson(res, 200, { ...publicAiExamState(state.aiExam), abilities, abilityChanges: abilityChanges(before, abilities), submissionMode: "web" });
+    } catch (error) {
+      if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+      console.warn(`AI exam grading failed: ${error && error.message ? error.message : "unknown error"}`);
+      const providerStatus = Number(error && error.providerStatus) || null;
+      return sendJson(res, providerStatus === 429 ? 429 : 502, { error: "AI 判卷暂时不可用，试卷草稿已保留，请稍后重新交卷", providerStatus });
+    }
+  }
+
+  return sendError(res, 404, "AI exam endpoint not found");
+}
+
+function dictationSelectionForState(state, requested = {}) {
+  const dictation = sanitizeDictationState(state.dictation);
+  const availableModels = getAvailableModels(aiSettings);
+  const storedModel = String(dictation.settings.model || "").trim();
+  const model = String(requested.model || (availableModels.includes(storedModel) ? storedModel : aiSettings && aiSettings.defaultModel) || "").trim();
+  const reasoningEffort = AI_EFFORTS.includes(requested.reasoningEffort) ? requested.reasoningEffort : dictation.settings.reasoningEffort;
+  const count = [5, 10, 20].includes(Number(requested.count)) ? Number(requested.count) : dictation.settings.count;
+  const route = selectAiCandidates(aiSettings, { model, reasoningEffort });
+  dictation.settings = { model: route.model, reasoningEffort: route.reasoningEffort, count };
+  dictation.updatedAt = new Date().toISOString();
+  state.dictation = dictation;
+  return { route, dictation, count };
+}
+
+async function handleAiDictation(req, res, url, user) {
+  if (!user) return sendError(res, 401, "login required");
+  const state = getUserState(user);
+
+  if (url.pathname === "/api/ai/dictation" && req.method === "GET") {
+    return sendJson(res, 200, publicDictationState(state.dictation));
+  }
+
+  if (url.pathname === "/api/ai/dictation/generate" && req.method === "POST") {
+    if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
+    try {
+      const body = await readBody(req);
+      const selection = dictationSelectionForState(state, body);
+      refreshContent();
+      const learnedWords = content.words.filter(item => !item.learned || String(item.learned) <= today());
+      if (!learnedWords.length) return sendError(res, 409, "no learned words are available");
+      const words = selectDictationWords(learnedWords, selection.dictation.weights, selection.count);
+      selection.dictation.currentSession = createDictationSession(words, selection.route.candidates[0]);
+      selection.dictation.updatedAt = new Date().toISOString();
+      state.dictation = selection.dictation;
+      persistUserStates();
+      return sendJson(res, 201, publicDictationState(state.dictation));
+    } catch (error) {
+      if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+      console.warn(`Dictation generation failed: ${error && error.message ? error.message : "unknown error"}`);
+      return sendError(res, 502, "听写生成失败，请检查 AI 模型设置");
+    }
+  }
+
+  if (url.pathname === "/api/ai/dictation/current" && req.method === "PUT") {
+    try {
+      const body = await readBody(req);
+      const dictation = sanitizeDictationState(state.dictation);
+      const session = dictation.currentSession;
+      if (!session || session.id !== String(body.sessionId || "")) return sendError(res, 404, "dictation session not found");
+      if (session.status !== "draft") return sendError(res, 409, "dictation has already been submitted");
+      dictation.currentSession = saveDictationAnswers(session, body.answers);
+      dictation.updatedAt = new Date().toISOString();
+      state.dictation = dictation;
+      persistUserStates();
+      return sendJson(res, 200, publicDictationState(dictation));
+    } catch (error) {
+      return sendError(res, error.statusCode || 400, error.message);
+    }
+  }
+
+  if (url.pathname === "/api/ai/dictation/speech" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const dictation = sanitizeDictationState(state.dictation);
+      const session = dictation.currentSession;
+      if (!session || session.id !== String(body.sessionId || "")) return sendError(res, 404, "dictation session not found");
+      const text = dictationSpeech(session, body.itemId);
+      if (!text) return sendError(res, 404, "dictation item not found");
+      return sendJson(res, 200, { text, lang: "en-US", rate: 0.7 });
+    } catch (error) {
+      return sendError(res, error.statusCode || 400, error.message);
+    }
+  }
+
+  if (url.pathname === "/api/ai/dictation/submit" && req.method === "POST") {
+    if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
+    try {
+      const body = await readBody(req);
+      const dictation = sanitizeDictationState(state.dictation);
+      let session = dictation.currentSession;
+      if (!session || session.id !== String(body.sessionId || "")) return sendError(res, 404, "dictation session not found");
+      if (session.status !== "draft") return sendError(res, 409, "dictation has already been submitted");
+      session = saveDictationAnswers(session, body.answers);
+      if (!dictationComplete(session)) return sendError(res, 400, "请完成全部听写后再提交");
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+      const before = analyzeAbilities(content, state);
+      session = gradeDictation(session);
+      const availableModels = getAvailableModels(aiSettings);
+      const model = availableModels.includes(session.model) ? session.model : aiSettings.defaultModel;
+      const route = selectAiCandidates(aiSettings, { model, reasoningEffort: session.reasoningEffort });
+      const routed = await runAiRoute(route, config => createAiDictationAnalyzer(config).analyze(session));
+      const completed = completeDictation(session, routed.value, routed.config);
+      state.dictation = recordCompletedDictation(dictation, completed);
+      persistUserStates();
+      const abilities = analyzeAbilities(content, state);
+      return sendJson(res, 200, { ...publicDictationState(state.dictation), abilities, abilityChanges: abilityChanges(before, abilities) });
+    } catch (error) {
+      if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+      console.warn(`AI dictation analysis failed: ${error && error.message ? error.message : "unknown error"}`);
+      const providerStatus = Number(error && error.providerStatus) || null;
+      return sendJson(res, providerStatus === 429 ? 429 : 502, { error: "AI 听写分析暂时不可用，草稿已保留，请稍后重新提交", providerStatus });
+    }
+  }
+
+  return sendError(res, 404, "dictation endpoint not found");
+}
+
+function focusedSelectionForState(state, requested = {}) {
+  const focused = sanitizeFocusedState(state.focusedPractice);
+  const availableModels = getAvailableModels(aiSettings);
+  const storedModel = String(focused.settings.model || "").trim();
+  const model = String(requested.model || (availableModels.includes(storedModel) ? storedModel : aiSettings && aiSettings.defaultModel) || "").trim();
+  const reasoningEffort = AI_EFFORTS.includes(requested.reasoningEffort) ? requested.reasoningEffort : focused.settings.reasoningEffort;
+  const focusedType = normalizeFocusedType(requested.focusedType || focused.settings.focusedType);
+  const route = selectAiCandidates(aiSettings, { model, reasoningEffort });
+  focused.settings = { model: route.model, reasoningEffort: route.reasoningEffort, focusedType };
+  focused.updatedAt = new Date().toISOString();
+  state.focusedPractice = focused;
+  return { route, focused, focusedType };
+}
+
+async function handleAiFocusedPractice(req, res, url, user) {
+  if (!user) return sendError(res, 401, "login required");
+  const state = getUserState(user);
+
+  if (url.pathname === "/api/ai/focused" && req.method === "GET") {
+    return sendJson(res, 200, publicFocusedState(state.focusedPractice));
+  }
+
+  if (url.pathname === "/api/ai/focused/generate" && req.method === "POST") {
+    if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
+    try {
+      const body = await readBody(req);
+      const selection = focusedSelectionForState(state, body);
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+      refreshContent();
+      const profile = buildLearningProfile(content, state, today());
+      if (!profile.allowedWords.length) return sendError(res, 409, "no learned words are available");
+      const routed = await runAiRoute(selection.route, config => createAiFocusedGenerator(config).generate(profile, selection.focusedType));
+      selection.focused.currentSession = createFocusedSession(routed.value, routed.config, selection.focusedType);
+      selection.focused.updatedAt = new Date().toISOString();
+      state.focusedPractice = selection.focused;
+      persistUserStates();
+      return sendJson(res, 201, publicFocusedState(state.focusedPractice));
+    } catch (error) {
+      if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+      console.warn(`Focused practice generation failed: ${error && error.message ? error.message : "unknown error"}`);
+      const failure = publicAiGenerationFailure(error);
+      return sendJson(res, failure.statusCode, { error: failure.message, providerStatus: failure.providerStatus });
+    }
+  }
+
+  if (url.pathname === "/api/ai/focused/current" && req.method === "PUT") {
+    try {
+      const body = await readBody(req);
+      const focused = sanitizeFocusedState(state.focusedPractice);
+      let session = focused.currentSession;
+      if (!session || session.id !== String(body.sessionId || "")) return sendError(res, 404, "focused practice not found");
+      if (session.status !== "draft") return sendError(res, 409, "focused practice has already been submitted");
+      session = saveFocusedAnswers(session, sanitizeAnswers(examForFocusedGrading(session), body.answers));
+      focused.currentSession = session;
+      focused.updatedAt = new Date().toISOString();
+      state.focusedPractice = focused;
+      persistUserStates();
+      return sendJson(res, 200, publicFocusedState(focused));
+    } catch (error) {
+      return sendError(res, error.statusCode || 400, error.message);
+    }
+  }
+
+  if (url.pathname === "/api/ai/focused/listening" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const focused = sanitizeFocusedState(state.focusedPractice);
+      const session = focused.currentSession;
+      if (!session || session.id !== String(body.sessionId || "")) return sendError(res, 404, "focused practice not found");
+      const text = focusedListeningSpeech(session, body.questionId);
+      if (!text) return sendError(res, 404, "focused listening question not found");
+      return sendJson(res, 200, { text, lang: "en-US", rate: 0.72 });
+    } catch (error) {
+      return sendError(res, error.statusCode || 400, error.message);
+    }
+  }
+
+  if (url.pathname === "/api/ai/focused/submit" && req.method === "POST") {
+    if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
+    try {
+      const body = await readBody(req);
+      const focused = sanitizeFocusedState(state.focusedPractice);
+      let session = focused.currentSession;
+      if (!session || session.id !== String(body.sessionId || "")) return sendError(res, 404, "focused practice not found");
+      if (session.status !== "draft") return sendError(res, 409, "focused practice has already been submitted");
+      const exam = examForFocusedGrading(session);
+      session = saveFocusedAnswers(session, sanitizeAnswers(exam, body.answers));
+      if (!focusedAnswersComplete(session)) return sendError(res, 400, "请完成全部专项题目后再提交");
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+      refreshContent();
+      const before = analyzeAbilities(content, state);
+      const profile = buildLearningProfile(content, state, today());
+      const availableModels = getAvailableModels(aiSettings);
+      const model = availableModels.includes(session.model) ? session.model : aiSettings.defaultModel;
+      const route = selectAiCandidates(aiSettings, { model, reasoningEffort: session.reasoningEffort });
+      const routed = await runAiRoute(route, config => createAiExamGrader(config).grade({ exam, answers: session.answers, allowedWords: profile.allowedWords }));
+      const completed = completeFocusedSession(session, routed.value, routed.config);
+      state.focusedPractice = recordCompletedFocused(focused, completed);
+      persistUserStates();
+      const abilities = analyzeAbilities(content, state);
+      return sendJson(res, 200, { ...publicFocusedState(state.focusedPractice), abilities, abilityChanges: abilityChanges(before, abilities) });
+    } catch (error) {
+      if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+      console.warn(`Focused practice grading failed: ${error && error.message ? error.message : "unknown error"}`);
+      const providerStatus = Number(error && error.providerStatus) || null;
+      return sendJson(res, providerStatus === 429 ? 429 : 502, { error: "AI 专项分析暂时不可用，草稿已保留，请稍后重新提交", providerStatus });
+    }
+  }
+
+  return sendError(res, 404, "focused practice endpoint not found");
+}
+
 function mimeType(filePath) { return { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".webmanifest": "application/manifest+json; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon" }[path.extname(filePath).toLowerCase()] || "application/octet-stream"; }
 
 function serveStatic(req, res, url) {
@@ -711,12 +1172,17 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, authRequired: true, aiGrading: aiConfigured(), time: new Date().toISOString() });
   }
   if (url.pathname === "/api/ai/options" && req.method === "GET") return user ? sendJson(res, 200, publicAiOptions(user)) : sendError(res, 401, "login required");
+  if (url.pathname === "/api/abilities") return handleAbilities(req, res, user);
   if (url.pathname === "/api/ai/grade") return handleAiGrade(req, res, user);
+  if (url.pathname === "/api/ai/exams" || url.pathname.startsWith("/api/ai/exams/")) return handleAiExams(req, res, url, user);
+  if (url.pathname === "/api/ai/dictation" || url.pathname.startsWith("/api/ai/dictation/")) return handleAiDictation(req, res, url, user);
+  if (url.pathname === "/api/ai/focused" || url.pathname.startsWith("/api/ai/focused/")) return handleAiFocusedPractice(req, res, url, user);
   if (url.pathname === "/api/ai/questions/generate") return handleAiGenerate(req, res, user);
   if (url.pathname === "/api/ai/questions/ask") return handleAiTutorAsk(req, res, user);
   if (url.pathname === "/api/ai/questions/grade") return handleAiQuestionGrade(req, res, user);
   if (url.pathname === "/api/sync/profile") return handleLearningSync(req, res, url);
-  if (url.pathname === "/api/export" && req.method === "GET") return user ? sendJson(res, 200, { content, state: getUserState(user), user: publicUser(user) }) : sendError(res, 401, "login required");
+  if (url.pathname === "/api/sync/teaching-profile") return handleTeachingProfileSync(req, res, url);
+  if (url.pathname === "/api/export" && req.method === "GET") return user ? sendJson(res, 200, { content, state: publicReviewState(getUserState(user)), user: publicUser(user) }) : sendError(res, 401, "login required");
   if (url.pathname === "/api/state") return handleState(req, res, user);
   if (url.pathname === "/api/content" || url.pathname.startsWith("/api/content/")) return handleContent(req, res, url, user);
   return serveStatic(req, res, url);

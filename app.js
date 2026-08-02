@@ -8,6 +8,7 @@
   const INTERVALS = [1, 3, 7, 14, 30, 60];
   const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
   const AI_EFFORT_LABELS = { low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高" };
+  const FOCUSED_TYPE_LABELS = { listening: "听力", choice: "选择", "fill-blank": "填空", "true-false": "判断", translation: "翻译", cloze: "完形填空", reading: "材料题", essay: "作文" };
   const DEFAULT_AI_TIMEOUT_MS = 30000;
   const AI_CLIENT_TIMEOUT_MS = 125000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
@@ -36,6 +37,31 @@
   let aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
   let aiConfigDraft = null;
   let activeAiProviderId = "";
+  let examState = normalizeClientAiExam(null);
+  let examStatusMessage = "";
+  let examRequestInProgress = false;
+  let examDraftSaveTimer = null;
+  let examSpeechQuestionId = "";
+  const examListeningCache = new Map();
+  let examPhotoFiles = [];
+  let examAbilityChanges = [];
+  let abilityReport = null;
+  let abilityLoading = false;
+  let abilityStatusMessage = "";
+  let dictationState = normalizeClientDictation(null);
+  let dictationLoaded = false;
+  let dictationRequestInProgress = false;
+  let dictationStatusMessage = "";
+  let dictationDraftSaveTimer = null;
+  let dictationAbilityChanges = [];
+  const dictationSpeechCache = new Map();
+  let focusedState = normalizeClientFocused(null);
+  let focusedLoaded = false;
+  let focusedRequestInProgress = false;
+  let focusedStatusMessage = "";
+  let focusedDraftSaveTimer = null;
+  let focusedAbilityChanges = [];
+  const focusedSpeechCache = new Map();
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -91,6 +117,744 @@
       history: Array.isArray(source.history) ? source.history.slice(-1000) : [],
       updatedAt: String(source.updatedAt || "")
     };
+  }
+
+  function normalizeClientAiExam(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
+    return {
+      settings: {
+        model: String(settings.model || ""),
+        reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
+        includeEssay: Boolean(settings.includeEssay),
+        includeListening: Boolean(settings.includeListening),
+        totalPoints: Number(settings.totalPoints) === 150 ? 150 : 100
+      },
+      currentExam: source.currentExam && Array.isArray(source.currentExam.questions) ? source.currentExam : null,
+      history: Array.isArray(source.history) ? source.history.slice(-20) : [],
+      weakPoints: Array.isArray(source.weakPoints) ? source.weakPoints.slice(-200) : [],
+      updatedAt: String(source.updatedAt || "")
+    };
+  }
+
+  function normalizeClientDictation(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
+    return {
+      settings: {
+        model: String(settings.model || ""),
+        reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
+        count: [5, 10, 20].includes(Number(settings.count)) ? Number(settings.count) : 5
+      },
+      currentSession: source.currentSession && Array.isArray(source.currentSession.items) ? source.currentSession : null,
+      history: Array.isArray(source.history) ? source.history.slice(-50) : [],
+      weightSummary: source.weightSummary && typeof source.weightSummary === "object" ? source.weightSummary : { trackedWords: 0, highPriorityWords: 0, maximumWeight: 1 },
+      updatedAt: String(source.updatedAt || "")
+    };
+  }
+
+  function normalizeClientFocused(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
+    return {
+      settings: {
+        model: String(settings.model || ""),
+        reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
+        focusedType: Object.hasOwn(FOCUSED_TYPE_LABELS, settings.focusedType) ? settings.focusedType : "choice"
+      },
+      currentSession: source.currentSession && Array.isArray(source.currentSession.questions) ? source.currentSession : null,
+      history: Array.isArray(source.history) ? source.history.slice(-100) : [],
+      skills: Array.isArray(source.skills) ? source.skills.slice(0, 8) : Object.entries(FOCUSED_TYPE_LABELS).map(([id, label]) => ({ id, label, score: 0, evidenceCount: 0, status: "unpracticed", updatedAt: "" })),
+      updatedAt: String(source.updatedAt || "")
+    };
+  }
+
+  function speechSynthesisAvailable() {
+    return typeof window.SpeechSynthesisUtterance === "function" && Boolean(window.speechSynthesis);
+  }
+
+  function speechButtonHtml(text, label = "播放英文发音") {
+    if (!text || !speechSynthesisAvailable()) return "";
+    return `<button class="speak-button" type="button" data-speak-text="${escapeHtml(text)}" data-tooltip="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><i data-lucide="volume-2" aria-hidden="true"></i></button>`;
+  }
+
+  function speakEnglish(text, button = null, rate = 0.72) {
+    const value = String(text || "").trim();
+    if (!value || !speechSynthesisAvailable()) return false;
+    window.speechSynthesis.cancel();
+    $$(".speak-button.is-playing").forEach(item => item.classList.remove("is-playing"));
+    const utterance = new SpeechSynthesisUtterance(value);
+    utterance.lang = "en-US";
+    utterance.rate = Math.max(0.5, Math.min(1, Number(rate) || 0.72));
+    const voices = window.speechSynthesis.getVoices();
+    utterance.voice = voices.find(voice => /^en-US/i.test(voice.lang)) || voices.find(voice => /^en/i.test(voice.lang)) || null;
+    if (button) button.classList.add("is-playing");
+    const finish = () => button?.classList.remove("is-playing");
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    window.speechSynthesis.speak(utterance);
+    return true;
+  }
+
+  function normalizeAbilityReport(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const abilities = (Array.isArray(source.abilities) ? source.abilities : []).map(item => ({
+      id: String(item.id || ""),
+      label: String(item.label || ""),
+      score: Math.max(0, Math.min(100, Number(item.score) || 0)),
+      measuredAccuracy: Number.isFinite(Number(item.measuredAccuracy)) ? Number(item.measuredAccuracy) : null,
+      evidenceCount: Math.max(0, Number(item.evidenceCount) || 0),
+      status: ["unpracticed", "developing", "stable"].includes(item.status) ? item.status : "unpracticed",
+      confidence: String(item.confidence || "none"),
+      updatedAt: String(item.updatedAt || "")
+    })).filter(item => item.id && item.label).slice(0, 7);
+    return {
+      comprehensiveScore: Math.max(0, Math.min(100, Number(source.comprehensiveScore) || 0)),
+      practicedAbilities: Math.max(0, Number(source.practicedAbilities) || 0),
+      unpracticedAbilities: Math.max(0, Number(source.unpracticedAbilities) || 0),
+      totalEvidence: Math.max(0, Number(source.totalEvidence) || 0),
+      status: String(source.status || "unpracticed"),
+      updatedAt: String(source.updatedAt || ""),
+      abilities
+    };
+  }
+
+  function abilityStatusText(item) {
+    if (item.status === "unpracticed") return "未测评";
+    if (item.status === "stable") return `已稳定 · ${item.evidenceCount} 条证据`;
+    return `形成中 · ${item.evidenceCount} 条证据`;
+  }
+
+  function drawAbilityRadar(report) {
+    const canvas = $("#abilityRadar");
+    const context = canvas && canvas.getContext("2d");
+    if (!canvas || !context) return;
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(320, Math.round(rect.width || 620));
+    const height = Math.round(width * 460 / 620);
+    const ratio = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const abilities = report && report.abilities.length ? report.abilities : [
+      { label: "词汇", score: 0, status: "unpracticed" }, { label: "拼写", score: 0, status: "unpracticed" },
+      { label: "语法", score: 0, status: "unpracticed" }, { label: "阅读", score: 0, status: "unpracticed" },
+      { label: "翻译", score: 0, status: "unpracticed" }, { label: "听力", score: 0, status: "unpracticed" },
+      { label: "写作", score: 0, status: "unpracticed" }
+    ];
+    const centerX = width / 2;
+    const centerY = height / 2 + 4;
+    const radius = Math.min(width * 0.34, height * 0.36);
+    const angleFor = index => -Math.PI / 2 + (Math.PI * 2 * index / abilities.length);
+    const point = (index, scale) => ({
+      x: centerX + Math.cos(angleFor(index)) * radius * scale,
+      y: centerY + Math.sin(angleFor(index)) * radius * scale
+    });
+
+    context.lineWidth = 1;
+    [0.2, 0.4, 0.6, 0.8, 1].forEach((scale, ringIndex) => {
+      context.beginPath();
+      abilities.forEach((_, index) => {
+        const current = point(index, scale);
+        if (!index) context.moveTo(current.x, current.y); else context.lineTo(current.x, current.y);
+      });
+      context.closePath();
+      context.strokeStyle = ringIndex === 4 ? "#b9c8c1" : "#d9e2dd";
+      context.stroke();
+    });
+    abilities.forEach((_, index) => {
+      const outer = point(index, 1);
+      context.beginPath();
+      context.moveTo(centerX, centerY);
+      context.lineTo(outer.x, outer.y);
+      context.strokeStyle = "#d9e2dd";
+      context.stroke();
+    });
+
+    context.beginPath();
+    abilities.forEach((item, index) => {
+      const current = point(index, Math.max(0, Math.min(1, item.score / 100)));
+      if (!index) context.moveTo(current.x, current.y); else context.lineTo(current.x, current.y);
+    });
+    context.closePath();
+    context.fillStyle = "rgba(22, 124, 102, 0.20)";
+    context.strokeStyle = "#167c66";
+    context.lineWidth = 2;
+    context.fill();
+    context.stroke();
+    abilities.forEach((item, index) => {
+      const current = point(index, Math.max(0, Math.min(1, item.score / 100)));
+      context.beginPath();
+      context.arc(current.x, current.y, 3.5, 0, Math.PI * 2);
+      context.fillStyle = "#167c66";
+      context.fill();
+    });
+
+    context.font = '12px "Microsoft YaHei", sans-serif';
+    context.fillStyle = "#202824";
+    abilities.forEach((item, index) => {
+      const labelPoint = point(index, 1.18);
+      const text = `${item.label} ${item.status === "unpracticed" ? "未测评" : Math.round(item.score)}`;
+      const measurement = context.measureText(text);
+      const x = Math.max(2, Math.min(width - measurement.width - 2, labelPoint.x - measurement.width / 2));
+      context.fillText(text, x, labelPoint.y + 4);
+    });
+  }
+
+  function renderAbilityView() {
+    const report = abilityReport;
+    $("#abilityOverall").textContent = report && report.practicedAbilities ? String(report.comprehensiveScore) : "—";
+    $("#abilityPracticed").textContent = `${report ? report.practicedAbilities : 0} / 7`;
+    $("#abilityEvidence").textContent = String(report ? report.totalEvidence : 0);
+    $("#abilitiesStatus").textContent = abilityLoading
+      ? "正在汇总学习证据…"
+      : abilityStatusMessage || (report && report.updatedAt ? `统计截至 ${formatAiHistoryTime(report.updatedAt)}` : "完成练习后，这里会形成可量化的能力档案。");
+    const abilities = report ? report.abilities : [];
+    $("#abilityDetailList").innerHTML = abilities.length ? abilities.map(item => `
+      <div class="ability-detail ${item.status === "unpracticed" ? "is-unpracticed" : ""}">
+        <div class="ability-detail-name"><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(abilityStatusText(item))}</span></div>
+        <div class="ability-meter" aria-hidden="true"><span style="width:${item.score}%"></span></div>
+        <span class="ability-detail-score">${item.status === "unpracticed" ? "—" : Math.round(item.score)}</span>
+      </div>`).join("") : '<p class="empty-message">正在读取能力数据…</p>';
+    requestAnimationFrame(() => drawAbilityRadar(report));
+  }
+
+  async function loadAbilities(force = false) {
+    if (!API_ENABLED) {
+      abilityStatusMessage = "能力分析需要连接已部署的网站。";
+      renderAbilityView();
+      return;
+    }
+    if (abilityLoading || (abilityReport && !force)) return;
+    abilityLoading = true;
+    abilityStatusMessage = "";
+    renderAbilityView();
+    try {
+      const response = await fetch("/api/abilities", { cache: "no-store", credentials: "same-origin" });
+      abilityReport = normalizeAbilityReport(await responseJson(response));
+    } catch (error) {
+      abilityStatusMessage = error.message;
+    } finally {
+      abilityLoading = false;
+      renderAbilityView();
+    }
+  }
+
+  function invalidateAbilities() {
+    abilityReport = null;
+    if (activeView === "abilities") loadAbilities(true);
+  }
+
+  function selectedDictationSettings() {
+    const settings = dictationState.settings || {};
+    const fallbackModel = aiOptions.models.includes(settings.model) ? settings.model : aiOptions.defaultModel;
+    return {
+      model: fallbackModel || "",
+      reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
+      count: [5, 10, 20].includes(Number(settings.count)) ? Number(settings.count) : 5
+    };
+  }
+
+  function updateDictationPreferences(patch) {
+    dictationState.settings = { ...selectedDictationSettings(), ...patch };
+    dictationStatusMessage = "";
+    renderDictationView();
+  }
+
+  function populateDictationControls() {
+    const settings = selectedDictationSettings();
+    const select = $("#dictationModelSelect");
+    select.innerHTML = aiOptions.models.length
+      ? aiOptions.models.map(modelName => `<option value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</option>`).join("")
+      : '<option value="">尚未配置模型</option>';
+    select.value = settings.model;
+    $("#dictationCount").value = String(settings.count);
+    $$('[data-dictation-effort]').forEach(button => {
+      const active = button.dataset.dictationEffort === settings.reasoningEffort;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+  }
+
+  function dictationItemHtml(item, completed) {
+    const position = Number(item.position) || 0;
+    if (!completed) return `
+      <div class="dictation-item" data-dictation-item="${escapeHtml(item.id)}">
+        <span class="dictation-position">${position}</span>
+        <button class="speak-button" type="button" data-dictation-listen="${escapeHtml(item.id)}" aria-label="播放第 ${position} 个单词"><i data-lucide="volume-2" aria-hidden="true"></i></button>
+        <label><span class="sr-only">第 ${position} 个单词</span><input class="dictation-input" type="text" autocomplete="off" spellcheck="false" data-dictation-answer="${escapeHtml(item.id)}" value="${escapeHtml(item.answer || "")}" placeholder="听音后输入英文"></label>
+        <span class="dictation-item-result">第 ${item.day || "—"} 天词库</span>
+      </div>`;
+    return `
+      <div class="dictation-item" data-dictation-item="${escapeHtml(item.id)}">
+        <span class="dictation-position">${position}</span>
+        ${speechButtonHtml(item.english, `播放 ${item.english} 的发音`)}
+        <div><strong>${escapeHtml(item.english)}</strong><div class="text-muted">${escapeHtml(item.phonetic || "")} · ${escapeHtml(item.chinese || "")}</div></div>
+        <div class="dictation-item-result ${item.correct ? "is-correct" : ""}"><strong>${item.correct ? "正确" : "错误"}</strong>你的答案：${escapeHtml(item.answer || "（未填写）")}</div>
+      </div>`;
+  }
+
+  function renderDictationResult(session) {
+    const result = $("#dictationResult");
+    const completed = session && session.status === "completed";
+    result.hidden = !completed;
+    if (!completed) return;
+    $("#dictationResultScore").textContent = String(session.score || 0);
+    $("#dictationResultPossible").textContent = `/ ${session.items.length}`;
+    $("#dictationResultSummary").textContent = session.analysis && session.analysis.summary || "听写已完成。";
+    const weakWords = session.analysis && Array.isArray(session.analysis.weakWords) ? session.analysis.weakWords : [];
+    const recommendations = session.analysis && Array.isArray(session.analysis.recommendations) ? session.analysis.recommendations : [];
+    const changes = dictationAbilityChanges.filter(item => item.delta !== 0);
+    $("#dictationAnalysis").innerHTML = [
+      ...weakWords.map(item => `<div class="dictation-analysis-item"><strong>${escapeHtml(item.detail)}</strong>${item.recommendation ? `<p>${escapeHtml(item.recommendation)}</p>` : ""}</div>`),
+      ...recommendations.map(item => `<div class="dictation-analysis-item"><strong>练习建议</strong><p>${escapeHtml(item)}</p></div>`),
+      changes.length ? `<div class="dictation-analysis-item"><strong>能力变化</strong><p>${changes.map(item => `${escapeHtml(item.label)} ${item.delta > 0 ? "+" : ""}${item.delta}`).join(" · ")}</p></div>` : ""
+    ].join("") || '<div class="exam-no-weakness">本次没有发现需要额外记录的薄弱点。</div>';
+  }
+
+  function renderDictationHistory() {
+    const history = [...dictationState.history].reverse();
+    $("#dictationHistorySummary").textContent = history.length ? `已完成 ${history.length} 次` : "暂无听写记录";
+    $("#dictationHistoryList").innerHTML = history.map(session => `
+      <details class="ai-history-item">
+        <summary><span>${escapeHtml(formatAiHistoryTime(session.completedAt || session.createdAt))}</span><strong>${session.score} / ${session.items.length}</strong></summary>
+        <div class="dictation-history-body">
+          <p>${escapeHtml(session.analysis && session.analysis.summary || "听写已完成。")}</p>
+          <div class="dictation-history-words">${session.items.map(item => `<span class="dictation-history-word ${item.correct ? "" : "is-wrong"}">${escapeHtml(item.english)} · ${escapeHtml(item.answer)}</span>`).join("")}</div>
+        </div>
+      </details>`).join("");
+  }
+
+  function renderDictationView() {
+    populateDictationControls();
+    const supported = speechSynthesisAvailable();
+    const available = supported && aiOptions.configured && !dictationRequestInProgress;
+    $("#generateDictationButton").disabled = !available;
+    $("#dictationSpeechSupport").textContent = supported ? "使用设备英文语音慢速播放；作答前不显示单词。" : "当前浏览器不支持语音合成，无法进行听写。";
+    $("#dictationSpeechSupport").classList.toggle("is-error", !supported);
+    $("#dictationStatus").textContent = dictationStatusMessage || (aiOptions.configured ? "错词会提高后续抽取权重。" : "请先由管理员配置 AI 模型。 ");
+    const session = dictationState.currentSession;
+    $("#dictationEmptyState").hidden = Boolean(session);
+    $("#dictationForm").hidden = !session;
+    if (session) {
+      const completed = session.status === "completed";
+      $("#dictationList").innerHTML = session.items.map(item => dictationItemHtml(item, completed)).join("");
+      $("#dictationSubmitRow").hidden = completed;
+      $("#submitDictationButton").disabled = dictationRequestInProgress;
+      renderDictationResult(session);
+    } else {
+      $("#dictationResult").hidden = true;
+    }
+    renderDictationHistory();
+    refreshIcons();
+  }
+
+  async function loadDictation(force = false) {
+    if (!API_ENABLED || (dictationLoaded && !force)) { renderDictationView(); return; }
+    try {
+      dictationState = normalizeClientDictation(await responseJson(await fetch("/api/ai/dictation", { cache: "no-store", credentials: "same-origin" })));
+      dictationLoaded = true;
+      dictationStatusMessage = "";
+    } catch (error) {
+      dictationStatusMessage = error.message;
+    }
+    renderDictationView();
+  }
+
+  async function generateDictation() {
+    if (dictationRequestInProgress || !speechSynthesisAvailable()) return;
+    dictationRequestInProgress = true;
+    dictationStatusMessage = "正在按错词权重抽取单词…";
+    setBusyButton($("#generateDictationButton"), true, "正在生成…");
+    renderDictationView();
+    try {
+      dictationState = normalizeClientDictation(await responseJson(await fetch("/api/ai/dictation/generate", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(selectedDictationSettings())
+      })));
+      dictationLoaded = true;
+      dictationAbilityChanges = [];
+      dictationSpeechCache.clear();
+      dictationStatusMessage = "听写已生成，点击喇叭可重复播放。";
+    } catch (error) {
+      dictationStatusMessage = error.message;
+      showToast(error.message);
+    } finally {
+      dictationRequestInProgress = false;
+      setBusyButton($("#generateDictationButton"), false, "");
+      renderDictationView();
+    }
+  }
+
+  function dictationAnswers() {
+    const session = dictationState.currentSession;
+    return Object.fromEntries((session && session.items || []).map(item => [item.id, String(item.answer || "").trim()]));
+  }
+
+  function updateDictationAnswer(event) {
+    const input = event.target.closest("[data-dictation-answer]");
+    const session = dictationState.currentSession;
+    if (!input || !session || session.status !== "draft") return;
+    const item = session.items.find(entry => entry.id === input.dataset.dictationAnswer);
+    if (!item) return;
+    item.answer = input.value;
+    clearTimeout(dictationDraftSaveTimer);
+    dictationDraftSaveTimer = setTimeout(saveDictationDraft, 500);
+    $("#dictationDraftStatus").textContent = "正在保存…";
+  }
+
+  async function saveDictationDraft() {
+    const session = dictationState.currentSession;
+    if (!session || session.status !== "draft") return;
+    try {
+      dictationState = normalizeClientDictation(await responseJson(await fetch("/api/ai/dictation/current", {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: session.id, answers: dictationAnswers() })
+      })));
+      $("#dictationDraftStatus").textContent = "草稿已保存";
+    } catch (_) {
+      $("#dictationDraftStatus").textContent = "草稿暂未同步，稍后会重试";
+    }
+  }
+
+  async function playDictationItem(button) {
+    const session = dictationState.currentSession;
+    const itemId = button.dataset.dictationListen;
+    if (!session || !itemId || !speechSynthesisAvailable()) return;
+    try {
+      let speech = dictationSpeechCache.get(itemId);
+      if (!speech) {
+        const data = await responseJson(await fetch("/api/ai/dictation/speech", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: session.id, itemId })
+        }));
+        speech = data.text;
+        dictationSpeechCache.set(itemId, speech);
+      }
+      speakEnglish(speech, button, 0.7);
+    } catch (error) {
+      showToast(error.message);
+    }
+  }
+
+  async function submitDictation(event) {
+    event.preventDefault();
+    if (dictationRequestInProgress) return;
+    const session = dictationState.currentSession;
+    if (!session || session.status !== "draft") return;
+    const missing = session.items.find(item => !String(item.answer || "").trim());
+    if (missing) {
+      const input = $(`[data-dictation-answer="${CSS.escape(missing.id)}"]`);
+      input?.focus();
+      input?.scrollIntoView({ behavior: "smooth", block: "center" });
+      showToast("请完成全部听写后再提交");
+      return;
+    }
+    clearTimeout(dictationDraftSaveTimer);
+    dictationRequestInProgress = true;
+    dictationStatusMessage = "AI 正在统一分析拼写和发音薄弱点…";
+    setBusyButton($("#submitDictationButton"), true, "正在分析…");
+    renderDictationView();
+    try {
+      const data = await responseJson(await fetch("/api/ai/dictation/submit", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: session.id, answers: dictationAnswers() })
+      }));
+      dictationState = normalizeClientDictation(data);
+      dictationAbilityChanges = Array.isArray(data.abilityChanges) ? data.abilityChanges : [];
+      if (data.abilities) abilityReport = normalizeAbilityReport(data.abilities);
+      dictationStatusMessage = "分析完成，错词权重和能力档案已更新。";
+    } catch (error) {
+      dictationStatusMessage = error.message;
+      showToast(error.message);
+    } finally {
+      dictationRequestInProgress = false;
+      setBusyButton($("#submitDictationButton"), false, "");
+      renderDictationView();
+    }
+  }
+
+  function selectedFocusedSettings() {
+    const settings = focusedState.settings || {};
+    return {
+      model: aiOptions.models.includes(settings.model) ? settings.model : aiOptions.defaultModel || "",
+      reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
+      focusedType: Object.hasOwn(FOCUSED_TYPE_LABELS, settings.focusedType) ? settings.focusedType : "choice"
+    };
+  }
+
+  function updateFocusedPreferences(patch) {
+    focusedState.settings = { ...selectedFocusedSettings(), ...patch };
+    focusedStatusMessage = "";
+    renderFocusedView();
+  }
+
+  function populateFocusedControls() {
+    const settings = selectedFocusedSettings();
+    const select = $("#focusedModelSelect");
+    select.innerHTML = aiOptions.models.length
+      ? aiOptions.models.map(modelName => `<option value="${escapeHtml(modelName)}">${escapeHtml(modelName)}</option>`).join("")
+      : '<option value="">尚未配置模型</option>';
+    select.value = settings.model;
+    $("#focusedTypeSelect").value = settings.focusedType;
+    $$('[data-focused-effort]').forEach(button => {
+      const active = button.dataset.focusedEffort === settings.reasoningEffort;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+  }
+
+  function focusedAnswerComplete(question, answer) {
+    if (question.type === "true-false") return answer === true || answer === false || answer === "true" || answer === "false";
+    return Boolean(String(answer || "").trim());
+  }
+
+  function focusedOptionHtml(question, option, disabled) {
+    const selected = focusedState.currentSession && focusedState.currentSession.answers && focusedState.currentSession.answers[question.id];
+    return `<label class="exam-option"><input type="radio" name="focused-${escapeHtml(question.id)}" value="${escapeHtml(option.id)}" data-focused-answer="${escapeHtml(question.id)}" ${selected === option.id ? "checked" : ""} ${disabled ? "disabled" : ""}><span class="exam-option-key">${escapeHtml(option.id)}</span><span>${escapeHtml(option.text)}</span></label>`;
+  }
+
+  function focusedQuestionHtml(question, index, completed) {
+    const session = focusedState.currentSession;
+    const answer = session && session.answers ? session.answers[question.id] : "";
+    let answerField = "";
+    if (["single-choice", "cloze", "reading-comprehension", "listening"].includes(question.type)) {
+      answerField = `<div class="exam-options-list">${question.options.map(option => focusedOptionHtml(question, option, completed)).join("")}</div>`;
+    } else if (question.type === "true-false") {
+      answerField = `<div class="exam-options-list exam-boolean-options">
+        <label class="exam-option"><input type="radio" name="focused-${escapeHtml(question.id)}" value="true" data-focused-answer="${escapeHtml(question.id)}" ${answer === true ? "checked" : ""} ${completed ? "disabled" : ""}><span>正确</span></label>
+        <label class="exam-option"><input type="radio" name="focused-${escapeHtml(question.id)}" value="false" data-focused-answer="${escapeHtml(question.id)}" ${answer === false ? "checked" : ""} ${completed ? "disabled" : ""}><span>错误</span></label>
+      </div>`;
+    } else if (["translation", "essay"].includes(question.type)) {
+      answerField = `<textarea class="exam-textarea" rows="${question.type === "essay" ? 7 : 3}" data-focused-answer="${escapeHtml(question.id)}" maxlength="${question.type === "essay" ? 2000 : 600}" ${completed ? "disabled" : ""}>${escapeHtml(answer || "")}</textarea>${question.type === "essay" ? `<div class="exam-writing-meta"><span>${question.minWords || 0}-${question.maxWords || 0} 个英文单词</span>${question.requiredWords && question.requiredWords.length ? `<span>建议使用：${question.requiredWords.map(escapeHtml).join("、")}</span>` : ""}</div>` : ""}`;
+    } else {
+      answerField = `<input class="answer-input exam-short-answer" type="text" data-focused-answer="${escapeHtml(question.id)}" value="${escapeHtml(answer || "")}" autocomplete="off" spellcheck="false" ${completed ? "disabled" : ""}>`;
+    }
+    const listening = question.type === "listening" ? `<div class="exam-listening-player"><button class="secondary-button" type="button" data-focused-listen="${escapeHtml(question.id)}" ${speechSynthesisAvailable() ? "" : "disabled"}><i data-lucide="volume-2" aria-hidden="true"></i><span>播放听力</span></button></div>` : "";
+    const grade = completed && question.result ? `<div class="exam-question-result ${question.result.correct ? "is-correct" : "is-review"}">
+      <strong>得分 ${question.result.score} / ${question.points}</strong>
+      ${question.result.explanation ? `<p>${escapeHtml(question.result.explanation)}</p>` : ""}
+      ${question.result.correctAnswer ? `<p><span>参考答案：</span>${escapeHtml(question.result.correctAnswer)}</p>` : ""}
+      ${question.transcript ? `<div class="exam-transcript"><span>听力原文</span><p><span class="inline-english">${escapeHtml(question.transcript)}${speechButtonHtml(question.transcript, "播放听力原文")}</span></p></div>` : ""}
+    </div>` : "";
+    return `<article class="exam-question" data-focused-question="${escapeHtml(question.id)}">
+      <div class="exam-question-heading"><span>${index + 1}. ${escapeHtml(question.typeLabel)}</span><strong>${question.points} 分</strong></div>
+      <p class="exam-question-prompt">${escapeHtml(question.prompt)}</p>
+      ${question.sourceText ? `<div class="exam-source-text"><span class="inline-english">${escapeHtml(question.sourceText)}${/[A-Za-z]/.test(question.sourceText) ? speechButtonHtml(question.sourceText, "播放英文题目") : ""}</span></div>` : ""}
+      ${listening}${answerField}${grade}
+    </article>`;
+  }
+
+  function renderFocusedSkills() {
+    $("#focusedSkillGrid").innerHTML = focusedState.skills.map(skill => {
+      const score = Math.max(0, Math.min(5, Number(skill.score) || 0));
+      return `<div class="focused-skill ${skill.status === "unpracticed" ? "is-unpracticed" : ""}">
+        <div class="focused-skill-name"><strong>${escapeHtml(skill.label)}</strong><span>${skill.evidenceCount ? `${skill.evidenceCount} 次训练` : "未练习"}</span></div>
+        <div class="focused-bars" aria-label="${escapeHtml(skill.label)} ${score} 分">${Array.from({ length: 5 }, (_, index) => `<span class="${index < score ? "is-filled" : ""}"></span>`).join("")}</div>
+        <span class="focused-skill-score">${skill.evidenceCount ? `${score}/5` : "—"}</span>
+      </div>`;
+    }).join("");
+  }
+
+  function renderFocusedResult(session) {
+    const completed = session && session.status === "completed";
+    $("#focusedResult").hidden = !completed;
+    if (!completed) return;
+    $("#focusedResultScore").textContent = String(session.result && session.result.levelScore || 0);
+    $("#focusedResultSummary").textContent = session.result && session.result.summary || "专项训练已完成。";
+    const weakPoints = session.result && Array.isArray(session.result.weakPoints) ? session.result.weakPoints : [];
+    const changes = focusedAbilityChanges.filter(item => item.delta !== 0);
+    $("#focusedWeaknesses").innerHTML = [
+      ...weakPoints.map(item => `<div class="exam-weakness"><div><strong>${escapeHtml(item.detail)}</strong><span class="severity-${escapeHtml(item.severity)}">${item.severity === "high" ? "重点" : item.severity === "low" ? "轻度" : "巩固"}</span></div>${item.recommendation ? `<p>${escapeHtml(item.recommendation)}</p>` : ""}</div>`),
+      changes.length ? `<div class="exam-weakness"><div><strong>能力变化</strong></div><p>${changes.map(item => `${escapeHtml(item.label)} ${item.delta > 0 ? "+" : ""}${item.delta}`).join(" · ")}</p></div>` : ""
+    ].join("") || '<div class="exam-no-weakness">本次专项表现稳定，没有新增薄弱点。</div>';
+  }
+
+  function renderFocusedHistory() {
+    const history = [...focusedState.history].reverse();
+    $("#focusedHistorySummary").textContent = history.length ? `已完成 ${history.length} 次` : "暂无专项记录";
+    $("#focusedHistoryList").innerHTML = history.map(session => `<details class="ai-history-item">
+      <summary><span>${escapeHtml(formatAiHistoryTime(session.completedAt || session.createdAt))} · ${escapeHtml(session.label)}</span><strong>${session.result && session.result.levelScore || 0} / 5</strong></summary>
+      <div class="focused-history-body"><p>${escapeHtml(session.result && session.result.summary || "专项训练已完成。")}</p></div>
+    </details>`).join("");
+  }
+
+  function renderFocusedView() {
+    populateFocusedControls();
+    renderFocusedSkills();
+    const selectedType = selectedFocusedSettings().focusedType;
+    const listeningUnsupported = selectedType === "listening" && !speechSynthesisAvailable();
+    $("#generateFocusedButton").disabled = !aiOptions.configured || focusedRequestInProgress || listeningUnsupported;
+    $("#focusedSupport").textContent = listeningUnsupported ? "当前浏览器不支持语音合成，无法生成听力专项。" : "每次训练满分 5 分，完成后统一分析并更新专项能力。";
+    $("#focusedSupport").classList.toggle("is-error", listeningUnsupported);
+    $("#focusedStatus").textContent = focusedStatusMessage || (aiOptions.configured ? "选择一个题型进行专项训练。" : "请先由管理员配置 AI 模型。 ");
+    const session = focusedState.currentSession;
+    $("#focusedEmptyState").hidden = Boolean(session);
+    $("#focusedForm").hidden = !session;
+    if (session) {
+      const completed = session.status === "completed";
+      $("#focusedSheetMeta").textContent = completed ? "COMPLETED" : "DRAFT";
+      $("#focusedSheetTitle").textContent = session.title;
+      $("#focusedInstructions").textContent = session.instructions || `${session.label}专项训练`;
+      const hasPassage = Boolean(session.passage);
+      $("#focusedPassage").hidden = !hasPassage;
+      if (hasPassage) {
+        $("#focusedPassageLabel").textContent = session.focusedType === "cloze" ? "完形填空材料" : "材料题材料";
+        $("#focusedPassageText").innerHTML = `<span class="inline-english">${escapeHtml(session.passage)}${speechButtonHtml(session.passage, "播放专项材料")}</span>`;
+      }
+      $("#focusedQuestionList").innerHTML = session.questions.map((question, index) => focusedQuestionHtml(question, index, completed)).join("");
+      $("#focusedSubmitRow").hidden = completed;
+      renderFocusedResult(session);
+    } else {
+      $("#focusedResult").hidden = true;
+    }
+    renderFocusedHistory();
+    refreshIcons();
+  }
+
+  async function loadFocused(force = false) {
+    if (!API_ENABLED || (focusedLoaded && !force)) { renderFocusedView(); return; }
+    try {
+      focusedState = normalizeClientFocused(await responseJson(await fetch("/api/ai/focused", { cache: "no-store", credentials: "same-origin" })));
+      focusedLoaded = true;
+      focusedStatusMessage = "";
+    } catch (error) {
+      focusedStatusMessage = error.message;
+    }
+    renderFocusedView();
+  }
+
+  async function generateFocusedPractice() {
+    if (focusedRequestInProgress) return;
+    focusedRequestInProgress = true;
+    focusedStatusMessage = "AI 正在根据学习进度生成专项题目…";
+    setBusyButton($("#generateFocusedButton"), true, "正在生成…");
+    renderFocusedView();
+    try {
+      focusedState = normalizeClientFocused(await responseJson(await fetch("/api/ai/focused/generate", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(selectedFocusedSettings())
+      })));
+      focusedLoaded = true;
+      focusedAbilityChanges = [];
+      focusedSpeechCache.clear();
+      focusedStatusMessage = "专项题目已生成，完成全部题目后统一提交。";
+    } catch (error) {
+      focusedStatusMessage = error.message;
+      showToast(error.message);
+    } finally {
+      focusedRequestInProgress = false;
+      setBusyButton($("#generateFocusedButton"), false, "");
+      renderFocusedView();
+    }
+  }
+
+  function focusedAnswers() {
+    const session = focusedState.currentSession;
+    return session && session.answers && typeof session.answers === "object" ? { ...session.answers } : {};
+  }
+
+  function updateFocusedAnswer(event) {
+    const input = event.target.closest("[data-focused-answer]");
+    const session = focusedState.currentSession;
+    if (!input || !session || session.status !== "draft") return;
+    let value = input.value;
+    const question = session.questions.find(item => item.id === input.dataset.focusedAnswer);
+    if (question && question.type === "true-false") value = input.value === "true";
+    session.answers[input.dataset.focusedAnswer] = value;
+    input.closest("[data-focused-question]")?.classList.remove("is-unanswered");
+    clearTimeout(focusedDraftSaveTimer);
+    focusedDraftSaveTimer = setTimeout(saveFocusedDraft, 500);
+    $("#focusedDraftStatus").textContent = "正在保存…";
+  }
+
+  async function saveFocusedDraft() {
+    const session = focusedState.currentSession;
+    if (!session || session.status !== "draft") return;
+    try {
+      focusedState = normalizeClientFocused(await responseJson(await fetch("/api/ai/focused/current", {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: session.id, answers: focusedAnswers() })
+      })));
+      $("#focusedDraftStatus").textContent = "草稿已保存";
+    } catch (_) {
+      $("#focusedDraftStatus").textContent = "草稿暂未同步，稍后会重试";
+    }
+  }
+
+  async function playFocusedListening(button) {
+    const session = focusedState.currentSession;
+    const questionId = button.dataset.focusedListen;
+    if (!session || !questionId || !speechSynthesisAvailable()) return;
+    try {
+      let speech = focusedSpeechCache.get(questionId);
+      if (!speech) {
+        const data = await responseJson(await fetch("/api/ai/focused/listening", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: session.id, questionId })
+        }));
+        speech = data.text;
+        focusedSpeechCache.set(questionId, speech);
+      }
+      speakEnglish(speech, button, 0.72);
+    } catch (error) {
+      showToast(error.message);
+    }
+  }
+
+  async function submitFocusedPractice(event) {
+    event.preventDefault();
+    if (focusedRequestInProgress) return;
+    const session = focusedState.currentSession;
+    if (!session || session.status !== "draft") return;
+    const missing = session.questions.find(question => !focusedAnswerComplete(question, session.answers[question.id]));
+    if (missing) {
+      const article = $(`[data-focused-question="${CSS.escape(missing.id)}"]`);
+      article?.classList.add("is-unanswered");
+      article?.scrollIntoView({ behavior: "smooth", block: "center" });
+      article?.querySelector("input, textarea, button")?.focus({ preventScroll: true });
+      showToast("请完成全部专项题目后再提交");
+      return;
+    }
+    clearTimeout(focusedDraftSaveTimer);
+    focusedRequestInProgress = true;
+    focusedStatusMessage = "AI 正在统一判分并分析专项薄弱点…";
+    setBusyButton($("#submitFocusedButton"), true, "正在分析…");
+    renderFocusedView();
+    try {
+      const data = await responseJson(await fetch("/api/ai/focused/submit", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: session.id, answers: focusedAnswers() })
+      }));
+      focusedState = normalizeClientFocused(data);
+      focusedAbilityChanges = Array.isArray(data.abilityChanges) ? data.abilityChanges : [];
+      if (data.abilities) abilityReport = normalizeAbilityReport(data.abilities);
+      focusedStatusMessage = "专项分析完成，五分能力条和总能力档案已更新。";
+    } catch (error) {
+      focusedStatusMessage = error.message;
+      showToast(error.message);
+    } finally {
+      focusedRequestInProgress = false;
+      setBusyButton($("#submitFocusedButton"), false, "");
+      renderFocusedView();
+    }
   }
 
   function loadModel() {
@@ -239,6 +1003,7 @@
       bindAppEvents();
       renderHome();
       loadAiOptions();
+      loadAiExams();
       syncRemoteState();
     } catch (_) { setAuthFeedback("无法连接服务器，请检查网络"); }
     finally { submit.disabled = false; }
@@ -324,6 +1089,24 @@
     }
     populateAiModelSelect();
     renderAiView();
+    renderExamView();
+  }
+
+  async function loadAiExams() {
+    examStatusMessage = "";
+    if (!API_ENABLED) {
+      examState = normalizeClientAiExam(null);
+      renderExamView();
+      return;
+    }
+    try {
+      const response = await fetch("/api/ai/exams", { credentials: "same-origin", cache: "no-store" });
+      examState = normalizeClientAiExam(await responseJson(response));
+      preloadCurrentListening();
+    } catch (error) {
+      examStatusMessage = error.message;
+    }
+    renderExamView();
   }
 
   function currentAiQuestion() {
@@ -642,10 +1425,10 @@
         const number = Number(item.questionNumber) || index + 1;
         return `<article class="ai-history-question">
           <div class="ai-history-question-meta"><span>第 ${number} 题 · ${formatDirection(item.direction)}</span><div class="ai-history-question-actions"><span class="ai-history-result ${item.correct === true ? "is-correct" : "is-wrong"}">${item.correct === true ? "正确" : "错误"}</span><button class="text-button ai-history-ask" type="button" data-ai-history-ask="${escapeHtml(item.id)}"><i data-lucide="message-circle-question" aria-hidden="true"></i>询问</button></div></div>
-          <div class="ai-history-prompt">${escapeHtml(item.prompt || "（题目未记录）")}</div>
+          <div class="ai-history-prompt"><span class="inline-english">${escapeHtml(item.prompt || "（题目未记录）")}${item.direction === "en-zh" ? speechButtonHtml(item.prompt, "播放题目发音") : ""}</span></div>
           <dl class="ai-history-answers">
             <div><dt>你的答案</dt><dd>${escapeHtml(item.userAnswer || "（未填写）")}</dd></div>
-            <div><dt>正确答案</dt><dd>${escapeHtml(item.correctAnswer || "（未记录）")}</dd></div>
+            <div><dt>正确答案</dt><dd><span class="inline-english">${escapeHtml(item.correctAnswer || "（未记录）")}${item.direction === "zh-en" ? speechButtonHtml(item.correctAnswer, "播放正确答案") : ""}</span></dd></div>
             ${item.explanation ? `<div><dt>讲解</dt><dd>${escapeHtml(item.explanation)}</dd></div>` : ""}
           </dl>
         </article>`;
@@ -671,7 +1454,7 @@
     }
     feedback.hidden = false;
     feedback.className = `feedback ${question.correct ? "is-correct" : "is-wrong"}`;
-    feedback.innerHTML = `<span class="feedback-title">${question.correct ? "答对了" : "再看一次"}</span><span class="feedback-answer">正确答案：${escapeHtml(aiCorrectAnswer(question))}</span>${question.correct ? "" : `<span class="feedback-note">你的答案：${escapeHtml(question.userAnswer || "（未填写）")}</span>`}${question.explanation ? `<span class="feedback-note">${escapeHtml(question.explanation)}</span>` : ""}`;
+    feedback.innerHTML = `<span class="feedback-title">${question.correct ? "答对了" : "再看一次"}</span><span class="feedback-answer"><span class="inline-english">正确答案：${escapeHtml(aiCorrectAnswer(question))}${question.direction === "zh-en" ? speechButtonHtml(aiCorrectAnswer(question), "播放正确答案") : ""}</span></span>${question.correct ? "" : `<span class="feedback-note">你的答案：${escapeHtml(question.userAnswer || "（未填写）")}</span>`}${question.explanation ? `<span class="feedback-note">${escapeHtml(question.explanation)}</span>` : ""}`;
     $("#aiFeedbackActions").hidden = false;
     requestAnimationFrame(() => $("#nextAiQuestion").focus({ preventScroll: true }));
   }
@@ -719,6 +1502,7 @@
     $("#aiQuestionProgress").textContent = `${Number(set.index) + 1} / ${set.questions.length}`;
     $("#aiDirectionLabel").textContent = formatDirection(question.direction);
     $("#aiPromptText").textContent = question.direction === "en-zh" ? question.english : question.chinese;
+    $("#aiPromptSpeech").innerHTML = question.direction === "en-zh" ? speechButtonHtml(question.english, "播放题目发音") : "";
     $("#aiAnswerInput").value = question.userAnswer || "";
     $("#aiAnswerInput").placeholder = question.direction === "en-zh" ? "输入中文答案" : "输入英文答案";
     const answered = typeof question.correct === "boolean";
@@ -809,6 +1593,7 @@
       const data = await responseJson(response);
       model.aiPractice = normalizeClientAiPractice(data.practice);
       saveModel();
+      invalidateAbilities();
     } catch (error) {
       showToast(error.message);
       $("#aiAnswerInput").disabled = false;
@@ -833,6 +1618,487 @@
     model.aiPractice = practice;
     saveModel();
     renderAiView();
+  }
+
+  function selectedExamSettings() {
+    const settings = examState.settings || normalizeClientAiExam(null).settings;
+    const modelName = aiOptions.models.includes(settings.model) ? settings.model : aiOptions.defaultModel;
+    return {
+      model: modelName || "",
+      reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
+      includeEssay: Boolean(settings.includeEssay),
+      includeListening: Boolean(settings.includeListening && speechSynthesisAvailable()),
+      totalPoints: Number(settings.totalPoints) === 150 ? 150 : 100
+    };
+  }
+
+  function updateExamPreferences(patch) {
+    examState.settings = { ...selectedExamSettings(), ...patch };
+    renderExamView();
+  }
+
+  function populateExamControls() {
+    const settings = selectedExamSettings();
+    const modelSelect = $("#examModelSelect");
+    modelSelect.replaceChildren(...aiOptions.models.map(modelName => {
+      const option = document.createElement("option");
+      option.value = modelName;
+      option.textContent = modelName;
+      return option;
+    }));
+    if (settings.model) modelSelect.value = settings.model;
+    modelSelect.disabled = !aiOptions.configured || examRequestInProgress;
+    $$('[data-exam-effort]').forEach(button => {
+      const active = button.dataset.examEffort === settings.reasoningEffort;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.disabled = !aiOptions.configured || examRequestInProgress;
+    });
+    $$('[data-exam-points]').forEach(button => {
+      const active = Number(button.dataset.examPoints) === settings.totalPoints;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.disabled = !aiOptions.configured || examRequestInProgress;
+    });
+    $("#examIncludeEssay").checked = settings.includeEssay;
+    $("#examIncludeEssay").disabled = !aiOptions.configured || examRequestInProgress;
+    const listeningAvailable = speechSynthesisAvailable();
+    $("#examIncludeListening").checked = settings.includeListening;
+    $("#examIncludeListening").disabled = !aiOptions.configured || examRequestInProgress || !listeningAvailable;
+    const support = $("#examListeningSupport");
+    support.textContent = listeningAvailable ? "英文语音可用" : "当前浏览器不支持英文语音，无法生成含听力的试卷";
+    support.classList.toggle("is-error", !listeningAvailable);
+    $("#generateExamButton").disabled = !aiOptions.configured || examRequestInProgress;
+  }
+
+  function formatExamAnswer(question, answer) {
+    if (question.type === "multiple-choice") {
+      return (Array.isArray(answer) ? answer : []).map(id => {
+        const option = question.options.find(item => item.id === id);
+        return option ? `${option.id}. ${option.text}` : id;
+      }).join("、");
+    }
+    if (["single-choice", "cloze", "reading-comprehension", "listening"].includes(question.type)) {
+      const option = question.options.find(item => item.id === answer);
+      return option ? `${option.id}. ${option.text}` : String(answer || "");
+    }
+    if (question.type === "true-false") return answer === true ? "正确" : answer === false ? "错误" : "";
+    return String(answer || "");
+  }
+
+  function examAnswerComplete(question, answer) {
+    if (question.type === "multiple-choice") return Array.isArray(answer) && answer.length > 0;
+    if (question.type === "true-false") return typeof answer === "boolean";
+    return Boolean(String(answer || "").trim());
+  }
+
+  function examOptionHtml(question, option, inputType, disabled) {
+    const answer = examState.currentExam && examState.currentExam.answers ? examState.currentExam.answers[question.id] : "";
+    const checked = inputType === "checkbox" ? Array.isArray(answer) && answer.includes(option.id) : answer === option.id;
+    return `<label class="exam-option"><input type="${inputType}" name="exam-${escapeHtml(question.id)}" value="${escapeHtml(option.id)}" data-exam-answer="${escapeHtml(question.id)}" ${checked ? "checked" : ""} ${disabled ? "disabled" : ""}><span class="exam-option-key">${escapeHtml(option.id)}</span><span>${escapeHtml(option.text)}</span></label>`;
+  }
+
+  function examQuestionHtml(question, index, completed) {
+    const answer = examState.currentExam.answers && examState.currentExam.answers[question.id];
+    const disabled = completed || examRequestInProgress;
+    let answerField = "";
+    if (["single-choice", "cloze", "reading-comprehension", "listening"].includes(question.type)) {
+      answerField = `<div class="exam-options-list">${question.options.map(option => examOptionHtml(question, option, "radio", disabled)).join("")}</div>`;
+    } else if (question.type === "multiple-choice") {
+      answerField = `<div class="exam-options-list">${question.options.map(option => examOptionHtml(question, option, "checkbox", disabled)).join("")}</div>`;
+    } else if (question.type === "true-false") {
+      answerField = `<div class="exam-options-list exam-boolean-options">
+        <label class="exam-option"><input type="radio" name="exam-${escapeHtml(question.id)}" value="true" data-exam-answer="${escapeHtml(question.id)}" ${answer === true ? "checked" : ""} ${disabled ? "disabled" : ""}><span>正确</span></label>
+        <label class="exam-option"><input type="radio" name="exam-${escapeHtml(question.id)}" value="false" data-exam-answer="${escapeHtml(question.id)}" ${answer === false ? "checked" : ""} ${disabled ? "disabled" : ""}><span>错误</span></label>
+      </div>`;
+    } else if (question.type === "essay" || question.type === "translation") {
+      const rows = question.type === "essay" ? 7 : 3;
+      answerField = `<textarea class="exam-textarea" rows="${rows}" data-exam-answer="${escapeHtml(question.id)}" maxlength="${question.type === "essay" ? 2000 : 600}" ${disabled ? "disabled" : ""}>${escapeHtml(answer || "")}</textarea>${question.type === "essay" ? `<div class="exam-writing-meta"><span>${question.minWords || 0}-${question.maxWords || 0} 个英文单词</span>${question.requiredWords && question.requiredWords.length ? `<span>建议使用：${question.requiredWords.map(escapeHtml).join("、")}</span>` : ""}</div>` : ""}`;
+    } else {
+      answerField = `<input class="answer-input exam-short-answer" type="text" data-exam-answer="${escapeHtml(question.id)}" value="${escapeHtml(answer || "")}" autocomplete="off" spellcheck="false" ${disabled ? "disabled" : ""}>`;
+    }
+    const listening = question.type === "listening" ? `<div class="exam-listening-player"><button class="secondary-button" type="button" data-exam-listen="${escapeHtml(question.id)}" data-exam-id="${escapeHtml(examState.currentExam.id)}" ${speechSynthesisAvailable() ? "" : "disabled"}><i data-lucide="volume-2" aria-hidden="true"></i><span>播放听力</span></button></div>` : "";
+    const grade = completed && question.result ? `<div class="exam-question-result ${question.result.correct ? "is-correct" : "is-review"}">
+      <strong>得分 ${question.result.score} / ${question.points}</strong>
+      ${question.result.explanation ? `<p>${escapeHtml(question.result.explanation)}</p>` : ""}
+      ${question.result.correctAnswer ? `<p><span>参考答案：</span>${escapeHtml(question.result.correctAnswer)}</p>` : ""}
+      ${question.type === "listening" && question.transcript ? `<div class="exam-transcript"><span>听力原文</span><p><span class="inline-english">${escapeHtml(question.transcript)}${speechButtonHtml(question.transcript, "播放听力原文")}</span></p></div>` : ""}
+    </div>` : "";
+    return `<article class="exam-question" data-exam-question="${escapeHtml(question.id)}">
+      <div class="exam-question-heading"><span>${index + 1}. ${escapeHtml(question.typeLabel)}</span><strong>${question.points} 分</strong></div>
+      <p class="exam-question-prompt">${escapeHtml(question.prompt)}</p>
+      ${question.sourceText ? `<div class="exam-source-text"><span class="inline-english">${escapeHtml(question.sourceText)}${speechButtonHtml(question.sourceText, "播放英文材料")}</span></div>` : ""}
+      ${listening}${answerField}${grade}
+    </article>`;
+  }
+
+  function examQuestionUnits(question, completed) {
+    const units = { listening: 5, "single-choice": 4, "multiple-choice": 5, "fill-blank": 4, "true-false": 4, cloze: 4, "reading-comprehension": 4, translation: 7, essay: 13 };
+    return (units[question.type] || 4) + (completed ? 3 : 0);
+  }
+
+  function renderExamQuestions(exam) {
+    let clozeShown = false;
+    let readingShown = false;
+    const blocks = exam.questions.map((question, index) => {
+      let passage = "";
+      let units = examQuestionUnits(question, exam.status === "completed");
+      if (question.type === "cloze" && !clozeShown) {
+        clozeShown = true;
+        passage = `<section class="exam-reading-passage"><span>完形填空材料</span><p><span class="inline-english">${escapeHtml(exam.clozePassage)}${speechButtonHtml(exam.clozePassage, "播放完形填空材料")}</span></p></section>`;
+        units += 7;
+      } else if (question.type === "reading-comprehension" && !readingShown) {
+        readingShown = true;
+        passage = `<section class="exam-reading-passage"><span>材料题材料</span><p><span class="inline-english">${escapeHtml(exam.readingPassage)}${speechButtonHtml(exam.readingPassage, "播放材料题材料")}</span></p></section>`;
+        units += 7;
+      }
+      return { units, html: `<div class="exam-page-block">${passage}${examQuestionHtml(question, index, exam.status === "completed")}</div>` };
+    });
+    const pages = [];
+    let page = [];
+    let used = 0;
+    blocks.forEach(block => {
+      if (page.length && used + block.units > 30) {
+        pages.push(page);
+        page = [];
+        used = 0;
+      }
+      page.push(block.html);
+      used += block.units;
+    });
+    if (page.length) pages.push(page);
+    $("#examQuestionList").innerHTML = pages.map((items, index) => `<section class="exam-page" data-exam-page="${index + 1}">
+      <header class="exam-page-running-header"><strong>${escapeHtml(exam.title)}</strong><span>姓名：____________　日期：____________</span></header>
+      <div class="exam-page-content">${items.join("")}</div>
+      <footer class="exam-page-footer">第 ${index + 1} / ${pages.length} 页 · 满分 ${exam.totalPoints} 分</footer>
+    </section>`).join("");
+  }
+
+  function renderExamResult(exam) {
+    const section = $("#examResult");
+    const result = exam.result;
+    section.hidden = !result;
+    if (!result) return;
+    $("#examResultScore").textContent = String(result.score || 0);
+    $("#examResultPossible").textContent = `/ ${result.possible || exam.totalPoints}`;
+    $("#examResultSummary").textContent = result.summary || "本次试卷已完成。";
+    $("#examTypeScores").innerHTML = (result.typeScores || []).map(item => `<div><span>${escapeHtml(item.label)}</span><strong>${item.score} / ${item.possible}</strong></div>`).join("");
+    const weaknesses = result.weakPoints || [];
+    const changes = examAbilityChanges.filter(item => item.delta !== 0);
+    $("#examWeaknesses").innerHTML = [
+      weaknesses.length ? `<h3>需要加强</h3>${weaknesses.map(item => `<div class="exam-weakness"><div><strong>${escapeHtml(item.detail)}</strong><span class="severity-${escapeHtml(item.severity)}">${item.severity === "high" ? "重点" : item.severity === "low" ? "轻微" : "一般"}</span></div>${item.recommendation ? `<p>${escapeHtml(item.recommendation)}</p>` : ""}${item.relatedWords && item.relatedWords.length ? `<p class="exam-related-words">相关单词：${item.relatedWords.map(escapeHtml).join("、")}</p>` : ""}</div>`).join("")}` : `<div class="exam-no-weakness">本次没有记录明显薄弱点。</div>`,
+      changes.length ? `<div class="exam-weakness"><div><strong>能力变化</strong></div><p>${changes.map(item => `${escapeHtml(item.label)} ${item.delta > 0 ? "+" : ""}${item.delta}`).join(" · ")}</p></div>` : ""
+    ].join("");
+  }
+
+  function renderExamHistory() {
+    const history = examState.history || [];
+    const percentages = history.map(exam => exam.result && exam.result.possible ? Math.round((exam.result.score / exam.result.possible) * 100) : null).filter(value => value !== null);
+    $("#examHistorySummary").textContent = history.length ? `${history.length} 份 · 平均 ${Math.round(percentages.reduce((sum, value) => sum + value, 0) / percentages.length)}%` : "暂无交卷记录";
+    const list = $("#examHistoryList");
+    if (!history.length) {
+      list.innerHTML = `<div class="ai-history-empty"><i data-lucide="history" aria-hidden="true"></i><span>暂无交卷记录</span></div>`;
+      return;
+    }
+    list.innerHTML = [...history].reverse().map(exam => {
+      const result = exam.result || { score: 0, possible: exam.totalPoints, typeScores: [], weakPoints: [] };
+      let clozeShown = false;
+      let readingShown = false;
+      const questionRows = exam.questions.map((question, index) => {
+        let passage = "";
+        if (question.type === "cloze" && !clozeShown) {
+          clozeShown = true;
+          passage = `<section class="exam-reading-passage"><span>完形填空材料</span><p>${escapeHtml(exam.clozePassage)}</p></section>`;
+        } else if (question.type === "reading-comprehension" && !readingShown) {
+          readingShown = true;
+          passage = `<section class="exam-reading-passage"><span>材料题材料</span><p>${escapeHtml(exam.readingPassage)}</p></section>`;
+        }
+        return `${passage}<article class="exam-history-question">
+          <div class="exam-history-question-heading"><strong>${index + 1}. ${escapeHtml(question.typeLabel)}</strong><span>${question.result ? question.result.score : 0} / ${question.points}</span></div>
+          <p>${escapeHtml(question.prompt)}</p>
+          ${question.type === "listening" && question.transcript ? `<div class="exam-transcript"><span>听力原文</span><p>${escapeHtml(question.transcript)}</p><button class="text-button" type="button" data-exam-listen="${escapeHtml(question.id)}" data-exam-id="${escapeHtml(exam.id)}"><i data-lucide="volume-2" aria-hidden="true"></i>重听</button></div>` : question.sourceText ? `<div class="exam-source-text">${escapeHtml(question.sourceText)}</div>` : ""}
+          <dl class="ai-history-answers"><div><dt>你的答案</dt><dd>${escapeHtml(formatExamAnswer(question, exam.answers && exam.answers[question.id]) || "（未填写）")}</dd></div><div><dt>参考答案</dt><dd>${escapeHtml(question.result && question.result.correctAnswer || "（未记录）")}</dd></div>${question.result && question.result.explanation ? `<div><dt>讲解</dt><dd>${escapeHtml(question.result.explanation)}</dd></div>` : ""}</dl>
+        </article>`;
+      }).join("");
+      const modelLabel = [exam.providerName, exam.model, AI_EFFORT_LABELS[exam.reasoningEffort]].filter(Boolean).join(" · ");
+      return `<details class="ai-history-group exam-history-group"><summary><div class="ai-history-group-main"><strong>${escapeHtml(exam.title)}</strong><span>${escapeHtml(formatAiHistoryTime(exam.submittedAt, exam.createdAt))} · ${escapeHtml(modelLabel)}</span></div><div class="ai-history-score"><strong>${result.score} / ${result.possible}</strong><span>${exam.includeListening ? "含听力" : "无听力"} · ${exam.includeEssay ? "含作文" : "无作文"}</span></div><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div class="exam-history-body"><p>${escapeHtml(result.summary || "")}</p><div class="ai-history-questions">${questionRows}</div></div></details>`;
+    }).join("");
+  }
+
+  function renderExamView() {
+    populateExamControls();
+    renderExamHistory();
+    const exam = examState.currentExam;
+    const empty = $("#examEmptyState");
+    const paper = $("#examPaper");
+    $("#examStatus").textContent = examStatusMessage || (aiOptions.configured ? "AI 已配置" : "AI 尚未配置");
+    $("#printExamButton").disabled = !exam;
+    $("#openExamPhotoButton").disabled = !exam || exam.status !== "draft" || examRequestInProgress;
+    renderExamPhotoPanel();
+    if (!exam) {
+      empty.hidden = false;
+      paper.hidden = true;
+      $("#examEmptyTitle").textContent = aiOptions.configured ? "准备生成试卷" : currentUser && currentUser.role === "admin" ? "请先完成 AI 连接设置" : "AI 尚未配置";
+      refreshIcons();
+      return;
+    }
+    empty.hidden = true;
+    paper.hidden = false;
+    $("#examPaperMeta").textContent = [exam.status === "completed" ? "已交卷" : "答题中", formatAiHistoryTime(exam.createdAt), exam.providerName, exam.model, AI_EFFORT_LABELS[exam.reasoningEffort]].filter(Boolean).join(" · ");
+    $("#examPaperTitle").textContent = exam.title;
+    $("#examInstructions").textContent = exam.instructions;
+    $("#examTotalReadout").textContent = `满分 ${exam.totalPoints}`;
+    renderExamQuestions(exam);
+    $("#examSubmitRow").hidden = exam.status === "completed";
+    $("#submitExamButton").disabled = examRequestInProgress;
+    if (exam.status === "draft" && !examRequestInProgress) $("#examDraftStatus").textContent ||= "草稿会自动保存";
+    renderExamResult(exam);
+    refreshIcons();
+  }
+
+  function renderExamPhotoPanel() {
+    const panel = $("#examPhotoPanel");
+    panel.hidden = !examPhotoFiles.length;
+    $("#examPhotoSummary").textContent = examPhotoFiles.length ? `已选择 ${examPhotoFiles.length} 张：${examPhotoFiles.map(file => file.name).join("、")}` : "尚未选择图片";
+    $("#gradeExamPhotoButton").disabled = !examPhotoFiles.length || examRequestInProgress;
+  }
+
+  async function imageElementForFile(file) {
+    if (typeof createImageBitmap === "function") return createImageBitmap(file, { imageOrientation: "from-image" });
+    const url = URL.createObjectURL(file);
+    try {
+      const image = new Image();
+      await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; image.src = url; });
+      return image;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function compressExamPhoto(file) {
+    const image = await imageElementForFile(file);
+    const sourceWidth = image.width || image.naturalWidth;
+    const sourceHeight = image.height || image.naturalHeight;
+    const scale = Math.min(1, 2400 / Math.max(sourceWidth, sourceHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+    const context = canvas.getContext("2d", { alpha: false });
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    if (typeof image.close === "function") image.close();
+    return canvas.toDataURL("image/jpeg", 0.82);
+  }
+
+  function selectExamPhotos(event) {
+    const files = Array.from(event.target.files || []).filter(file => ["image/jpeg", "image/png", "image/webp"].includes(file.type));
+    if (files.length > 6) {
+      showToast("最多选择 6 张答卷照片");
+      event.target.value = "";
+      examPhotoFiles = [];
+    } else examPhotoFiles = files;
+    renderExamPhotoPanel();
+  }
+
+  function clearExamPhotos() {
+    examPhotoFiles = [];
+    $("#examPhotoInput").value = "";
+    renderExamPhotoPanel();
+  }
+
+  async function gradeExamPhotos() {
+    const exam = examState.currentExam;
+    if (!exam || exam.status !== "draft" || !examPhotoFiles.length || examRequestInProgress) return;
+    examRequestInProgress = true;
+    examStatusMessage = "正在压缩图片，随后由视觉模型识别并统一判卷…";
+    setBusyButton($("#gradeExamPhotoButton"), true, "正在识别…");
+    renderExamView();
+    try {
+      const images = [];
+      for (let index = 0; index < examPhotoFiles.length; index += 1) {
+        examStatusMessage = `正在处理第 ${index + 1} / ${examPhotoFiles.length} 张答卷照片…`;
+        $("#examStatus").textContent = examStatusMessage;
+        images.push(await compressExamPhoto(examPhotoFiles[index]));
+      }
+      examStatusMessage = "视觉模型正在识别手写答案并统一判卷…";
+      $("#examStatus").textContent = examStatusMessage;
+      const data = await responseJson(await fetch("/api/ai/exams/photo-grade", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ examId: exam.id, images })
+      }));
+      examState = normalizeClientAiExam(data);
+      examAbilityChanges = Array.isArray(data.abilityChanges) ? data.abilityChanges : [];
+      if (data.abilities) abilityReport = normalizeAbilityReport(data.abilities);
+      clearExamPhotos();
+      examStatusMessage = "纸质答卷判卷完成；照片未保存，识别答案和成绩已写入学习档案。";
+    } catch (error) {
+      examStatusMessage = error.message;
+      showToast(error.message);
+    } finally {
+      examRequestInProgress = false;
+      setBusyButton($("#gradeExamPhotoButton"), false, "");
+      renderExamView();
+    }
+  }
+
+  async function requestListeningText(exam, question) {
+    const key = `${exam.id}:${question.id}`;
+    if (question.transcript) return question.transcript;
+    if (examListeningCache.has(key)) return examListeningCache.get(key);
+    const data = await responseJson(await fetch("/api/ai/exams/listening", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ examId: exam.id, questionId: question.id })
+    }));
+    examListeningCache.set(key, data.text);
+    return data.text;
+  }
+
+  function preloadCurrentListening() {
+    const exam = examState.currentExam;
+    if (!exam || !speechSynthesisAvailable()) return;
+    exam.questions.filter(question => question.type === "listening" && !question.transcript).forEach(question => requestListeningText(exam, question).catch(() => {}));
+  }
+
+  async function playExamListening(examId, questionId) {
+    if (!speechSynthesisAvailable()) return showToast("当前浏览器不支持英文语音");
+    const exam = examState.currentExam && examState.currentExam.id === examId ? examState.currentExam : examState.history.find(item => item.id === examId);
+    const question = exam && exam.questions.find(item => item.id === questionId && item.type === "listening");
+    if (!exam || !question) return;
+    try {
+      const text = await requestListeningText(exam, question);
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "en-US";
+      utterance.rate = 0.75;
+      utterance.pitch = 1;
+      const voices = window.speechSynthesis.getVoices();
+      utterance.voice = voices.find(voice => /^en-US/i.test(voice.lang)) || voices.find(voice => /^en/i.test(voice.lang)) || null;
+      examSpeechQuestionId = questionId;
+      $$('[data-exam-listen]').forEach(button => button.classList.toggle("is-playing", button.dataset.examListen === questionId && button.dataset.examId === examId));
+      utterance.onend = utterance.onerror = () => {
+        examSpeechQuestionId = "";
+        $$('[data-exam-listen]').forEach(button => button.classList.remove("is-playing"));
+      };
+      window.speechSynthesis.speak(utterance);
+    } catch (error) {
+      showToast(error.message);
+    }
+  }
+
+  function updateExamAnswer(event) {
+    const target = event.target.closest("[data-exam-answer]");
+    const exam = examState.currentExam;
+    if (!target || !exam || exam.status !== "draft") return;
+    const question = exam.questions.find(item => item.id === target.dataset.examAnswer);
+    if (!question) return;
+    exam.answers ||= {};
+    if (question.type === "multiple-choice") {
+      exam.answers[question.id] = $$('[data-exam-answer]').filter(input => input.dataset.examAnswer === question.id && input.checked).map(input => input.value).sort();
+    } else if (question.type === "true-false") {
+      exam.answers[question.id] = target.value === "true";
+    } else exam.answers[question.id] = target.value;
+    $("#examDraftStatus").textContent = "草稿待保存";
+    clearTimeout(examDraftSaveTimer);
+    examDraftSaveTimer = setTimeout(saveExamDraft, 600);
+  }
+
+  async function saveExamDraft() {
+    clearTimeout(examDraftSaveTimer);
+    const exam = examState.currentExam;
+    if (!exam || exam.status !== "draft" || examRequestInProgress) return;
+    const status = $("#examDraftStatus");
+    status.textContent = "正在保存草稿…";
+    try {
+      await responseJson(await fetch("/api/ai/exams/current", {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ examId: exam.id, answers: exam.answers })
+      }));
+      status.textContent = `草稿已保存 · ${new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(new Date())}`;
+    } catch (_) {
+      status.textContent = "草稿保存失败，将在下次输入后重试";
+    }
+  }
+
+  async function generateExam() {
+    if (examRequestInProgress || !aiOptions.configured) return;
+    const current = examState.currentExam;
+    if (current && current.status === "draft" && Object.values(current.answers || {}).some(value => Array.isArray(value) ? value.length : String(value ?? "").trim())) {
+      if (!window.confirm("当前试卷尚未交卷，确认生成新试卷吗？")) return;
+    }
+    const settings = selectedExamSettings();
+    examState.settings = settings;
+    examRequestInProgress = true;
+    examStatusMessage = "正在根据学习进度生成整张试卷…";
+    setBusyButton($("#generateExamButton"), true, "正在生成…");
+    renderExamView();
+    try {
+      examState = normalizeClientAiExam(await responseJson(await fetch("/api/ai/exams/generate", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings)
+      })));
+      examListeningCache.clear();
+      examAbilityChanges = [];
+      clearExamPhotos();
+      preloadCurrentListening();
+      examStatusMessage = "试卷已生成，草稿会自动保存";
+    } catch (error) {
+      examStatusMessage = error.message;
+      showToast(error.message);
+    } finally {
+      examRequestInProgress = false;
+      setBusyButton($("#generateExamButton"), false, "");
+      renderExamView();
+    }
+  }
+
+  async function submitExam(event) {
+    event.preventDefault();
+    if (examRequestInProgress) return;
+    const exam = examState.currentExam;
+    if (!exam || exam.status !== "draft") return;
+    const unanswered = exam.questions.find(question => !examAnswerComplete(question, exam.answers && exam.answers[question.id]));
+    if (unanswered) {
+      const article = $$('[data-exam-question]').find(item => item.dataset.examQuestion === unanswered.id);
+      article?.classList.add("is-unanswered");
+      article?.scrollIntoView({ behavior: "smooth", block: "center" });
+      article?.querySelector("input, textarea, button")?.focus({ preventScroll: true });
+      showToast("还有题目未完成，请填写后再交卷");
+      return;
+    }
+    clearTimeout(examDraftSaveTimer);
+    examRequestInProgress = true;
+    examStatusMessage = "AI 正在统一判卷并分析薄弱点…";
+    setBusyButton($("#submitExamButton"), true, "正在判卷…");
+    renderExamView();
+    try {
+      const data = await responseJson(await fetch("/api/ai/exams/submit", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ examId: exam.id, answers: exam.answers })
+      }));
+      examState = normalizeClientAiExam(data);
+      examAbilityChanges = Array.isArray(data.abilityChanges) ? data.abilityChanges : [];
+      if (data.abilities) abilityReport = normalizeAbilityReport(data.abilities);
+      examStatusMessage = "判卷完成，薄弱点已写入学习档案";
+      requestAnimationFrame(() => $("#examResult").scrollIntoView({ behavior: "smooth", block: "start" }));
+    } catch (error) {
+      examStatusMessage = error.message;
+      showToast(error.message);
+    } finally {
+      examRequestInProgress = false;
+      setBusyButton($("#submitExamButton"), false, "");
+      renderExamView();
+    }
   }
 
   function normalizeConfigModels(models) {
@@ -1351,6 +2617,10 @@
     });
     if (view === "home") renderHome();
     if (view === "ai") renderAiView();
+    if (view === "exam") renderExamView();
+    if (view === "abilities") { renderAbilityView(); loadAbilities(); }
+    if (view === "dictation") { renderDictationView(); loadDictation(); }
+    if (view === "focused") { renderFocusedView(); loadFocused(); }
     if (view === "library") renderLibrary();
     if (view === "notes") renderNotes();
     if (view === "mistakes") renderMistakes();
@@ -1399,6 +2669,7 @@
     $("#directionLabel").textContent = formatDirection(task.direction);
     const prompt = task.direction === "en-zh" ? task.item.english : task.item.chinese;
     $("#promptText").textContent = prompt;
+    $("#promptSpeech").innerHTML = task.direction === "en-zh" ? speechButtonHtml(task.item.english, "播放题目发音") : "";
     $("#phoneticLine").textContent = task.item.type === "word" && task.direction === "en-zh" ? task.item.phonetic : "";
     $("#exampleLine").textContent = "";
     $("#answerInput").value = "";
@@ -1503,6 +2774,7 @@
     session.currentTaskId = task.taskId;
     session.doneTaskIds = Array.from(new Set([...(session.doneTaskIds || []), task.taskId]));
     saveModel();
+    abilityReport = null;
     showFeedback(task, correct, answer, grading);
   }
 
@@ -1560,7 +2832,7 @@
     const day = $("#dayFilter").value;
     const items = allItems.filter(item => item.type === libraryType && (day === "all" || String(item.day) === day) && (!search || normalizeChinese(`${item.english}${item.chinese}`).includes(search) || normalizeEnglish(`${item.english}`).includes(normalizeEnglish(search))));
     $("#libraryHead").innerHTML = libraryType === "word" ? "<tr><th>单词</th><th>发音</th><th>中文</th><th>学习日</th><th></th></tr>" : "<tr><th>句子</th><th>中文</th><th>学习日</th><th></th></tr>";
-    $("#libraryBody").innerHTML = items.map(item => libraryType === "word" ? `<tr><td><code>${escapeHtml(item.english)}</code></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">第 ${item.day} 天</td><td><button class="table-action" type="button" data-practice="${item.id}">练习</button></td></tr>` : `<tr><td><code>${escapeHtml(item.english)}</code></td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">第 ${item.day} 天</td><td><button class="table-action" type="button" data-practice="${item.id}">练习</button></td></tr>`).join("");
+    $("#libraryBody").innerHTML = items.map(item => libraryType === "word" ? `<tr><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, `播放 ${item.english} 的发音`)}</span></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">第 ${item.day} 天</td><td><button class="table-action" type="button" data-practice="${item.id}">练习</button></td></tr>` : `<tr><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, "播放句子发音")}</span></td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">第 ${item.day} 天</td><td><button class="table-action" type="button" data-practice="${item.id}">练习</button></td></tr>`).join("");
     $("#libraryEmpty").hidden = items.length > 0;
     $$('[data-practice]').forEach(button => button.addEventListener("click", () => practiceTask(`${button.dataset.practice}:en-zh`)));
     $$("[data-library-type]").forEach(button => { const active = button.dataset.libraryType === libraryType; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
@@ -1597,9 +2869,9 @@
     const body = [
       `<section class="notes-overview"><div class="notes-overview-meta"><span>${escapeHtml(date ? displayDate(date) : `第 ${notesDay} 天`)}</span>${note.score ? `<span class="count-badge">${escapeHtml(note.score)}</span>` : ""}</div><h2>${escapeHtml(date ? `${displayDate(date)}学习总结` : `第 ${notesDay} 天学习总结`)}</h2><p>${escapeHtml(note.summary || `当天学习了 ${words.length} 个单词和 ${sentences.length} 个句子。`)}</p></section>`,
       `<div class="notes-columns"><section class="notes-section"><h2>学习目标</h2>${goals.length ? listHtml(goals) : listHtml(["复习当天词句并完成双向翻译。"])}</section><section class="notes-section"><h2>发音提醒</h2>${pronunciation.length ? listHtml(pronunciation) : listHtml(["当天暂无单独发音记录。"])}</section></div>`,
-      words.length ? `<section class="notes-section"><h2>当天单词</h2><div class="table-wrap"><table class="data-table"><thead><tr><th>单词</th><th>发音</th><th>中文</th></tr></thead><tbody>${words.map(item => `<tr><td><code>${escapeHtml(item.english)}</code></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td></tr>`).join("")}</tbody></table></div></section>` : "",
-      sentences.length ? `<section class="notes-section"><h2>当天句子</h2>${sentences.map(item => `<div class="notes-example"><code>${escapeHtml(item.english)}</code><span>${escapeHtml(item.chinese)}</span></div>`).join("")}</section>` : "",
-      patterns.length ? `<section class="notes-section"><h2>核心句型</h2>${patterns.map(pattern => `<div class="notes-pattern"><h3>${escapeHtml(pattern.title)}</h3><p>${escapeHtml(pattern.note)}</p>${(Array.isArray(pattern.examples) ? pattern.examples : []).map(example => `<div class="notes-example"><code>${escapeHtml(example.english)}</code><span>${escapeHtml(example.chinese)}</span></div>`).join("")}</div>`).join("")}</section>` : "",
+      words.length ? `<section class="notes-section"><h2>当天单词</h2><div class="table-wrap"><table class="data-table"><thead><tr><th>单词</th><th>发音</th><th>中文</th></tr></thead><tbody>${words.map(item => `<tr><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, `播放 ${item.english} 的发音`)}</span></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td></tr>`).join("")}</tbody></table></div></section>` : "",
+      sentences.length ? `<section class="notes-section"><h2>当天句子</h2>${sentences.map(item => `<div class="notes-example"><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, "播放句子发音")}</span><span>${escapeHtml(item.chinese)}</span></div>`).join("")}</section>` : "",
+      patterns.length ? `<section class="notes-section"><h2>核心句型</h2>${patterns.map(pattern => `<div class="notes-pattern"><h3>${escapeHtml(pattern.title)}</h3><p>${escapeHtml(pattern.note)}</p>${(Array.isArray(pattern.examples) ? pattern.examples : []).map(example => `<div class="notes-example"><span class="inline-english"><code>${escapeHtml(example.english)}</code>${speechButtonHtml(example.english, "播放例句发音")}</span><span>${escapeHtml(example.chinese)}</span></div>`).join("")}</div>`).join("")}</section>` : "",
       mistakes.length ? `<section class="notes-section"><h2>易错点</h2>${listHtml(mistakes)}</section>` : "",
       `<div class="notes-review"><strong>复习重点：</strong>${escapeHtml(note.review || "复习当天单词、句子和发音提示。")}</div>`
     ].join("");
@@ -1727,6 +2999,52 @@
       event.preventDefault();
       advanceAiQuestion();
     });
+    $("#examModelSelect").addEventListener("change", event => updateExamPreferences({ model: event.target.value }));
+    $$('[data-exam-effort]').forEach(button => button.addEventListener("click", () => updateExamPreferences({ reasoningEffort: button.dataset.examEffort })));
+    $$('[data-exam-points]').forEach(button => button.addEventListener("click", () => updateExamPreferences({ totalPoints: Number(button.dataset.examPoints) })));
+    $("#examIncludeEssay").addEventListener("change", event => updateExamPreferences({ includeEssay: event.target.checked }));
+    $("#examIncludeListening").addEventListener("change", event => updateExamPreferences({ includeListening: event.target.checked }));
+    $("#generateExamButton").addEventListener("click", generateExam);
+    $("#printExamButton").addEventListener("click", () => window.print());
+    $("#openExamPhotoButton").addEventListener("click", () => $("#examPhotoInput").click());
+    $("#examPhotoInput").addEventListener("change", selectExamPhotos);
+    $("#cancelExamPhotoButton").addEventListener("click", clearExamPhotos);
+    $("#gradeExamPhotoButton").addEventListener("click", gradeExamPhotos);
+    $("#refreshAbilitiesButton").addEventListener("click", () => loadAbilities(true));
+    $("#dictationModelSelect").addEventListener("change", event => updateDictationPreferences({ model: event.target.value }));
+    $$('[data-dictation-effort]').forEach(button => button.addEventListener("click", () => updateDictationPreferences({ reasoningEffort: button.dataset.dictationEffort })));
+    $("#dictationCount").addEventListener("change", event => updateDictationPreferences({ count: Number(event.target.value) }));
+    $("#generateDictationButton").addEventListener("click", generateDictation);
+    $("#dictationForm").addEventListener("input", updateDictationAnswer);
+    $("#dictationForm").addEventListener("submit", submitDictation);
+    $("#view-dictation").addEventListener("click", event => {
+      const button = event.target.closest("[data-dictation-listen]");
+      if (button) playDictationItem(button);
+    });
+    $("#focusedTypeSelect").addEventListener("change", event => updateFocusedPreferences({ focusedType: event.target.value }));
+    $("#focusedModelSelect").addEventListener("change", event => updateFocusedPreferences({ model: event.target.value }));
+    $$('[data-focused-effort]').forEach(button => button.addEventListener("click", () => updateFocusedPreferences({ reasoningEffort: button.dataset.focusedEffort })));
+    $("#generateFocusedButton").addEventListener("click", generateFocusedPractice);
+    $("#focusedForm").addEventListener("input", updateFocusedAnswer);
+    $("#focusedForm").addEventListener("submit", submitFocusedPractice);
+    $("#view-focused").addEventListener("click", event => {
+      const button = event.target.closest("[data-focused-listen]");
+      if (button) playFocusedListening(button);
+    });
+    $("#appBody").addEventListener("click", event => {
+      const button = event.target.closest("[data-speak-text]");
+      if (button) speakEnglish(button.dataset.speakText, button);
+    });
+    $("#examForm").addEventListener("input", event => {
+      const article = event.target.closest("[data-exam-question]");
+      if (article) article.classList.remove("is-unanswered");
+      updateExamAnswer(event);
+    });
+    $("#examForm").addEventListener("submit", submitExam);
+    $("#view-exam").addEventListener("click", event => {
+      const button = event.target.closest("[data-exam-listen]");
+      if (button) playExamListening(button.dataset.examId, button.dataset.examListen);
+    });
     $("#openAiConfigButton").addEventListener("click", openAiConfiguration);
     $("#closeAiConfigButton").addEventListener("click", () => $("#aiConfigDialog").close());
     $("#aiConfigForm").addEventListener("submit", submitAiConfiguration);
@@ -1769,7 +3087,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=16").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=19").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
@@ -1786,5 +3104,6 @@
   renderHome();
   refreshIcons();
   await loadAiOptions();
+  await loadAiExams();
   syncRemoteState();
 })();

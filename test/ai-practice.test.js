@@ -23,7 +23,8 @@ test("learning profile prioritizes weak learned content and excludes future less
     mistakes: [
       { taskId: "cat:en-zh", prompt: "cat", userAnswer: "狗", correctAnswer: "猫" },
       { taskId: "future:en-zh", prompt: "dog", userAnswer: "猫", correctAnswer: "狗" }
-    ]
+    ],
+    aiExam: { weakPoints: [{ category: "vocabulary", severity: "high", detail: "cat 词义不稳定。", recommendation: "复习 cat。", relatedWords: ["cat"] }, { category: "vocabulary", detail: "未来词不应进入。", relatedWords: ["dog"] }] }
   };
   const profile = buildLearningProfile(content, state, "2026-08-01");
 
@@ -32,6 +33,7 @@ test("learning profile prioritizes weak learned content and excludes future less
   assert.equal(profile.learnedSentences.length, 1);
   assert.equal(profile.weakItems[0].english, "cat");
   assert.deepEqual(profile.recentMistakes.map(item => item.prompt), ["cat"]);
+  assert.deepEqual(profile.recentExamWeakPoints.map(item => item.relatedWords), [["cat"]]);
   assert.equal(profile.recentAccuracy, 0);
 });
 
