@@ -30,10 +30,27 @@ test("AI tutor launcher supports persistent pointer dragging", () => {
   assert.match(app, /function startAiTutorLaunchDrag\(event\)/);
   assert.match(app, /Math\.hypot\(event\.clientX - drag\.startX, event\.clientY - drag\.startY\) < 6/);
   assert.match(app, /localStorage\.setItem\(aiTutorLaunchPositionKey\(\)/);
+  assert.match(app, /ai-tutor-launch-position-v2/);
+  assert.match(app, /if \(!value \|\| typeof value !== "object" \|\| Array\.isArray\(value\)\) return null/);
   assert.match(app, /Date\.now\(\) < aiTutorLaunchSuppressClickUntil/);
+  assert.match(app, /window\.addEventListener\("pointermove", moveAiTutorLaunchButton\)/);
+  assert.match(app, /window\.addEventListener\("pointerup", endAiTutorLaunchDrag\)/);
+  assert.match(app, /window\.addEventListener\("pointercancel", endAiTutorLaunchDrag\)/);
   assert.match(app, /window\.addEventListener\("resize", constrainAiTutorLaunchPosition\)/);
   assert.match(app, /window\.addEventListener\("orientationchange", constrainAiTutorLaunchPosition\)/);
   assert.match(css, /\.ai-tutor-launch\s*\{[^}]*cursor:\s*grab[^}]*touch-action:\s*none[^}]*user-select:\s*none/s);
+});
+
+test("exam weaknesses jump to and highlight their related wrong questions", () => {
+  const app = read("app.js");
+  const css = read("styles.css");
+  assert.match(app, /function examWeaknessQuestionId\(exam, weakness\)/);
+  assert.match(app, /data-exam-jump-question/);
+  assert.match(app, /function jumpToExamQuestion\(questionId\)/);
+  assert.match(app, /target\.scrollIntoView\(\{ behavior: "smooth", block: "center" \}\)/);
+  assert.match(app, /summary !== "\[object Object\]"/);
+  assert.match(css, /\.exam-question\.is-weakness-target/);
+  assert.match(css, /\.exam-weakness-link/);
 });
 
 test("AI settings UI manages providers and exposes manual or automatic routing", () => {
@@ -105,7 +122,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use cache version 22", () => {
+test("PWA client assets consistently use cache version 23", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -113,6 +130,6 @@ test("PWA client assets consistently use cache version 22", () => {
   const versions = Array.from(versionedSources.matchAll(/\?v=(\d+)/g), match => match[1]);
 
   assert.ok(versions.length > 0);
-  assert.deepEqual(new Set(versions), new Set(["22"]));
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v22"/);
+  assert.deepEqual(new Set(versions), new Set(["23"]));
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v23"/);
 });

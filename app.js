@@ -52,6 +52,7 @@
   const examListeningCache = new Map();
   let examPhotoFiles = [];
   let examAbilityChanges = [];
+  let examQuestionHighlightTimer = null;
   let abilityReport = null;
   let abilityLoading = false;
   let abilityStatusMessage = "";
@@ -1408,13 +1409,14 @@
     try { event.currentTarget.releasePointerCapture(event.pointerId); } catch (_) {}
   }
 
-  function aiTutorLaunchPositionKey() { return `${storageKey()}-ai-tutor-launch-position`; }
+  function aiTutorLaunchPositionKey() { return `${storageKey()}-ai-tutor-launch-position-v2`; }
 
   function loadAiTutorLaunchPosition() {
     try {
       const value = JSON.parse(localStorage.getItem(aiTutorLaunchPositionKey()) || "null");
-      const left = Number(value && value.left);
-      const top = Number(value && value.top);
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const left = Number(value.left);
+      const top = Number(value.top);
       return Number.isFinite(left) && Number.isFinite(top) ? { left, top } : null;
     } catch (_) {
       return null;
@@ -1465,7 +1467,7 @@
       startTop: rect.top,
       moved: false
     };
-    button.setPointerCapture(event.pointerId);
+    try { button.setPointerCapture(event.pointerId); } catch (_) {}
   }
 
   function moveAiTutorLaunchButton(event) {
@@ -1899,7 +1901,7 @@
       ${question.result.correctAnswer ? `<p><span>参考答案：</span>${escapeHtml(question.result.correctAnswer)}</p>` : ""}
       ${question.type === "listening" && question.transcript ? `<div class="exam-transcript"><span>听力原文</span><p><span class="inline-english">${escapeHtml(question.transcript)}${speechButtonHtml(question.transcript, "播放听力原文")}</span></p></div>` : ""}
     </div>` : "";
-    return `<article class="exam-question" data-exam-question="${escapeHtml(question.id)}">
+    return `<article class="exam-question" data-exam-question="${escapeHtml(question.id)}" tabindex="-1">
       <div class="exam-question-heading"><span>${index + 1}. ${escapeHtml(question.typeLabel)}</span><strong>${question.points} 分</strong></div>
       <p class="exam-question-prompt">${escapeHtml(question.prompt)}</p>
       ${question.sourceText ? `<div class="exam-source-text"><span class="inline-english">${escapeHtml(question.sourceText)}${speechButtonHtml(question.sourceText, "播放英文材料")}</span></div>` : ""}
@@ -1949,6 +1951,50 @@
     </section>`).join("");
   }
 
+  function examWrongQuestionIds(exam) {
+    return (exam.questions || []).filter(question => question.result && Number(question.result.score) < Number(question.points)).map(question => question.id);
+  }
+
+  function examWeaknessQuestionId(exam, weakness) {
+    const knownIds = new Set((exam.questions || []).map(question => question.id));
+    const wrongIds = new Set(examWrongQuestionIds(exam));
+    const questionIds = Array.isArray(weakness && weakness.questionIds) ? weakness.questionIds.map(String) : [];
+    return questionIds.find(id => wrongIds.has(id)) || questionIds.find(id => knownIds.has(id)) || "";
+  }
+
+  function examResultSummaryText(exam) {
+    const result = exam && exam.result || {};
+    const summary = typeof result.summary === "string" ? result.summary.trim() : "";
+    if (summary && summary !== "[object Object]") return summary;
+    const score = Number(result.score) || 0;
+    const possible = Number(result.possible) || Number(exam && exam.totalPoints) || 100;
+    const percentage = possible > 0 ? Math.round((score / possible) * 100) : 0;
+    const details = (Array.isArray(result.weakPoints) ? result.weakPoints : []).map(item => String(item && item.detail || "").trim().replace(/[。！？!?；;]+$/g, "")).filter(Boolean).slice(0, 2);
+    return `本次得分 ${score}/${possible}（${percentage}%）。${details.length ? `需要复习：${details.join("；")}。` : "本次没有记录明显薄弱点。"}`;
+  }
+
+  function examWeaknessHtml(exam, weakness) {
+    const targetId = examWeaknessQuestionId(exam, weakness);
+    const content = `<span class="exam-weakness-heading-row"><strong>${escapeHtml(weakness.detail)}</strong><span class="severity-${escapeHtml(weakness.severity)}">${weakness.severity === "high" ? "重点" : weakness.severity === "low" ? "轻微" : "一般"}</span></span>${weakness.recommendation ? `<span class="exam-weakness-copy">${escapeHtml(weakness.recommendation)}</span>` : ""}${weakness.relatedWords && weakness.relatedWords.length ? `<span class="exam-related-words">相关单词：${weakness.relatedWords.map(escapeHtml).join("、")}</span>` : ""}`;
+    if (!targetId) return `<div class="exam-weakness">${content}</div>`;
+    return `<button class="exam-weakness exam-weakness-link" type="button" data-exam-jump-question="${escapeHtml(targetId)}" aria-label="查看对应错题：${escapeHtml(weakness.detail)}">${content}<i data-lucide="locate-fixed" aria-hidden="true"></i></button>`;
+  }
+
+  function jumpToExamQuestion(questionId) {
+    const target = $$('[data-exam-question]').find(item => item.dataset.examQuestion === String(questionId || ""));
+    if (!target) {
+      showToast("没有找到这条薄弱点对应的题目");
+      return;
+    }
+    clearTimeout(examQuestionHighlightTimer);
+    $$(".exam-question.is-weakness-target").forEach(item => item.classList.remove("is-weakness-target"));
+    void target.offsetWidth;
+    target.classList.add("is-weakness-target");
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.focus({ preventScroll: true });
+    examQuestionHighlightTimer = setTimeout(() => target.classList.remove("is-weakness-target"), 2800);
+  }
+
   function renderExamResult(exam) {
     const section = $("#examResult");
     const result = exam.result;
@@ -1956,13 +2002,17 @@
     if (!result) return;
     $("#examResultScore").textContent = String(result.score || 0);
     $("#examResultPossible").textContent = `/ ${result.possible || exam.totalPoints}`;
-    $("#examResultSummary").textContent = result.summary || "本次试卷已完成。";
+    $("#examResultSummary").textContent = examResultSummaryText(exam);
     $("#examTypeScores").innerHTML = (result.typeScores || []).map(item => `<div><span>${escapeHtml(item.label)}</span><strong>${item.score} / ${item.possible}</strong></div>`).join("");
     const weaknesses = result.weakPoints || [];
     const changes = examAbilityChanges.filter(item => item.delta !== 0);
+    const firstWrongQuestionId = examWrongQuestionIds(exam)[0] || "";
+    const weaknessHeading = firstWrongQuestionId
+      ? `<button class="exam-weakness-heading" type="button" data-exam-jump-question="${escapeHtml(firstWrongQuestionId)}"><span>需要加强</span><i data-lucide="locate-fixed" aria-hidden="true"></i></button>`
+      : `<h3>需要加强</h3>`;
     $("#examWeaknesses").innerHTML = [
-      weaknesses.length ? `<h3>需要加强</h3>${weaknesses.map(item => `<div class="exam-weakness"><div><strong>${escapeHtml(item.detail)}</strong><span class="severity-${escapeHtml(item.severity)}">${item.severity === "high" ? "重点" : item.severity === "low" ? "轻微" : "一般"}</span></div>${item.recommendation ? `<p>${escapeHtml(item.recommendation)}</p>` : ""}${item.relatedWords && item.relatedWords.length ? `<p class="exam-related-words">相关单词：${item.relatedWords.map(escapeHtml).join("、")}</p>` : ""}</div>`).join("")}` : `<div class="exam-no-weakness">本次没有记录明显薄弱点。</div>`,
-      changes.length ? `<div class="exam-weakness"><div><strong>能力变化</strong></div><p>${changes.map(item => `${escapeHtml(item.label)} ${item.delta > 0 ? "+" : ""}${item.delta}`).join(" · ")}</p></div>` : ""
+      weaknesses.length ? `${weaknessHeading}${weaknesses.map(item => examWeaknessHtml(exam, item)).join("")}` : `<div class="exam-no-weakness">本次没有记录明显薄弱点。</div>`,
+      changes.length ? `<div class="exam-weakness"><span class="exam-weakness-heading-row"><strong>能力变化</strong></span><span class="exam-weakness-copy">${changes.map(item => `${escapeHtml(item.label)} ${item.delta > 0 ? "+" : ""}${item.delta}`).join(" · ")}</span></div>` : ""
     ].join("");
   }
 
@@ -1996,7 +2046,7 @@
         </article>`;
       }).join("");
       const modelLabel = [exam.providerName, exam.model, AI_EFFORT_LABELS[exam.reasoningEffort]].filter(Boolean).join(" · ");
-      return `<details class="ai-history-group exam-history-group"><summary><div class="ai-history-group-main"><strong>${escapeHtml(exam.title)}</strong><span>${escapeHtml(formatAiHistoryTime(exam.submittedAt, exam.createdAt))} · ${escapeHtml(modelLabel)}</span></div><div class="ai-history-score"><strong>${result.score} / ${result.possible}</strong><span>${exam.includeListening ? "含听力" : "无听力"} · ${exam.includeEssay ? "含作文" : "无作文"}</span></div><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div class="exam-history-body"><p>${escapeHtml(result.summary || "")}</p><div class="ai-history-questions">${questionRows}</div></div></details>`;
+      return `<details class="ai-history-group exam-history-group"><summary><div class="ai-history-group-main"><strong>${escapeHtml(exam.title)}</strong><span>${escapeHtml(formatAiHistoryTime(exam.submittedAt, exam.createdAt))} · ${escapeHtml(modelLabel)}</span></div><div class="ai-history-score"><strong>${result.score} / ${result.possible}</strong><span>${exam.includeListening ? "含听力" : "无听力"} · ${exam.includeEssay ? "含作文" : "无作文"}</span></div><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div class="exam-history-body"><p>${escapeHtml(examResultSummaryText(exam))}</p><div class="ai-history-questions">${questionRows}</div></div></details>`;
     }).join("");
   }
 
@@ -3234,9 +3284,9 @@
       openAiTutorWindow();
     });
     aiTutorLaunchButton.addEventListener("pointerdown", startAiTutorLaunchDrag);
-    aiTutorLaunchButton.addEventListener("pointermove", moveAiTutorLaunchButton);
-    aiTutorLaunchButton.addEventListener("pointerup", endAiTutorLaunchDrag);
-    aiTutorLaunchButton.addEventListener("pointercancel", endAiTutorLaunchDrag);
+    window.addEventListener("pointermove", moveAiTutorLaunchButton);
+    window.addEventListener("pointerup", endAiTutorLaunchDrag);
+    window.addEventListener("pointercancel", endAiTutorLaunchDrag);
     window.addEventListener("resize", constrainAiTutorLaunchPosition);
     window.addEventListener("orientationchange", constrainAiTutorLaunchPosition);
     $("#closeAiTutorButton").addEventListener("click", closeAiTutorWindow);
@@ -3313,6 +3363,11 @@
     });
     $("#examForm").addEventListener("submit", submitExam);
     $("#view-exam").addEventListener("click", event => {
+      const jumpButton = event.target.closest("[data-exam-jump-question]");
+      if (jumpButton) {
+        jumpToExamQuestion(jumpButton.dataset.examJumpQuestion);
+        return;
+      }
       const button = event.target.closest("[data-exam-listen]");
       if (button) playExamListening(button.dataset.examId, button.dataset.examListen);
     });
@@ -3358,7 +3413,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=22", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=23", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

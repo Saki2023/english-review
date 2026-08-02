@@ -56,6 +56,21 @@ function cleanText(value, maximum = 500) {
   return Array.from(String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()).slice(0, maximum).join("");
 }
 
+function normalizeExamSummary(value, maximum = 400, depth = 0) {
+  if (typeof value === "string") {
+    const summary = cleanText(value, maximum);
+    return summary === "[object Object]" ? "" : summary;
+  }
+  if (!value || depth > 3) return "";
+  if (Array.isArray(value)) {
+    return cleanText(value.map(item => normalizeExamSummary(item, maximum, depth + 1)).filter(Boolean).join(" "), maximum);
+  }
+  if (typeof value !== "object") return "";
+  const preferredKeys = ["summary", "text", "analysis", "feedback", "comment", "message", "overall", "overview", "recommendation"];
+  const keys = [...preferredKeys.filter(key => Object.hasOwn(value, key)), ...Object.keys(value).filter(key => !preferredKeys.includes(key))];
+  return cleanText(keys.map(key => normalizeExamSummary(value[key], maximum, depth + 1)).filter(Boolean).join(" "), maximum);
+}
+
 function boundedInteger(value, fallback, minimum, maximum) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) return fallback;
@@ -469,7 +484,7 @@ function parseExamGrade(payload, input) {
   });
   const allowedSet = new Set(input.allowedWords.map(word => String(word).toLocaleLowerCase()));
   const weakPoints = (Array.isArray(parsed.weakPoints) ? parsed.weakPoints : []).map(item => sanitizeWeakPoint(item, allowedSet)).filter(Boolean).slice(0, 20);
-  return { subjectiveGrades, weakPoints, summary: cleanText(parsed.summary, 400) };
+  return { subjectiveGrades, weakPoints, summary: normalizeExamSummary(parsed.summary, 400) };
 }
 
 function createAiExamGrader(config, options = {}) {
@@ -512,7 +527,7 @@ function sanitizeResult(value, questions) {
     possible: questions.reduce((sum, question) => sum + question.points, 0),
     grades,
     typeScores,
-    summary: cleanText(source.summary, 400),
+    summary: normalizeExamSummary(source.summary, 400),
     weakPoints: (Array.isArray(source.weakPoints) ? source.weakPoints : []).map(item => ({
       category: cleanText(item.category, 30),
       severity: ["low", "medium", "high"].includes(item.severity) ? item.severity : "medium",
@@ -684,7 +699,7 @@ function completeExam(examValue, grading, provider, allowedWords) {
     result: {
       grades,
       weakPoints,
-      summary: grading.summary || (weakPoints.length ? "已完成整卷分析，请优先复习下方薄弱点。" : "本次试卷表现稳定。"),
+      summary: normalizeExamSummary(grading.summary, 400) || (weakPoints.length ? "已完成整卷分析，请优先复习下方薄弱点。" : "本次试卷表现稳定。"),
       gradingProviderId: provider.providerId,
       gradingProviderName: provider.providerName,
       gradedAt: completedAt

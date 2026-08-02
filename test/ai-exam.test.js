@@ -10,6 +10,7 @@ const {
   examAnswersComplete,
   listeningSpeech,
   objectiveGrades,
+  parseExamGrade,
   parseGeneratedExam,
   publicExam
 } = require("../server/ai-exam");
@@ -106,6 +107,21 @@ test("draft exam redacts answer keys and listening transcript until completion",
   assert.equal(result.result.possible, 150);
   assert.equal(result.questions.find(question => question.id === listening.id).transcript, listening.speechText);
   assert.equal(result.questions.every(question => question.result && Number.isInteger(question.result.score)), true);
+});
+
+test("structured AI grading summaries are normalized into readable text", () => {
+  const generated = parseGeneratedExam(generatedPayload(), { allowedWords: ALLOWED_WORDS, totalPoints: 100, includeEssay: false, includeListening: false });
+  const exam = createExam(generated, { providerId: "p1", providerName: "Test", model: "test-model", reasoningEffort: "high" });
+  const subjectiveGrades = exam.questions.filter(question => question.type === "translation").map(question => ({ questionId: question.id, score: question.points, explanation: "翻译正确。" }));
+  const payload = { choices: [{ message: { content: JSON.stringify({
+    subjectiveGrades,
+    weakPoints: [],
+    summary: { analysis: "词汇理解稳定。", feedback: "继续复习易混单词。" }
+  }) } }] };
+
+  const grading = parseExamGrade(payload, { exam, allowedWords: ALLOWED_WORDS });
+  assert.equal(grading.summary, "词汇理解稳定。 继续复习易混单词。");
+  assert.doesNotMatch(grading.summary, /\[object Object\]/);
 });
 
 test("listening generation rejects visible English in prompts or options", () => {
