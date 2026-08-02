@@ -70,6 +70,7 @@ const MAX_BODY = 2 * 1024 * 1024;
 const MAX_AI_ANSWER_LENGTH = 500;
 const MAX_AI_TUTOR_MESSAGE_LENGTH = 500;
 const EXAM_GENERATION_TIMEOUT_MS = 120000;
+const EXAM_GENERATION_API_VERSION = "2";
 
 ensureDataDir();
 const aiSettingsStore = createAiSettingsStore(DATA_DIR);
@@ -292,7 +293,7 @@ function setCommonHeaders(res, contentType = "application/json; charset=utf-8") 
   res.setHeader("Content-Type", contentType);
   if (CORS_ORIGIN === "*") res.setHeader("Access-Control-Allow-Origin", "*");
   else { res.setHeader("Access-Control-Allow-Origin", CORS_ORIGIN); res.setHeader("Access-Control-Allow-Credentials", "true"); }
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-English-Review-Exam-Version");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
   res.setHeader("Cache-Control", "no-store");
 }
@@ -913,6 +914,7 @@ async function handleAiExams(req, res, url, user) {
   }
 
   if (url.pathname === "/api/ai/exams/generate" && req.method === "POST") {
+    if (String(req.headers["x-english-review-exam-version"] || "") !== EXAM_GENERATION_API_VERSION) return sendError(res, 409, "网页已更新，请刷新页面后重新生成试卷");
     if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
     try {
       const body = await readBody(req);

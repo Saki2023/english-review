@@ -50,7 +50,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | PUT | `/api/sync/teaching-profile?username=账号名` | 上传本地教学档案，需要独立的教学写入令牌 |
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
 | GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
-| POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录，返回 `202` |
+| POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录及当前试卷接口版本头，返回 `202` |
 | PUT | `/api/ai/exams/current` | 保存当前试卷草稿答案，需要登录 |
 | POST | `/api/ai/exams/listening` | 获取当前听力题的语音合成文本，需要登录 |
 | POST | `/api/ai/exams/photo-grade` | 识别纸质答卷图片并统一判分，需要登录 |
@@ -238,7 +238,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | POST | `/api/ai/questions/ask` | 已登录 | 询问当前或历史 AI 题目，并按账号及题目追加长期问答记录 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
 | GET | `/api/ai/exams` | 已登录 | 获取脱敏后的试卷状态和历史 |
-| POST | `/api/ai/exams/generate` | 已登录 | 创建 100 分或 150 分完整试卷的后台生成任务，返回 `202` |
+| POST | `/api/ai/exams/generate` | 已登录 | 创建 100 分或 150 分完整试卷的后台生成任务，需发送 `X-English-Review-Exam-Version: 2`，返回 `202`；旧网页会收到明确的刷新提示 |
 | PUT | `/api/ai/exams/current` | 已登录 | 保存整卷草稿，不触发判分 |
 | POST | `/api/ai/exams/listening` | 已登录 | 获取当前试卷中一题的英文朗读文本 |
 | POST | `/api/ai/exams/photo-grade` | 已登录 | 识别最多 6 张纸质答卷图片并完成统一判分 |

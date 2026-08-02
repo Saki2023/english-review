@@ -298,7 +298,8 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .focused-history-list { border-top: 1px solid var(--border); }
 .focused-history-body { padding: 14px 16px; border-bottom: 1px solid var(--border); }
 .focused-history-body p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
-.ai-tutor-launch { position: fixed; right: 24px; bottom: 24px; z-index: 30; box-shadow: var(--shadow); }
+.ai-tutor-launch { position: fixed; right: 24px; bottom: 24px; z-index: 30; box-shadow: var(--shadow); cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.ai-tutor-launch.is-dragging { cursor: grabbing; }
 .ai-tutor-window { position: fixed; right: 24px; bottom: 24px; z-index: 40; width: clamp(330px, 31vw, 430px); height: clamp(390px, 64vh, 620px); min-width: 320px; min-height: 280px; max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); display: flex; flex-direction: column; overflow: hidden; resize: both; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 18px 44px rgba(25, 53, 43, 0.18); }
 .ai-tutor-header { min-height: 58px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px 9px 14px; border-bottom: 1px solid var(--border); background: #f8fbf9; cursor: move; touch-action: none; user-select: none; }
 .ai-tutor-heading { min-width: 0; display: flex; align-items: center; gap: 9px; }

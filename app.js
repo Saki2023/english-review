@@ -4,6 +4,7 @@
   const DATA = window.ENGLISH_REVIEW_DATA;
   const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const STORAGE_KEY = "daily-english-review-v1";
+  const EXAM_GENERATION_API_VERSION = "2";
   const DAILY_TARGET = 10;
   const INTERVALS = [1, 3, 7, 14, 30, 60];
   const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -34,6 +35,8 @@
   let aiRequestInProgress = false;
   let aiTutorRequestInProgress = false;
   let aiTutorDrag = null;
+  let aiTutorLaunchDrag = null;
+  let aiTutorLaunchSuppressClickUntil = 0;
   let aiTutorTarget = null;
   let aiStatusMessage = "";
   let aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
@@ -1225,6 +1228,7 @@
     }
 
     launchButton.hidden = !tutorWindow.hidden;
+    if (!launchButton.hidden) requestAnimationFrame(restoreAiTutorLaunchPosition);
     if (tutorWindow.hidden) return;
     aiTutorTarget = target;
     $("#aiTutorTitle").textContent = target.kind === "history" ? "历史题问答" : "题目问答";
@@ -1402,6 +1406,102 @@
     if (!aiTutorDrag || event.pointerId !== aiTutorDrag.pointerId) return;
     aiTutorDrag = null;
     try { event.currentTarget.releasePointerCapture(event.pointerId); } catch (_) {}
+  }
+
+  function aiTutorLaunchPositionKey() { return `${storageKey()}-ai-tutor-launch-position`; }
+
+  function loadAiTutorLaunchPosition() {
+    try {
+      const value = JSON.parse(localStorage.getItem(aiTutorLaunchPositionKey()) || "null");
+      const left = Number(value && value.left);
+      const top = Number(value && value.top);
+      return Number.isFinite(left) && Number.isFinite(top) ? { left, top } : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function placeAiTutorLaunchButton(position, persist = false) {
+    const button = $("#openAiTutorButton");
+    if (!position || button.hidden) return;
+    const rect = button.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const maximumLeft = Math.max(8, window.innerWidth - rect.width - 8);
+    const maximumTop = Math.max(8, window.innerHeight - rect.height - 8);
+    const left = Math.min(maximumLeft, Math.max(8, Number(position.left) || 0));
+    const top = Math.min(maximumTop, Math.max(8, Number(position.top) || 0));
+    button.style.right = "auto";
+    button.style.bottom = "auto";
+    button.style.left = `${left}px`;
+    button.style.top = `${top}px`;
+    if (persist) {
+      try { localStorage.setItem(aiTutorLaunchPositionKey(), JSON.stringify({ left: Math.round(left), top: Math.round(top) })); } catch (_) {}
+    }
+  }
+
+  function restoreAiTutorLaunchPosition() {
+    if (aiTutorLaunchDrag) return;
+    const button = $("#openAiTutorButton");
+    if (button.hidden) return;
+    const position = loadAiTutorLaunchPosition();
+    if (!position) {
+      ["left", "top", "right", "bottom"].forEach(property => button.style.removeProperty(property));
+      return;
+    }
+    placeAiTutorLaunchButton(position, true);
+  }
+
+  function startAiTutorLaunchDrag(event) {
+    if (event.button !== 0 || event.isPrimary === false) return;
+    const button = $("#openAiTutorButton");
+    const rect = button.getBoundingClientRect();
+    aiTutorLaunchDrag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      startLeft: rect.left,
+      startTop: rect.top,
+      moved: false
+    };
+    button.setPointerCapture(event.pointerId);
+  }
+
+  function moveAiTutorLaunchButton(event) {
+    const drag = aiTutorLaunchDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+    if (!drag.moved) {
+      drag.moved = true;
+      const button = $("#openAiTutorButton");
+      button.classList.add("is-dragging");
+      button.style.right = "auto";
+      button.style.bottom = "auto";
+      button.style.left = `${drag.startLeft}px`;
+      button.style.top = `${drag.startTop}px`;
+    }
+    placeAiTutorLaunchButton({ left: event.clientX - drag.offsetX, top: event.clientY - drag.offsetY });
+    event.preventDefault();
+  }
+
+  function endAiTutorLaunchDrag(event) {
+    const drag = aiTutorLaunchDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const button = $("#openAiTutorButton");
+    aiTutorLaunchDrag = null;
+    button.classList.remove("is-dragging");
+    if (drag.moved) {
+      const rect = button.getBoundingClientRect();
+      placeAiTutorLaunchButton({ left: rect.left, top: rect.top }, true);
+      aiTutorLaunchSuppressClickUntil = Date.now() + 600;
+      event.preventDefault();
+    }
+    try { button.releasePointerCapture(event.pointerId); } catch (_) {}
+  }
+
+  function constrainAiTutorLaunchPosition() {
+    if (!aiTutorLaunchDrag) requestAnimationFrame(restoreAiTutorLaunchPosition);
   }
 
   function aiCorrectAnswer(question) { return question.direction === "zh-en" ? question.english : question.chinese; }
@@ -2199,7 +2299,7 @@
       examState = normalizeClientAiExam(await responseJson(await fetch("/api/ai/exams/generate", {
         method: "POST",
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-English-Review-Exam-Version": EXAM_GENERATION_API_VERSION },
         body: JSON.stringify(settings)
       })));
       if (examState.generation?.status === "pending") {
@@ -3125,7 +3225,20 @@
     $("#generateAiQuestions").addEventListener("click", generateAiQuestions);
     $("#generateAnotherAiSet").addEventListener("click", generateAiQuestions);
     $("#aiAnswerForm").addEventListener("submit", submitAiAnswer);
-    $("#openAiTutorButton").addEventListener("click", () => openAiTutorWindow());
+    const aiTutorLaunchButton = $("#openAiTutorButton");
+    aiTutorLaunchButton.addEventListener("click", event => {
+      if (Date.now() < aiTutorLaunchSuppressClickUntil) {
+        event.preventDefault();
+        return;
+      }
+      openAiTutorWindow();
+    });
+    aiTutorLaunchButton.addEventListener("pointerdown", startAiTutorLaunchDrag);
+    aiTutorLaunchButton.addEventListener("pointermove", moveAiTutorLaunchButton);
+    aiTutorLaunchButton.addEventListener("pointerup", endAiTutorLaunchDrag);
+    aiTutorLaunchButton.addEventListener("pointercancel", endAiTutorLaunchDrag);
+    window.addEventListener("resize", constrainAiTutorLaunchPosition);
+    window.addEventListener("orientationchange", constrainAiTutorLaunchPosition);
     $("#closeAiTutorButton").addEventListener("click", closeAiTutorWindow);
     $("#minimizeAiTutorButton").addEventListener("click", toggleAiTutorMinimize);
     $("#maximizeAiTutorButton").addEventListener("click", toggleAiTutorMaximize);
@@ -3245,7 +3358,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=21").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=22", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

@@ -100,7 +100,7 @@ function completeAnswers(exam) {
   }));
 }
 
-test("exam APIs preserve private state, redact draft answers, grade once, and sync evidence", async () => {
+test("exam APIs preserve private state, redact draft answers, grade once, and sync evidence", async t => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "english-review-exam-api-"));
   const users = loadUsers(dataDir);
   createUser(users, { username: "owner", password: "exam-api-test-password" });
@@ -139,7 +139,7 @@ test("exam APIs preserve private state, redact draft answers, grade once, and sy
     const login = await fetch(`${baseUrl}/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "owner", password: "exam-api-test-password" }) });
     assert.equal(login.status, 200);
     const cookie = login.headers.get("set-cookie").split(";")[0];
-    const headers = { "Content-Type": "application/json", Cookie: cookie };
+    const headers = { "Content-Type": "application/json", "X-English-Review-Exam-Version": "2", Cookie: cookie };
     const providerPort = provider.address().port;
     const config = await fetch(`${baseUrl}/api/admin/ai-config`, {
       method: "PUT",
@@ -147,6 +147,11 @@ test("exam APIs preserve private state, redact draft answers, grade once, and sy
       body: JSON.stringify({ mode: "manual", providers: [{ id: "exam-provider", name: "Exam Provider", enabled: true, baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "test-key", models: ["exam-model"], timeoutMs: 5000 }], manualProviderId: "exam-provider", defaultModel: "exam-model", rateLimitPerMinute: 20 })
     });
     assert.equal(config.status, 200);
+
+    const staleClientResponse = await fetch(`${baseUrl}/api/ai/exams/generate`, { method: "POST", headers: { "Content-Type": "application/json", Cookie: cookie }, body: JSON.stringify({ model: "exam-model" }) });
+    assert.equal(staleClientResponse.status, 409);
+    assert.equal((await staleClientResponse.json()).error, "网页已更新，请刷新页面后重新生成试卷");
+    assert.equal(providerCalls.length, 0);
 
     const generatedResponse = await fetch(`${baseUrl}/api/ai/exams/generate`, { method: "POST", headers, body: JSON.stringify({ model: "exam-model", reasoningEffort: "medium", totalPoints: 150, includeListening: true, includeEssay: false }) });
     assert.equal(generatedResponse.status, 202);
@@ -200,6 +205,17 @@ test("exam APIs preserve private state, redact draft answers, grade once, and sy
     assert.equal(profile.examHistory[0].questions.some(question => question.type === "listening" && question.sourceText === "A big pig sat on a mat."), true);
     assert.equal(profile.examHistory[0].questions.some(question => question.type === "cloze" && question.sourceText.includes("[4]")), true);
     assert.equal(profile.examHistory[0].questions.some(question => question.type === "reading-comprehension" && question.sourceText === "A big cat sat on a mat."), true);
+
+    for (const reasoningEffort of ["low", "medium", "high", "xhigh", "max"]) {
+      await t.test(`background generation accepts ${reasoningEffort} effort`, async () => {
+        const response = await fetch(`${baseUrl}/api/ai/exams/generate`, { method: "POST", headers, body: JSON.stringify({ model: "exam-model", reasoningEffort, totalPoints: 100, includeListening: true, includeEssay: false }) });
+        assert.equal(response.status, 202);
+        const pending = await response.json();
+        const completed = await waitForExamGeneration(baseUrl, headers, pending.generation.id);
+        assert.equal(completed.currentExam.reasoningEffort, reasoningEffort);
+        assert.equal(providerCalls.at(-1).reasoning_effort, reasoningEffort);
+      });
+    }
   } finally {
     child.kill();
     if (child.exitCode === null) await Promise.race([once(child, "exit"), new Promise(resolve => setTimeout(resolve, 2000))]);
@@ -208,7 +224,7 @@ test("exam APIs preserve private state, redact draft answers, grade once, and sy
   }
 });
 
-test("exam generation runs in the background and rejects incomplete replacement papers", async () => {
+test("maximum-effort exam generation returns immediately, completes in the background, and rejects incomplete replacements", async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "english-review-exam-job-"));
   const users = loadUsers(dataDir);
   createUser(users, { username: "owner", password: "exam-job-test-password" });
@@ -253,7 +269,7 @@ test("exam generation runs in the background and rejects incomplete replacement 
     await waitForHealth(baseUrl, child);
     const login = await fetch(`${baseUrl}/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "owner", password: "exam-job-test-password" }) });
     const cookie = login.headers.get("set-cookie").split(";")[0];
-    const headers = { "Content-Type": "application/json", Cookie: cookie };
+    const headers = { "Content-Type": "application/json", "X-English-Review-Exam-Version": "2", Cookie: cookie };
     const providerPort = provider.address().port;
     const config = await fetch(`${baseUrl}/api/admin/ai-config`, {
       method: "PUT",

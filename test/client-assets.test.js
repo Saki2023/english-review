@@ -24,6 +24,18 @@ test("AI tutor Enter handling is wired to form submission", () => {
   assert.match(app, /normalizeClientTutorExchange\(data\.exchange\)/);
 });
 
+test("AI tutor launcher supports persistent pointer dragging", () => {
+  const app = read("app.js");
+  const css = read("styles.css");
+  assert.match(app, /function startAiTutorLaunchDrag\(event\)/);
+  assert.match(app, /Math\.hypot\(event\.clientX - drag\.startX, event\.clientY - drag\.startY\) < 6/);
+  assert.match(app, /localStorage\.setItem\(aiTutorLaunchPositionKey\(\)/);
+  assert.match(app, /Date\.now\(\) < aiTutorLaunchSuppressClickUntil/);
+  assert.match(app, /window\.addEventListener\("resize", constrainAiTutorLaunchPosition\)/);
+  assert.match(app, /window\.addEventListener\("orientationchange", constrainAiTutorLaunchPosition\)/);
+  assert.match(css, /\.ai-tutor-launch\s*\{[^}]*cursor:\s*grab[^}]*touch-action:\s*none[^}]*user-select:\s*none/s);
+});
+
 test("AI settings UI manages providers and exposes manual or automatic routing", () => {
   const app = read("app.js");
   const html = read("index.html");
@@ -54,6 +66,7 @@ test("exam UI uses dedicated APIs, optional listening, and whole-paper submissio
   assert.match(app, /EXAM_GENERATION_POLL_MS/);
   assert.match(app, /monitorExamGeneration\(examState\.generation\.id\)/);
   assert.match(app, /generation\.status === "failed"/);
+  assert.match(app, /"X-English-Review-Exam-Version": EXAM_GENERATION_API_VERSION/);
   assert.match(app, /\[504, 524\]\.includes\(response\.status\)/);
   assert.match(app, /exam\.questions\.find\(question => !examAnswerComplete/);
   assert.match(app, /完形填空材料/);
@@ -92,7 +105,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use cache version 21", () => {
+test("PWA client assets consistently use cache version 22", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -100,6 +113,6 @@ test("PWA client assets consistently use cache version 21", () => {
   const versions = Array.from(versionedSources.matchAll(/\?v=(\d+)/g), match => match[1]);
 
   assert.ok(versions.length > 0);
-  assert.deepEqual(new Set(versions), new Set(["21"]));
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v21"/);
+  assert.deepEqual(new Set(versions), new Set(["22"]));
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v22"/);
 });
