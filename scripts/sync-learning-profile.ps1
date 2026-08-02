@@ -62,9 +62,11 @@ if ($WriteToken) {
   }
   $previewDirectory = Join-Path $workspaceRoot "预习"
   $previewDocument = $null
+  $previewDocuments = @()
   if (Test-Path -LiteralPath $previewDirectory) {
-    $latestPreview = Get-ChildItem -LiteralPath $previewDirectory -File -Filter "*.md" | Sort-Object Name -Descending | Select-Object -First 1
-    if ($latestPreview) { $previewDocument = Read-LearningDocument $latestPreview.FullName 10000 }
+    $previewFiles = @(Get-ChildItem -LiteralPath $previewDirectory -File -Filter "*.md" | Sort-Object Name -Descending | Select-Object -First 30 | Sort-Object Name)
+    $previewDocuments = @($previewFiles | ForEach-Object { Read-LearningDocument $_.FullName 10000 })
+    if ($previewDocuments.Count -gt 0) { $previewDocument = $previewDocuments[-1] }
   }
   $teachingProfile = @{
     updatedAt = (Get-Date).ToUniversalTime().ToString("o")
@@ -72,12 +74,14 @@ if ($WriteToken) {
     mistakes = $mistakeDocument
     recentNotes = $recentNotes
     preview = $previewDocument
+    previews = $previewDocuments
   }
   $writeUri = "$base/api/sync/teaching-profile?username=$encodedUsername"
   $writeHeaders = @{ Authorization = "Bearer $WriteToken"; Accept = "application/json" }
   $writeBody = $teachingProfile | ConvertTo-Json -Depth 20
   Invoke-RestMethod -Method Put -Uri $writeUri -Headers $writeHeaders -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($writeBody)) | Out-Null
   Write-Host "本地教学档案已上传到网站。"
+  if ($previewDocument) { Write-Host "每日预习已同步：$($previewDocument.name)（保留近期 $($previewDocuments.Count) 份）" }
 } else {
   Write-Warning "未配置 SYNC_WRITE_TOKEN，本次只下载网站档案，不上传本地教学计划。"
 }

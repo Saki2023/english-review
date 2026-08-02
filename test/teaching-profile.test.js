@@ -21,12 +21,19 @@ test("teaching profile accepts only bounded learning documents", () => {
     progress: { name: "学习进度.md", content: "当前学习到第 2 天" },
     mistakes: { name: "../错题本.md", content: "cat 写成 kat" },
     recentNotes: Array.from({ length: 8 }, (_, index) => ({ name: `第${index}天.md`, content: "笔记" })),
+    preview: { name: "第035天预习.md", content: "# 第 35 天预习" },
+    previews: Array.from({ length: 35 }, (_, index) => ({ name: `第${String(index + 1).padStart(3, "0")}天预习.md`, content: `预习 ${index + 1}` })),
     apiKey: "must-not-survive",
     password: "must-not-survive"
   });
   assert.equal(profile.recentNotes.length, 5);
+  assert.equal(profile.previews.length, 30);
+  assert.equal(profile.preview.name, "第035天预习.md");
+  assert.equal(profile.previews.at(-1).content, "# 第 35 天预习");
   assert.equal(profile.mistakes.name.includes("/"), false);
   assert.equal(Object.hasOwn(profile, "apiKey"), false);
   assert.equal(JSON.stringify(profile).includes("must-not-survive"), false);
   assert.equal(teachingProfileForAi(profile).progress.content, "当前学习到第 2 天");
+  assert.equal(teachingProfileForAi(profile).preview.name, "第035天预习.md");
+  assert.equal(Object.hasOwn(teachingProfileForAi(profile), "previews"), false);
 });

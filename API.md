@@ -48,6 +48,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | GET | `/api/export` | 导出当前账号的词库和复习记录，需要登录 |
 | GET | `/api/sync/profile?username=账号名` | 获取供本地学习窗口使用的学习档案，需要只读同步令牌 |
 | PUT | `/api/sync/teaching-profile?username=账号名` | 上传本地教学档案，需要独立的教学写入令牌 |
+| GET | `/api/preview` | 获取当前账号最新及近期预习，需要登录 |
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
 | GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
 | POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录及当前试卷接口版本头，返回 `202` |
@@ -172,7 +173,7 @@ docker compose -f docker-compose.vps.yml exec english-review npm run sync:token
 
 该命令不会显示原始 `API_TOKEN`。只读令牌只能调用学习档案接口，不能新增、修改或删除内容。
 
-如需让本地英语教学窗口把 `学习进度.md`、`错题本.md`、最近三份每日笔记和最新预习上传给网站 AI，再生成一个权限独立的教学档案写入令牌：
+如需让本地英语教学窗口把 `学习进度.md`、`错题本.md`、最近三份每日笔记和最近 30 份预习上传给网站 AI 与网页“每日预习”，再生成一个权限独立的教学档案写入令牌：
 
 ```bash
 cd /opt/english-review
@@ -192,7 +193,7 @@ Invoke-RestMethod -Uri "https://你的域名/api/sync/profile?username=你的账
 powershell -ExecutionPolicy Bypass -File ".\每日英语复习\scripts\sync-learning-profile.ps1"
 ```
 
-脚本会先上传本地教学档案，再把网站档案保存为 `学习同步\网站学习档案.json`，供独立的英语学习窗口读取。省略 `SYNC_WRITE_TOKEN` 时会退化为只下载模式。不要提交 `.sync.env`，也不要把任何令牌发到聊天中。
+脚本会先上传本地教学档案，将最新预习设为网页默认内容并保留最近 30 份预习供选择，再把网站档案保存为 `学习同步\网站学习档案.json`，供独立的英语学习窗口读取。省略 `SYNC_WRITE_TOKEN` 时会退化为只下载模式。不要提交 `.sync.env`，也不要把任何令牌发到聊天中。
 
 ## 数据保存位置
 

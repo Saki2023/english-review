@@ -53,6 +53,11 @@ test("teaching profile write token updates only the local teaching profile", asy
       updatedAt: "2026-08-02T10:00:00Z",
       progress: { name: "学习进度.md", content: "当前完成第 2 天" },
       mistakes: { name: "错题本.md", content: "cat 不能写成 kat" },
+      preview: { name: "第004天预习.md", content: "# 第 4 天预习\n\n学习 hot。" },
+      previews: [
+        { name: "第003天预习.md", content: "# 第 3 天预习" },
+        { name: "第004天预习.md", content: "# 第 4 天预习\n\n学习 hot。" }
+      ],
       apiKey: "must-not-be-stored",
       password: "must-not-be-stored"
     });
@@ -65,10 +70,19 @@ test("teaching profile write token updates only the local teaching profile", asy
     assert.equal(profileResponse.status, 200);
     const profile = await profileResponse.json();
     assert.equal(profile.localTeachingProfile.progress.content, "当前完成第 2 天");
+    assert.equal(profile.localTeachingProfile.previews.length, 2);
     assert.equal(JSON.stringify(profile).includes("must-not-be-stored"), false);
 
     const login = await fetch(`${baseUrl}/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "learner", password: "teaching-sync-password" }) });
     const cookie = login.headers.get("set-cookie").split(";")[0];
+    const anonymousPreview = await fetch(`${baseUrl}/api/preview`);
+    assert.equal(anonymousPreview.status, 401);
+    const previewResponse = await fetch(`${baseUrl}/api/preview`, { headers: { Cookie: cookie } });
+    assert.equal(previewResponse.status, 200);
+    const preview = await previewResponse.json();
+    assert.equal(preview.preview.name, "第004天预习.md");
+    assert.equal(preview.previews.length, 2);
+    assert.equal(JSON.stringify(preview).includes("must-not-be-stored"), false);
     const state = await (await fetch(`${baseUrl}/api/state`, { headers: { Cookie: cookie } })).json();
     assert.equal(Object.hasOwn(state, "teachingProfile"), false);
     const abilities = await fetch(`${baseUrl}/api/abilities`, { headers: { Cookie: cookie } });

@@ -108,6 +108,24 @@ test("ability, dictation, and focused practice UI share speech and evidence cont
   assert.match(app, /question\.direction === "en-zh" \? speechButtonHtml/);
 });
 
+test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  const css = read("styles.css");
+  const sync = read("scripts/sync-learning-profile.ps1");
+  assert.match(html, /data-view="preview"/);
+  assert.match(html, /id="previewHistorySelect"/);
+  assert.match(html, /id="refreshPreviewButton"/);
+  assert.match(app, /fetch\("\/api\/preview", \{ cache: "no-store", credentials: "same-origin" \}\)/);
+  assert.match(app, /function previewMarkdownHtml\(value\)/);
+  assert.match(app, /escapeHtml\(code\.join\("\\n"\)\)/);
+  assert.match(app, /previewState\.previews/);
+  assert.doesNotMatch(app, /documents\.map\(document\s*=>\s*\{\s*const option = document\.createElement/);
+  assert.match(css, /\.preview-table-wrap\s*\{[^}]*overflow-x:\s*auto/s);
+  assert.match(sync, /Select-Object -First 30/);
+  assert.match(sync, /previews = \$previewDocuments/);
+});
+
 test("exam UI supports A3 pages, printing, draft recovery, and paper-photo grading", () => {
   const app = read("app.js");
   const html = read("index.html");
@@ -123,7 +141,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 27", () => {
+test("PWA client assets consistently use the displayed cache version 28", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -134,6 +152,6 @@ test("PWA client assets consistently use the displayed cache version 27", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "27");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v27"/);
+  assert.equal(displayedVersion[1], "28");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v28"/);
 });

@@ -70,6 +70,8 @@
   let focusedDraftSaveTimer = null;
   let focusedAbilityChanges = [];
   const focusedSpeechCache = new Map();
+  let previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
+  let selectedPreviewName = "";
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -1046,6 +1048,8 @@
       if (!response.ok) return setAuthFeedback(data.error || "操作失败，请稍后重试");
       currentUser = data.user;
       model = loadModel();
+      previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
+      selectedPreviewName = "";
       remoteReady = false;
       showAppView();
       bindAppEvents();
@@ -1060,6 +1064,8 @@
   async function logout() {
     if (API_ENABLED) { try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch (_) {} }
     currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
+    previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
+    selectedPreviewName = "";
     remoteReady = !API_ENABLED;
     if (API_ENABLED) showAuthView();
   }
@@ -1708,6 +1714,49 @@
     }
     if (!text || !data || typeof data !== "object") throw new Error("服务器返回格式异常，请刷新后重试");
     return data;
+  }
+
+  function normalizeClientPreviewDocument(value) {
+    if (!value || typeof value !== "object") return null;
+    const name = String(value.name || "").trim().slice(0, 120);
+    const content = String(value.content || "").trim().slice(0, 10000);
+    return name && content ? { name, content } : null;
+  }
+
+  function normalizePreviewResponse(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const documents = (Array.isArray(source.previews) ? source.previews : []).map(normalizeClientPreviewDocument).filter(Boolean);
+    const latest = normalizeClientPreviewDocument(source.preview);
+    const unique = new Map(documents.map(document => [document.name, document]));
+    if (latest) unique.set(latest.name, latest);
+    const previews = Array.from(unique.values()).slice(-30);
+    return {
+      loaded: true,
+      loading: false,
+      updatedAt: String(source.updatedAt || "").slice(0, 40),
+      preview: latest || previews.at(-1) || null,
+      previews,
+      error: ""
+    };
+  }
+
+  async function loadPreview() {
+    if (previewState.loading) return;
+    if (!API_ENABLED) {
+      previewState = { loaded: true, loading: false, updatedAt: "", preview: null, previews: [], error: "每日预习需要登录网站后读取。" };
+      renderPreview();
+      return;
+    }
+    previewState = { ...previewState, loading: true, error: "" };
+    renderPreview();
+    try {
+      const response = await fetch("/api/preview", { cache: "no-store", credentials: "same-origin" });
+      previewState = normalizePreviewResponse(await responseJson(response));
+      if (!selectedPreviewName || !previewState.previews.some(document => document.name === selectedPreviewName)) selectedPreviewName = previewState.preview?.name || "";
+    } catch (error) {
+      previewState = { ...previewState, loaded: true, loading: false, error: error.message || "获取预习失败，请稍后重试。" };
+    }
+    renderPreview();
   }
 
   async function generateAiQuestions() {
@@ -2935,6 +2984,7 @@
     if (view === "focused") { renderFocusedView(); loadFocused(); }
     if (view === "library") renderLibrary();
     if (view === "notes") renderNotes();
+    if (view === "preview") { renderPreview(); loadPreview(); }
     if (view === "mistakes") renderMistakes();
     if (view === "progress") renderProgress();
     renderAiTutorWindow();
@@ -3191,6 +3241,117 @@
     refreshIcons();
   }
 
+  function previewInlineHtml(value) {
+    return String(value || "").split(/(`[^`\n]+`)/g).map(part => {
+      if (part.startsWith("`") && part.endsWith("`") && part.length > 2) return `<code>${escapeHtml(part.slice(1, -1))}</code>`;
+      return escapeHtml(part);
+    }).join("");
+  }
+
+  function previewTableCells(value) {
+    return String(value || "").trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim());
+  }
+
+  function isPreviewTableDivider(value) {
+    const cells = previewTableCells(value);
+    return cells.length > 0 && cells.every(cell => /^:?-{3,}:?$/.test(cell));
+  }
+
+  function previewMarkdownHtml(value) {
+    const lines = String(value || "").replace(/\r/g, "").split("\n");
+    const output = [];
+    for (let index = 0; index < lines.length;) {
+      const line = lines[index];
+      const trimmed = line.trim();
+      if (!trimmed) { index += 1; continue; }
+
+      if (trimmed.startsWith("```")) {
+        const code = [];
+        index += 1;
+        while (index < lines.length && !lines[index].trim().startsWith("```")) { code.push(lines[index]); index += 1; }
+        if (index < lines.length) index += 1;
+        output.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+        continue;
+      }
+
+      const heading = trimmed.match(/^(#{1,3})\s+(.+)$/);
+      if (heading) {
+        const level = heading[1].length;
+        output.push(`<h${level}>${previewInlineHtml(heading[2])}</h${level}>`);
+        index += 1;
+        continue;
+      }
+
+      if (/^-\s+/.test(trimmed)) {
+        const items = [];
+        while (index < lines.length && /^-\s+/.test(lines[index].trim())) {
+          items.push(lines[index].trim().replace(/^-\s+/, ""));
+          index += 1;
+        }
+        output.push(`<ul>${items.map(item => `<li>${previewInlineHtml(item)}</li>`).join("")}</ul>`);
+        continue;
+      }
+
+      if (trimmed.includes("|") && index + 1 < lines.length && isPreviewTableDivider(lines[index + 1])) {
+        const headers = previewTableCells(trimmed);
+        const rows = [];
+        index += 2;
+        while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+          rows.push(previewTableCells(lines[index]));
+          index += 1;
+        }
+        output.push(`<div class="preview-table-wrap"><table class="preview-table"><thead><tr>${headers.map(cell => `<th>${previewInlineHtml(cell)}</th>`).join("")}</tr></thead><tbody>${rows.map(row => `<tr>${headers.map((_, cellIndex) => `<td>${previewInlineHtml(row[cellIndex] || "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+        continue;
+      }
+
+      output.push(`<p>${previewInlineHtml(trimmed)}</p>`);
+      index += 1;
+    }
+    return `<article class="preview-document">${output.join("")}</article>`;
+  }
+
+  function previewUpdatedLabel(value) {
+    const date = new Date(String(value || ""));
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
+  }
+
+  function renderPreview() {
+    const documents = Array.isArray(previewState.previews) ? previewState.previews : [];
+    const selected = documents.find(document => document.name === selectedPreviewName) || previewState.preview || documents.at(-1) || null;
+    if (selected) selectedPreviewName = selected.name;
+
+    const picker = $("#previewHistoryPicker");
+    const select = $("#previewHistorySelect");
+    picker.hidden = documents.length < 2;
+    select.replaceChildren(...documents.map(previewDocument => {
+      const option = document.createElement("option");
+      option.value = previewDocument.name;
+      option.textContent = previewDocument.name.replace(/\.md$/i, "");
+      return option;
+    }));
+    if (selected) select.value = selected.name;
+    $("#refreshPreviewButton").disabled = previewState.loading;
+
+    if (previewState.loading && !selected) {
+      $("#previewStatus").textContent = "正在获取最新预习…";
+      $("#previewBody").innerHTML = '<p class="empty-message">正在获取最新预习…</p>';
+    } else if (previewState.error && !selected) {
+      $("#previewStatus").textContent = "暂时无法获取预习";
+      $("#previewBody").innerHTML = `<div class="preview-empty"><h2>预习暂不可用</h2><p>${escapeHtml(previewState.error)}</p><p>学习窗口生成预习并完成同步后，会自动显示在这里。</p></div>`;
+    } else if (!selected) {
+      $("#previewStatus").textContent = "还没有同步预习文件";
+      $("#previewBody").innerHTML = '<div class="preview-empty"><h2>等待下一份预习</h2><p>学习窗口完成课程并生成预习后，网站会在同步完成后自动更新。</p></div>';
+    } else {
+      const updated = previewUpdatedLabel(previewState.updatedAt);
+      $("#previewStatus").textContent = previewState.loading
+        ? `正在检查更新 · 当前显示 ${selected.name.replace(/\.md$/i, "")}`
+        : `${documents.length || 1} 份预习${updated ? ` · ${updated} 同步` : ""}`;
+      $("#previewBody").innerHTML = previewMarkdownHtml(selected.content);
+    }
+    refreshIcons();
+  }
+
   function mistakeRows() {
     const seeded = DATA.seedMistakes.map(item => ({ ...item, seeded: true }));
     const dynamic = (model.mistakes || []).map(item => ({ ...item, seeded: false }));
@@ -3261,6 +3422,11 @@
       notesDay = Number(event.target.value) || notesDay;
       renderNotes();
     });
+    $("#previewHistorySelect").addEventListener("change", event => {
+      selectedPreviewName = event.target.value;
+      renderPreview();
+    });
+    $("#refreshPreviewButton").addEventListener("click", loadPreview);
     $("#aiModelSelect").addEventListener("change", event => {
       aiStatusMessage = "";
       updateAiPreferences({ model: event.target.value });
@@ -3417,7 +3583,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=27", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=28", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

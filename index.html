@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=27">
+  <link rel="stylesheet" href="styles.css?v=28">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v27">v27</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v28">v28</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 2 天</div>
         </div>
@@ -79,6 +79,9 @@
         </button>
         <button class="nav-item" type="button" data-view="notes">
           <i data-lucide="notebook-tabs" aria-hidden="true"></i><span>学习笔记</span>
+        </button>
+        <button class="nav-item" type="button" data-view="preview" id="previewNavItem">
+          <i data-lucide="book-open" aria-hidden="true"></i><span>每日预习</span>
         </button>
         <button class="nav-item" type="button" data-view="mistakes">
           <i data-lucide="triangle-alert" aria-hidden="true"></i><span>错题本</span>
@@ -586,6 +589,29 @@
           <div class="notes-body" id="notesBody"></div>
         </section>
 
+        <section class="view" id="view-preview" aria-labelledby="previewTitle" hidden>
+          <div class="page-heading compact-heading preview-heading">
+            <div>
+              <p class="eyebrow">DAILY PREVIEW</p>
+              <h1 id="previewTitle">每日预习</h1>
+              <p class="heading-note" id="previewStatus">正在获取最新预习…</p>
+            </div>
+            <div class="preview-toolbar">
+              <label class="notes-day-picker" id="previewHistoryPicker" hidden>
+                <i data-lucide="calendar-days" aria-hidden="true"></i>
+                <span class="sr-only">选择预习内容</span>
+                <select id="previewHistorySelect" aria-label="选择预习内容"></select>
+              </label>
+              <button class="secondary-button compact-button" type="button" id="refreshPreviewButton">
+                <i data-lucide="refresh-cw" aria-hidden="true"></i><span>获取最新</span>
+              </button>
+            </div>
+          </div>
+          <div class="preview-body" id="previewBody">
+            <p class="empty-message">正在获取最新预习…</p>
+          </div>
+        </section>
+
         <section class="view" id="view-mistakes" aria-labelledby="mistakesTitle" hidden>
           <div class="page-heading compact-heading">
             <div>
@@ -785,9 +811,9 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=27"></script>
-  <script src="data.js?v=27"></script>
-  <script src="answer-utils.js?v=27"></script>
+  <script src="vendor/lucide.min.js?v=28"></script>
+  <script src="data.js?v=28"></script>
+  <script src="answer-utils.js?v=28"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -803,7 +829,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=27";
+      appScript.src = "app.js?v=28";
       document.body.appendChild(appScript);
     })();
   </script>

@@ -14,15 +14,32 @@ function sanitizeDocument(value, maximum = 10000) {
   return content ? { name: cleanName(source.name) || "未命名文档", content } : null;
 }
 
+function sanitizeDocuments(values, maximumItems = 30) {
+  const documents = (Array.isArray(values) ? values : []).map(item => sanitizeDocument(item, 10000)).filter(Boolean);
+  const unique = new Map();
+  documents.forEach(document => unique.set(document.name, document));
+  return Array.from(unique.values()).slice(-maximumItems);
+}
+
 function sanitizeTeachingProfile(value) {
   const source = value && typeof value === "object" ? value : {};
+  const explicitPreview = sanitizeDocument(source.preview, 10000);
+  const previewHistory = sanitizeDocuments(source.previews, 30);
+  if (explicitPreview) {
+    const existing = previewHistory.findIndex(document => document.name === explicitPreview.name);
+    if (existing >= 0) previewHistory[existing] = explicitPreview;
+    else previewHistory.push(explicitPreview);
+  }
+  const previews = previewHistory.slice(-30);
+  const preview = explicitPreview || previews.at(-1) || null;
   return {
     schemaVersion: 1,
     updatedAt: cleanText(source.updatedAt, 40),
     progress: sanitizeDocument(source.progress, 16000),
     mistakes: sanitizeDocument(source.mistakes, 16000),
     recentNotes: (Array.isArray(source.recentNotes) ? source.recentNotes : []).map(item => sanitizeDocument(item, 10000)).filter(Boolean).slice(0, 5),
-    preview: sanitizeDocument(source.preview, 10000),
+    preview,
+    previews,
     teachingFocus: (Array.isArray(source.teachingFocus) ? source.teachingFocus : []).map(item => cleanText(item, 240)).filter(Boolean).slice(0, 20),
     nextPlan: cleanText(source.nextPlan, 3000)
   };

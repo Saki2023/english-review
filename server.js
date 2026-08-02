@@ -442,6 +442,17 @@ function handleTeachingProfileSync(req, res, url) {
   }).catch(error => sendError(res, error.statusCode || 400, error.message));
 }
 
+function handlePreview(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "GET") return sendError(res, 404, "preview endpoint not found");
+  const profile = publicTeachingProfile(getUserState(user).teachingProfile);
+  return sendJson(res, 200, {
+    updatedAt: profile.updatedAt,
+    preview: profile.preview,
+    previews: profile.previews
+  });
+}
+
 function handleAbilities(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "GET") return sendError(res, 404, "ability endpoint not found");
@@ -1297,6 +1308,7 @@ const server = http.createServer((req, res) => {
     return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, authRequired: true, aiGrading: aiConfigured(), time: new Date().toISOString() });
   }
   if (url.pathname === "/api/ai/options" && req.method === "GET") return user ? sendJson(res, 200, publicAiOptions(user)) : sendError(res, 401, "login required");
+  if (url.pathname === "/api/preview") return handlePreview(req, res, user);
   if (url.pathname === "/api/abilities") return handleAbilities(req, res, user);
   if (url.pathname === "/api/ai/grade") return handleAiGrade(req, res, user);
   if (url.pathname === "/api/ai/exams" || url.pathname.startsWith("/api/ai/exams/")) return handleAiExams(req, res, url, user);
