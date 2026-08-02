@@ -64,6 +64,7 @@ test("account store hashes passwords and assigns roles", () => {
 
 test("SSH-created account can log in and public registration is absent", async () => {
   const dataDir = temporaryDataDir();
+  fs.writeFileSync(path.join(dataDir, "content-store.json"), `${JSON.stringify({ updatedAt: "2026-08-01", words: [], sentences: [], deletedIds: [] })}\n`, "utf8");
   const cli = spawnSync(process.execPath, [path.join(ROOT, "server", "create-user.js"), "--username", "sshowner", "--password-stdin"], {
     cwd: ROOT,
     encoding: "utf8",
@@ -112,6 +113,7 @@ test("SSH-created account can log in and public registration is absent", async (
     assert.match(content.notes[2].review, /pen/);
     assert.equal(content.words.length, 22);
     assert.equal(content.sentences.length, 15);
+    assert.equal(content.updatedAt, "2026-08-02");
 
     const blockedSync = await fetch(`${baseUrl}/api/sync/profile?username=sshowner`);
     assert.equal(blockedSync.status, 401);

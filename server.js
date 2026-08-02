@@ -115,9 +115,10 @@ function mergeById(seedItems, storedItems) {
 function mergeContent(seed, stored) {
   const source = stored && typeof stored === "object" ? stored : {};
   const deletedIds = Array.isArray(source.deletedIds) ? Array.from(new Set(source.deletedIds.map(String))) : [];
+  const updatedAt = [seed.updatedAt, source.updatedAt].map(value => String(value || "")).filter(Boolean).sort().at(-1) || today();
   return {
     version: Math.max(Number(seed.version || 1), Number(source.version || 1)),
-    updatedAt: String(source.updatedAt || seed.updatedAt || today()),
+    updatedAt,
     currentDay: Math.max(Number(seed.currentDay || 0), Number(source.currentDay || 0)),
     words: mergeById(seed.words, source.words).filter(item => !deletedIds.includes(item.id)),
     sentences: mergeById(seed.sentences, source.sentences).filter(item => !deletedIds.includes(item.id)),
