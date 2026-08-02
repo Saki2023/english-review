@@ -219,6 +219,30 @@ function focusedEvidence(state) {
   };
 }
 
+function tutorEvidence(state) {
+  const practice = sanitizeAiPractice(state.aiPractice);
+  return practice.tutorHistory.map(item => ({
+    id: item.id,
+    setId: item.setId,
+    questionId: item.questionId,
+    historyId: item.historyId,
+    source: item.source,
+    direction: item.direction,
+    prompt: item.prompt,
+    learnerAnswer: item.learnerAnswer,
+    correctAnswer: item.answered ? item.correctAnswer : "",
+    answered: item.answered,
+    explanation: item.explanation,
+    learnerQuestion: item.question,
+    aiAnswer: item.answer,
+    askedAt: item.askedAt,
+    answeredAt: item.answeredAt,
+    providerName: item.providerName,
+    model: item.model,
+    reasoningEffort: item.reasoningEffort
+  }));
+}
+
 function buildLearningSyncProfile(content, state, user) {
   const aiPractice = sanitizeAiPractice(state.aiPractice);
   const aiHistory = aiPractice.history;
@@ -237,12 +261,13 @@ function buildLearningSyncProfile(content, state, user) {
   const abilities = analyzeAbilities(content, state);
   const dictation = dictationEvidence(state);
   const focused = focusedEvidence(state);
+  const tutorHistory = tutorEvidence(state);
   const dictationScores = dictation.sessions.map(session => session.percentage).filter(value => Number.isFinite(value));
   const dictationWrong = dictation.sessions.flatMap(session => session.items).filter(item => item.correct === false).length;
   const focusedWeakPoints = focused.sessions.flatMap(session => session.weakPoints);
 
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     generatedAt: new Date().toISOString(),
     user: { username: user.username, role: user.role },
     course: {
@@ -259,6 +284,7 @@ function buildLearningSyncProfile(content, state, user) {
       aiQuestions: aiHistory.length,
       aiCorrect,
       aiAccuracy: accuracy(aiCorrect, aiHistory.length),
+      tutorQuestions: tutorHistory.length,
       exams: examHistory.length,
       examAveragePercentage: examPercentages.length ? Math.round(examPercentages.reduce((sum, value) => sum + value, 0) / examPercentages.length) : null,
       latestExamScore: latestExam ? latestExam.score : null,
@@ -288,6 +314,7 @@ function buildLearningSyncProfile(content, state, user) {
     activity: {
       dailyReview: state.history && typeof state.history === "object" ? state.history : {},
       aiSets,
+      tutorQuestions: tutorHistory.map(item => ({ id: item.id, setId: item.setId, questionId: item.questionId, askedAt: item.askedAt })),
       exams: examHistory.map(exam => ({ id: exam.id, title: exam.title, submittedAt: exam.submittedAt, score: exam.score, possible: exam.possible, percentage: exam.percentage })),
       dictations: dictation.sessions.map(session => ({ id: session.id, completedAt: session.completedAt, score: session.score, possible: session.possible, percentage: session.percentage })),
       focusedSessions: focused.sessions.map(session => ({ id: session.id, focusedType: session.focusedType, completedAt: session.completedAt, levelScore: session.levelScore }))
@@ -296,6 +323,7 @@ function buildLearningSyncProfile(content, state, user) {
     abilities,
     localTeachingProfile: publicTeachingProfile(state.teachingProfile),
     aiHistory,
+    tutorHistory,
     examHistory,
     dictationHistory: dictation.sessions,
     dictationWeights: dictation.weights,
@@ -304,4 +332,4 @@ function buildLearningSyncProfile(content, state, user) {
   };
 }
 
-module.exports = { accuracy, aiWordSignals, buildLearningSyncProfile, dictationEvidence, examEvidence, focusedEvidence, summarizeAiSets };
+module.exports = { accuracy, aiWordSignals, buildLearningSyncProfile, dictationEvidence, examEvidence, focusedEvidence, summarizeAiSets, tutorEvidence };

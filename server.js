@@ -7,7 +7,7 @@ const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
 const { chineseAnswerMatches, englishAnswerMatches } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiQuestionGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
-const { MAX_AI_HISTORY, MAX_TUTOR_MESSAGES, buildLearningProfile, createQuestionSet, sanitizeAiPractice } = require("./server/ai-practice");
+const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, buildLearningProfile, createQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
 const { buildLearningSyncProfile } = require("./server/learning-sync");
 const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./server/learning-sync-token");
@@ -712,9 +712,8 @@ async function handleAiTutorAsk(req, res, user) {
     const requestedModel = availableModels.includes(contextModel) ? contextModel : aiSettings.defaultModel;
     const tutorEffort = AI_EFFORTS.includes(body.reasoningEffort) ? body.reasoningEffort : practice.tutorSettings.reasoningEffort;
     const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: tutorEffort });
-    const thread = practice.tutor && practice.tutor.setId === threadSetId && practice.tutor.questionId === threadQuestionId
-      ? practice.tutor
-      : { setId: threadSetId, questionId: threadQuestionId, messages: [] };
+    const thread = tutorThreadFromHistory(practice, threadSetId, threadQuestionId);
+    const askedAt = new Date().toISOString();
     const routed = await runAiRoute(route, config => createAiTutor(config).answer({
       exercise,
       history: thread.messages,
@@ -726,12 +725,34 @@ async function handleAiTutorAsk(req, res, user) {
       { role: "user", content: message, createdAt },
       { role: "assistant", content: routed.value, createdAt }
     ].slice(-MAX_TUTOR_MESSAGES);
+    const exchange = sanitizeTutorExchange({
+      id: `tutor-${crypto.randomUUID()}`,
+      setId: threadSetId,
+      questionId: threadQuestionId,
+      historyId: historyItem ? historyItem.id : "",
+      source: historyItem ? "history" : "current",
+      direction: exercise.direction,
+      prompt: historyItem ? historyItem.prompt : (exercise.direction === "en-zh" ? exercise.english : exercise.chinese),
+      learnerAnswer: exercise.learnerAnswer,
+      correctAnswer: exercise.answered ? (exercise.direction === "zh-en" ? exercise.english : exercise.chinese) : "",
+      answered: exercise.answered,
+      explanation: exercise.explanation,
+      question: message,
+      answer: routed.value,
+      askedAt,
+      answeredAt: createdAt,
+      providerId: routed.config.providerId,
+      providerName: routed.config.providerName,
+      model: routed.config.model,
+      reasoningEffort: route.reasoningEffort
+    });
+    practice.tutorHistory = [...practice.tutorHistory, exchange].filter(Boolean).slice(-MAX_TUTOR_HISTORY);
     practice.tutor = thread;
     practice.tutorSettings.reasoningEffort = route.reasoningEffort;
     practice.updatedAt = createdAt;
     state.aiPractice = practice;
     persistUserStates();
-    return sendJson(res, 200, { answer: routed.value, tutor: thread, tutorSettings: practice.tutorSettings, provider: { id: routed.config.providerId, name: routed.config.providerName } });
+    return sendJson(res, 200, { answer: routed.value, tutor: thread, exchange, tutorSettings: practice.tutorSettings, provider: { id: routed.config.providerId, name: routed.config.providerName } });
   } catch (error) {
     if (error && [400, 404, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI tutoring failed: ${error && error.message ? error.message : "unknown error"}`);

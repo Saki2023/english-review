@@ -10,6 +10,7 @@ const { sanitizeFocusedState } = require("./focused-practice");
 const MAX_AI_HISTORY = 1000;
 const MAX_QUESTION_COUNT = 10;
 const MAX_TUTOR_MESSAGES = 12;
+const MAX_TUTOR_HISTORY = 1000;
 const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 function cleanText(value, maximum = 300) {
@@ -38,6 +39,59 @@ function sanitizeTutorThread(value) {
     questionId,
     messages: (Array.isArray(value.messages) ? value.messages : []).map(sanitizeTutorMessage).filter(Boolean).slice(-MAX_TUTOR_MESSAGES)
   };
+}
+
+function sanitizeTutorExchange(value) {
+  if (!value || typeof value !== "object") return null;
+  const setId = cleanText(value.setId, 80);
+  const questionId = cleanText(value.questionId, 80);
+  const question = cleanText(value.question, 500);
+  const answer = cleanText(value.answer, 1200);
+  if (!setId || !questionId || !question || !answer) return null;
+  const askedAt = cleanText(value.askedAt, 40);
+  return {
+    id: cleanText(value.id, 180) || `tutor-${crypto.randomUUID()}`,
+    setId,
+    questionId,
+    historyId: cleanText(value.historyId, 180),
+    source: value.source === "history" ? "history" : "current",
+    direction: ["en-zh", "zh-en"].includes(value.direction) ? value.direction : "",
+    prompt: cleanText(value.prompt, 300),
+    learnerAnswer: cleanText(value.learnerAnswer, 500),
+    correctAnswer: cleanText(value.correctAnswer, 300),
+    answered: Boolean(value.answered),
+    explanation: cleanText(value.explanation, 180),
+    question,
+    answer,
+    askedAt,
+    answeredAt: cleanText(value.answeredAt, 40) || askedAt,
+    providerId: cleanText(value.providerId, 64),
+    providerName: cleanText(value.providerName, 60),
+    model: cleanText(value.model, 120),
+    reasoningEffort: AI_EFFORTS.includes(value.reasoningEffort) ? value.reasoningEffort : ""
+  };
+}
+
+function legacyTutorHistory(tutor) {
+  if (!tutor) return [];
+  const exchanges = [];
+  for (let index = 0; index < tutor.messages.length - 1; index += 1) {
+    const question = tutor.messages[index];
+    const answer = tutor.messages[index + 1];
+    if (question.role !== "user" || answer.role !== "assistant") continue;
+    const exchange = sanitizeTutorExchange({
+      id: `legacy-${tutor.setId}-${tutor.questionId}-${index}`,
+      setId: tutor.setId,
+      questionId: tutor.questionId,
+      question: question.content,
+      answer: answer.content,
+      askedAt: question.createdAt,
+      answeredAt: answer.createdAt
+    });
+    if (exchange) exchanges.push(exchange);
+    index += 1;
+  }
+  return exchanges;
 }
 
 function sanitizeQuestion(value) {
@@ -113,6 +167,8 @@ function sanitizeAiPractice(value) {
   const source = value && typeof value === "object" ? value : {};
   const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
   const tutorSettings = source.tutorSettings && typeof source.tutorSettings === "object" ? source.tutorSettings : {};
+  const tutor = sanitizeTutorThread(source.tutor);
+  const savedTutorHistory = (Array.isArray(source.tutorHistory) ? source.tutorHistory : []).map(sanitizeTutorExchange).filter(Boolean);
   return {
     settings: {
       model: cleanText(settings.model, 120),
@@ -123,10 +179,22 @@ function sanitizeAiPractice(value) {
       reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
     },
     currentSet: sanitizeQuestionSet(source.currentSet),
-    tutor: sanitizeTutorThread(source.tutor),
+    tutor,
+    tutorHistory: (savedTutorHistory.length ? savedTutorHistory : legacyTutorHistory(tutor)).slice(-MAX_TUTOR_HISTORY),
     history: (Array.isArray(source.history) ? source.history : []).map(sanitizeHistoryItem).slice(-MAX_AI_HISTORY),
     updatedAt: cleanText(source.updatedAt, 40)
   };
+}
+
+function tutorThreadFromHistory(value, setId, questionId) {
+  const practice = sanitizeAiPractice(value);
+  const messages = practice.tutorHistory.filter(item => item.setId === setId && item.questionId === questionId).flatMap(item => [
+    { role: "user", content: item.question, createdAt: item.askedAt },
+    { role: "assistant", content: item.answer, createdAt: item.answeredAt }
+  ]).slice(-MAX_TUTOR_MESSAGES);
+  if (messages.length) return { setId, questionId, messages };
+  if (practice.tutor && practice.tutor.setId === setId && practice.tutor.questionId === questionId) return practice.tutor;
+  return { setId, questionId, messages: [] };
 }
 
 function taskItem(content, taskId) {
@@ -237,12 +305,15 @@ function createQuestionSet(questions, selection) {
 
 module.exports = {
   MAX_AI_HISTORY,
+  MAX_TUTOR_HISTORY,
   MAX_TUTOR_MESSAGES,
   buildLearningProfile,
   createQuestionSet,
   sanitizeAiPractice,
   sanitizeQuestion,
   sanitizeQuestionSet,
+  sanitizeTutorExchange,
   sanitizeTutorThread,
-  taskItem
+  taskItem,
+  tutorThreadFromHistory
 };

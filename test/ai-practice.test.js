@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { buildLearningProfile, createQuestionSet, sanitizeAiPractice } = require("../server/ai-practice");
+const { buildLearningProfile, createQuestionSet, sanitizeAiPractice, tutorThreadFromHistory } = require("../server/ai-practice");
 
 test("learning profile prioritizes weak learned content and excludes future lessons", () => {
   const content = {
@@ -51,7 +51,21 @@ test("AI practice state keeps a bounded question set and per-account settings", 
   assert.equal(practice.currentSet.providerName, "NewAPI");
   assert.equal(practice.tutor.messages.length, 12);
   assert.equal(practice.tutor.messages[0].content, "message-2");
+  assert.equal(practice.tutorHistory.length, 6);
+  assert.equal(practice.tutorHistory[0].question, "message-2");
   assert.equal(sanitizeAiPractice({ settings: { reasoningEffort: "max" } }).tutorSettings.reasoningEffort, "medium");
+});
+
+test("AI tutor keeps separate persistent histories for every exercise", () => {
+  const practice = sanitizeAiPractice({ tutorHistory: [
+    { id: "ask-1", setId: "set-a", questionId: "question-a", prompt: "cat", question: "为什么是猫？", answer: "cat 的意思是猫。", askedAt: "2026-08-02T10:00:00Z" },
+    { id: "ask-2", setId: "set-b", questionId: "question-b", prompt: "mat", question: "mat 是什么？", answer: "mat 表示垫子。", askedAt: "2026-08-02T10:01:00Z" },
+    { id: "ask-3", setId: "set-a", questionId: "question-a", prompt: "cat", question: "怎么发音？", answer: "可以先记住 /kæt/。", askedAt: "2026-08-02T10:02:00Z" }
+  ] });
+
+  assert.equal(practice.tutorHistory.length, 3);
+  assert.deepEqual(tutorThreadFromHistory(practice, "set-a", "question-a").messages.map(item => item.content), ["为什么是猫？", "cat 的意思是猫。", "怎么发音？", "可以先记住 /kæt/。"]);
+  assert.deepEqual(tutorThreadFromHistory(practice, "set-b", "question-b").messages.map(item => item.content), ["mat 是什么？", "mat 表示垫子。"]);
 });
 
 test("legacy AI history gains set metadata without exposing old focus hints", () => {
@@ -83,4 +97,17 @@ test("AI question history retains the latest one thousand answers", () => {
   const practice = sanitizeAiPractice({ history });
   assert.equal(practice.history.length, 1000);
   assert.equal(practice.history[0].id, "set-2:question-2");
+});
+
+test("AI tutor history retains the latest one thousand questions", () => {
+  const tutorHistory = Array.from({ length: 1002 }, (_, index) => ({
+    id: `ask-${index}`,
+    setId: `set-${index}`,
+    questionId: `question-${index}`,
+    question: `question ${index}`,
+    answer: `answer ${index}`
+  }));
+  const practice = sanitizeAiPractice({ tutorHistory });
+  assert.equal(practice.tutorHistory.length, 1000);
+  assert.equal(practice.tutorHistory[0].id, "ask-2");
 });

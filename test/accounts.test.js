@@ -128,20 +128,20 @@ test("SSH-created account can log in and public registration is absent", async (
 
     const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
     assert.doesNotMatch(html, /data-auth-mode|confirmPasswordWrap|>注册</);
-    assert.match(html, /app\.js\?v=19/);
+    assert.match(html, /app\.js\?v=20/);
     assert.match(html, /data-view="notes"/);
     assert.match(html, /id="aiTutorWindow"/);
     assert.match(html, /id="aiHistoryList"/);
     assert.doesNotMatch(html, /\?v=(?:[7-9]|1[0-4])(?:\D|$)/);
 
-    const appResponse = await fetch(`${baseUrl}/app.js?v=19`);
+    const appResponse = await fetch(`${baseUrl}/app.js?v=20`);
     assert.equal(appResponse.status, 200);
     assert.equal(appResponse.headers.get("cache-control"), "no-cache");
 
     const appSource = await appResponse.text();
     assert.match(appSource, /nextButton"\)\.focus\(\{ preventScroll: true \}\)/);
     assert.match(appSource, /nextAiQuestion"\)\.addEventListener\("keydown"/);
-    assert.match(appSource, /sw\.js\?v=19/);
+    assert.match(appSource, /sw\.js\?v=20/);
     assert.match(appSource, /api\/admin\/ai-config\/models/);
     assert.match(appSource, /api\/ai\/questions\/ask/);
     assert.match(appSource, /function renderAiHistory/);

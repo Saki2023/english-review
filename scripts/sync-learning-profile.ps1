@@ -93,6 +93,7 @@ $json = $profile | ConvertTo-Json -Depth 40
 
 Write-Host "学习档案已同步：$OutputPath"
 Write-Host "网站 AI 做题：$($profile.summary.aiQuestions) 题，正确率 $($profile.summary.aiAccuracy)%"
+Write-Host "网站 AI 问答：$($profile.summary.tutorQuestions) 次"
 if ($profile.summary.exams -gt 0) {
   Write-Host "网站试卷：$($profile.summary.exams) 份，最近 $($profile.summary.latestExamScore)/$($profile.summary.latestExamPossible) 分，平均百分比 $($profile.summary.examAveragePercentage)%"
 } else {

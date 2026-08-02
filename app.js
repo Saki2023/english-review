@@ -8,6 +8,7 @@
   const INTERVALS = [1, 3, 7, 14, 30, 60];
   const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
   const AI_EFFORT_LABELS = { low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高" };
+  const MAX_CLIENT_TUTOR_HISTORY = 1000;
   const FOCUSED_TYPE_LABELS = { listening: "听力", choice: "选择", "fill-blank": "填空", "true-false": "判断", translation: "翻译", cloze: "完形填空", reading: "材料题", essay: "作文" };
   const DEFAULT_AI_TIMEOUT_MS = 30000;
   const AI_CLIENT_TIMEOUT_MS = 125000;
@@ -99,6 +100,36 @@
     return { setId, questionId, messages };
   }
 
+  function normalizeClientTutorExchange(value) {
+    if (!value || typeof value !== "object") return null;
+    const setId = String(value.setId || "").slice(0, 80);
+    const questionId = String(value.questionId || "").slice(0, 80);
+    const question = String(value.question || "").trim().slice(0, 500);
+    const answer = String(value.answer || "").trim().slice(0, 1200);
+    if (!setId || !questionId || !question || !answer) return null;
+    return {
+      id: String(value.id || `${setId}:${questionId}:${value.askedAt || ""}`).slice(0, 180),
+      setId,
+      questionId,
+      historyId: String(value.historyId || "").slice(0, 180),
+      source: value.source === "history" ? "history" : "current",
+      direction: ["en-zh", "zh-en"].includes(value.direction) ? value.direction : "",
+      prompt: String(value.prompt || "").slice(0, 300),
+      learnerAnswer: String(value.learnerAnswer || "").slice(0, 500),
+      correctAnswer: String(value.correctAnswer || "").slice(0, 300),
+      answered: Boolean(value.answered),
+      explanation: String(value.explanation || "").slice(0, 180),
+      question,
+      answer,
+      askedAt: String(value.askedAt || "").slice(0, 40),
+      answeredAt: String(value.answeredAt || value.askedAt || "").slice(0, 40),
+      providerId: String(value.providerId || "").slice(0, 64),
+      providerName: String(value.providerName || "").slice(0, 60),
+      model: String(value.model || "").slice(0, 120),
+      reasoningEffort: AI_EFFORTS.includes(value.reasoningEffort) ? value.reasoningEffort : ""
+    };
+  }
+
   function normalizeClientAiPractice(value) {
     const source = value && typeof value === "object" ? value : {};
     const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
@@ -114,6 +145,7 @@
       },
       currentSet: source.currentSet && Array.isArray(source.currentSet.questions) ? source.currentSet : null,
       tutor: normalizeClientTutor(source.tutor),
+      tutorHistory: (Array.isArray(source.tutorHistory) ? source.tutorHistory : []).map(normalizeClientTutorExchange).filter(Boolean).slice(-MAX_CLIENT_TUTOR_HISTORY),
       history: Array.isArray(source.history) ? source.history.slice(-1000) : [],
       updatedAt: String(source.updatedAt || "")
     };
@@ -1152,6 +1184,12 @@
 
   function tutorThreadForTarget(practice, target) {
     const tutor = normalizeClientTutor(practice.tutor);
+    if (aiTutorRequestInProgress && tutor && tutor.setId === target.setId && tutor.questionId === target.questionId) return tutor;
+    const messages = practice.tutorHistory.filter(item => item.setId === target.setId && item.questionId === target.questionId).flatMap(item => [
+      { role: "user", content: item.question, createdAt: item.askedAt },
+      { role: "assistant", content: item.answer, createdAt: item.answeredAt }
+    ]);
+    if (messages.length) return { setId: target.setId, questionId: target.questionId, messages };
     if (tutor && tutor.setId === target.setId && tutor.questionId === target.questionId) return tutor;
     return { setId: target.setId, questionId: target.questionId, messages: [] };
   }
@@ -1252,6 +1290,8 @@
   function clearAiTutor() {
     if (aiTutorRequestInProgress) return;
     const practice = normalizeClientAiPractice(model.aiPractice);
+    const target = resolveAiTutorTarget(practice);
+    if (target) practice.tutorHistory = practice.tutorHistory.filter(item => item.setId !== target.setId || item.questionId !== target.questionId);
     practice.tutor = null;
     practice.updatedAt = new Date().toISOString();
     model.aiPractice = practice;
@@ -1298,6 +1338,8 @@
       }));
       const next = normalizeClientAiPractice(model.aiPractice);
       next.tutor = normalizeClientTutor(data.tutor);
+      const exchange = normalizeClientTutorExchange(data.exchange);
+      if (exchange) next.tutorHistory = [...next.tutorHistory.filter(item => item.id !== exchange.id), exchange].slice(-MAX_CLIENT_TUTOR_HISTORY);
       next.tutorSettings = normalizeClientAiPractice({ tutorSettings: data.tutorSettings }).tutorSettings;
       next.updatedAt = new Date().toISOString();
       model.aiPractice = next;
@@ -3087,7 +3129,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=19").catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=20").catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

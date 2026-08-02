@@ -19,6 +19,9 @@ test("AI tutor Enter handling is wired to form submission", () => {
   assert.match(app, /message,\s*reasoningEffort: practice\.tutorSettings\.reasoningEffort/s);
   assert.match(app, /data-ai-history-ask/);
   assert.match(app, /const available = aiOptions\.configured && target/);
+  assert.match(app, /tutorHistory: \(Array\.isArray\(source\.tutorHistory\)/);
+  assert.match(app, /practice\.tutorHistory\.filter\(item => item\.setId === target\.setId && item\.questionId === target\.questionId\)/);
+  assert.match(app, /normalizeClientTutorExchange\(data\.exchange\)/);
 });
 
 test("AI settings UI manages providers and exposes manual or automatic routing", () => {
@@ -85,7 +88,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use cache version 19", () => {
+test("PWA client assets consistently use cache version 20", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -93,6 +96,6 @@ test("PWA client assets consistently use cache version 19", () => {
   const versions = Array.from(versionedSources.matchAll(/\?v=(\d+)/g), match => match[1]);
 
   assert.ok(versions.length > 0);
-  assert.deepEqual(new Set(versions), new Set(["19"]));
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v19"/);
+  assert.deepEqual(new Set(versions), new Set(["20"]));
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v20"/);
 });

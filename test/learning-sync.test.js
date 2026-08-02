@@ -32,6 +32,21 @@ test("learning sync profile combines review and AI evidence without account secr
       correctAnswer: "一只猫坐在垫子上",
       correct: false,
       explanation: "cat 需要再复习。"
+    }], tutorHistory: [{
+      id: "tutor-1",
+      setId: "aiset-1",
+      questionId: "aiq-1",
+      historyId: "aiset-1:aiq-1",
+      source: "history",
+      direction: "en-zh",
+      prompt: "A cat sat on a mat.",
+      learnerAnswer: "一只狗坐在垫子上",
+      correctAnswer: "一只猫坐在垫子上",
+      answered: true,
+      question: "为什么这里是 cat？",
+      answer: "因为 cat 表示猫。",
+      askedAt: "2026-08-01T10:02:00.000Z",
+      answeredAt: "2026-08-01T10:02:01.000Z"
     }] }
   };
   const profile = buildLearningSyncProfile(content, state, { username: "learner", role: "admin", passwordHash: "never-return-this" });
@@ -40,6 +55,7 @@ test("learning sync profile combines review and AI evidence without account secr
   assert.equal(profile.summary.reviewAccuracy, 50);
   assert.equal(profile.summary.aiQuestions, 1);
   assert.equal(profile.summary.aiAccuracy, 0);
+  assert.equal(profile.summary.tutorQuestions, 1);
   assert.equal(profile.summary.weakItems, 2);
   assert.equal(profile.summary.strongItems, 0);
   assert.equal(profile.weakPoints.aiWordSignals[0].english, "cat");
@@ -47,6 +63,9 @@ test("learning sync profile combines review and AI evidence without account secr
   assert.equal(profile.weakPoints.reviewItems[0].aiEvidence.attempts, 1);
   assert.equal(profile.activity.aiSets[0].completed, true);
   assert.equal(profile.aiHistory[0].model, "test-model");
+  assert.equal(profile.tutorHistory[0].learnerQuestion, "为什么这里是 cat？");
+  assert.equal(profile.tutorHistory[0].aiAnswer, "因为 cat 表示猫。");
+  assert.equal(profile.activity.tutorQuestions[0].id, "tutor-1");
   assert.equal(Object.hasOwn(profile.user, "passwordHash"), false);
   assert.equal(JSON.stringify(profile).includes("never-return-this"), false);
 });
@@ -91,7 +110,7 @@ test("learning sync includes normalized exam scores and weakness evidence withou
   };
   const profile = buildLearningSyncProfile({ currentDay: 2, words: [], sentences: [] }, state, { username: "learner", role: "member" });
 
-  assert.equal(profile.schemaVersion, 3);
+  assert.equal(profile.schemaVersion, 4);
   assert.equal(profile.summary.exams, 1);
   assert.equal(profile.summary.latestExamScore, 0);
   assert.equal(profile.summary.latestExamPossible, 150);

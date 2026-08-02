@@ -380,6 +380,8 @@ test("admin configures AI on the web and progress-based questions use the select
     const tutorBody = await tutorResponse.json();
     assert.equal(tutorBody.answer, "先看句子的主语和位置词，再自己试一次。");
     assert.equal(tutorBody.tutor.messages.length, 2);
+    assert.equal(tutorBody.exchange.question, "这个句子应该先看哪里？");
+    assert.equal(tutorBody.exchange.historyId, questionResult.practice.history[0].id);
     assert.deepEqual(tutorBody.tutorSettings, { reasoningEffort: "low" });
     assert.equal(providerRequests.length, 5);
     assert.equal(providerRequests[4].body.reasoning_effort, "low");
@@ -391,6 +393,9 @@ test("admin configures AI on the web and progress-based questions use the select
     const stateAfterTutor = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
     assert.equal(stateAfterTutor.aiPractice.settings.reasoningEffort, "high");
     assert.equal(stateAfterTutor.aiPractice.tutorSettings.reasoningEffort, "low");
+    assert.equal(stateAfterTutor.aiPractice.tutorHistory.length, 1);
+    assert.equal(stateAfterTutor.aiPractice.tutorHistory[0].question, "这个句子应该先看哪里？");
+    assert.equal(stateAfterTutor.aiPractice.tutorHistory[0].answer, "先看句子的主语和位置词，再自己试一次。");
 
     const unavailableGeneration = await fetch(`${baseUrl}/api/ai/questions/generate`, {
       method: "POST",
@@ -409,6 +414,7 @@ test("admin configures AI on the web and progress-based questions use the select
     const memberState = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": memberCookie } })).json();
     assert.equal(memberState.aiPractice.currentSet, null);
     assert.equal(memberState.aiPractice.tutor, null);
+    assert.deepEqual(memberState.aiPractice.tutorHistory, []);
     assert.deepEqual(memberState.aiPractice.history, []);
     const memberOptions = await (await fetch(`${baseUrl}/api/ai/options`, { headers: { "Cookie": memberCookie } })).json();
     assert.equal(memberOptions.selectedModel, "test-model");
