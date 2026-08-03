@@ -4,7 +4,7 @@
   const DATA = window.ENGLISH_REVIEW_DATA;
   const PRONUNCIATION = window.ENGLISH_PRONUNCIATION_DATA || { concepts: [], phonemes: [] };
   const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, sanitizeGeneratedSentenceVariant: () => null };
-  const { buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, isReviewEligibleItem, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
+  const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const STORAGE_KEY = "daily-english-review-v1";
   const EXAM_GENERATION_API_VERSION = "2";
   const DAILY_TARGET = 10;
@@ -45,7 +45,7 @@
   let aiTutorLaunchSuppressClickUntil = 0;
   let aiTutorTarget = null;
   let aiStatusMessage = "";
-  let aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
+  let aiOptions = { configured: false, models: [], providers: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
   let aiOptionsLoaded = false;
   let aiConfigDraft = null;
   let activeAiProviderId = "";
@@ -182,6 +182,7 @@
         count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
       },
       tutorSettings: {
+        providerId: String(tutorSettings.providerId || ""),
         model: String(tutorSettings.model || ""),
         reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
       },
@@ -1179,17 +1180,54 @@
     saveModel();
   }
 
+  function availableAiTutorProviders() {
+    return (Array.isArray(aiOptions.providers) ? aiOptions.providers : []).filter(provider => provider && provider.enabled && provider.id && Array.isArray(provider.models) && provider.models.length);
+  }
+
+  function selectedAiTutorProvider(practice = normalizeClientAiPractice(model.aiPractice)) {
+    const providers = availableAiTutorProviders();
+    return providers.find(provider => provider.id === practice.tutorSettings.providerId)
+      || providers.find(provider => provider.id === aiOptions.selectedTutorProviderId)
+      || providers[0]
+      || null;
+  }
+
+  function selectedAiTutorModel(practice = normalizeClientAiPractice(model.aiPractice), provider = selectedAiTutorProvider(practice)) {
+    if (!provider) return "";
+    return provider.models.includes(practice.tutorSettings.model)
+      ? practice.tutorSettings.model
+      : provider.models.includes(aiOptions.selectedTutorModel)
+        ? aiOptions.selectedTutorModel
+        : provider.models[0] || "";
+  }
+
+  function populateAiTutorProviderSelect(practice = normalizeClientAiPractice(model.aiPractice)) {
+    const select = $("#aiTutorProvider");
+    const providers = availableAiTutorProviders();
+    const selected = selectedAiTutorProvider(practice);
+    select.replaceChildren(...providers.map(provider => {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.name;
+      return option;
+    }));
+    if (selected) select.value = selected.id;
+    select.disabled = aiTutorRequestInProgress || !aiOptions.configured || !providers.length;
+  }
+
   function populateAiTutorModelSelect(practice = normalizeClientAiPractice(model.aiPractice)) {
     const select = $("#aiTutorModel");
-    const selected = aiOptions.models.includes(practice.tutorSettings.model) ? practice.tutorSettings.model : aiOptions.defaultModel;
-    select.replaceChildren(...aiOptions.models.map(modelName => {
+    const provider = selectedAiTutorProvider(practice);
+    const models = provider ? provider.models : [];
+    const selected = selectedAiTutorModel(practice, provider);
+    select.replaceChildren(...models.map(modelName => {
       const option = document.createElement("option");
       option.value = modelName;
       option.textContent = modelName;
       return option;
     }));
     if (selected) select.value = selected;
-    select.disabled = aiTutorRequestInProgress || !aiOptions.configured || !aiOptions.models.length;
+    select.disabled = aiTutorRequestInProgress || !aiOptions.configured || !models.length;
   }
 
   function populateAiModelSelect() {
@@ -1216,7 +1254,7 @@
   async function loadAiOptions() {
     aiStatusMessage = "";
     if (!API_ENABLED) {
-      aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
+      aiOptions = { configured: false, models: [], providers: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
       aiOptionsLoaded = true;
       renderAiView();
       return;
@@ -1225,15 +1263,27 @@
       const response = await fetch("/api/ai/options", { credentials: "same-origin", cache: "no-store" });
       if (!response.ok) throw new Error("AI options request failed");
       aiOptions = await response.json();
+      aiOptions.providers = (Array.isArray(aiOptions.providers) ? aiOptions.providers : []).map(provider => ({
+        id: String(provider && provider.id || ""),
+        name: String(provider && provider.name || "AI 供应商"),
+        enabled: Boolean(provider && provider.enabled),
+        models: Array.from(new Set((Array.isArray(provider && provider.models) ? provider.models : []).map(value => String(value || "").trim()).filter(Boolean)))
+      })).filter(provider => provider.id);
       const practice = normalizeClientAiPractice(model.aiPractice);
       if (!aiOptions.models.includes(practice.settings.model)) practice.settings.model = aiOptions.selectedModel || aiOptions.defaultModel || "";
-      if (!aiOptions.models.includes(practice.tutorSettings.model)) practice.tutorSettings.model = aiOptions.selectedTutorModel || aiOptions.defaultModel || "";
+      const tutorProvider = availableAiTutorProviders().find(provider => provider.id === practice.tutorSettings.providerId)
+        || availableAiTutorProviders().find(provider => provider.id === aiOptions.selectedTutorProviderId)
+        || availableAiTutorProviders()[0];
+      practice.tutorSettings.providerId = tutorProvider ? tutorProvider.id : "";
+      if (tutorProvider && !tutorProvider.models.includes(practice.tutorSettings.model)) {
+        practice.tutorSettings.model = tutorProvider.models.includes(aiOptions.selectedTutorModel) ? aiOptions.selectedTutorModel : tutorProvider.models[0] || "";
+      }
       if (AI_EFFORTS.includes(aiOptions.selectedEffort) && !practice.updatedAt) practice.settings.reasoningEffort = aiOptions.selectedEffort;
       if (AI_EFFORTS.includes(aiOptions.selectedTutorEffort) && !practice.updatedAt) practice.tutorSettings.reasoningEffort = aiOptions.selectedTutorEffort;
       if ([5, 10].includes(Number(aiOptions.selectedCount)) && !practice.updatedAt) practice.settings.count = Number(aiOptions.selectedCount);
       model.aiPractice = practice;
     } catch (_) {
-      aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: Boolean(currentUser && currentUser.role === "admin") };
+      aiOptions = { configured: false, models: [], providers: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: Boolean(currentUser && currentUser.role === "admin") };
     }
     aiOptionsLoaded = true;
     populateAiModelSelect();
@@ -1363,6 +1413,7 @@
     aiTutorTarget = target;
     $("#aiTutorTitle").textContent = target.kind === "history" ? "历史题问答" : "题目问答";
     $("#aiTutorContext").textContent = target.prompt;
+    populateAiTutorProviderSelect(practice);
     populateAiTutorModelSelect(practice);
     $("#aiTutorEffort").value = practice.tutorSettings.reasoningEffort;
     const thread = tutorThreadForTarget(practice, target);
@@ -1389,7 +1440,8 @@
       requestAnimationFrame(() => { messageList.scrollTop = messageList.scrollHeight; });
     }
     $("#clearAiTutorButton").disabled = aiTutorRequestInProgress || !thread.messages.length;
-    $("#aiTutorModel").disabled = aiTutorRequestInProgress || !aiOptions.models.length;
+    $("#aiTutorProvider").disabled = aiTutorRequestInProgress || !availableAiTutorProviders().length;
+    $("#aiTutorModel").disabled = aiTutorRequestInProgress || !selectedAiTutorProvider(practice);
     $("#aiTutorEffort").disabled = aiTutorRequestInProgress;
     $("#aiTutorInput").disabled = aiTutorRequestInProgress;
     $("#sendAiTutorButton").disabled = aiTutorRequestInProgress;
@@ -1515,6 +1567,7 @@
           questionId: target.questionId,
           historyId: target.historyId,
           message,
+          providerId: practice.tutorSettings.providerId,
           model: practice.tutorSettings.model,
           reasoningEffort: practice.tutorSettings.reasoningEffort
         })
@@ -3519,6 +3572,7 @@
     const reviewVariant = task.reviewVariant ? { ...task.reviewVariant } : null;
     model.attempts.push({ taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, answer, correct, score: grading.score, gradingStatus: grading.gradingStatus, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation, problemWords: grading.problemWords, wordResults: grading.wordResults });
     if (!correct) model.mistakes = [...(model.mistakes || []), { id: `attempt-${Date.now()}`, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, day: task.item.day, prompt: task.direction === "en-zh" ? task.item.english : task.item.chinese, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: grading.explanation || "本次复习未答对。" }].slice(-80);
+    else model.mistakes = (model.mistakes || []).filter(mistake => !mistakeIsResolved(model.attempts, mistake && mistake.taskId));
     const session = getSession();
     session.currentTaskId = task.taskId;
     session.doneTaskIds = Array.from(new Set([...(session.doneTaskIds || []), task.taskId]));
@@ -3588,13 +3642,13 @@
     const search = normalizeChinese($("#librarySearch").value || "");
     const day = $("#dayFilter").value;
     const items = allItems.filter(item => item.type === libraryType && (day === "all" || String(item.day) === day) && (!search || normalizeChinese(`${item.english}${item.chinese}`).includes(search) || normalizeEnglish(`${item.english}`).includes(normalizeEnglish(search))));
-    $("#libraryHead").innerHTML = libraryType === "word" ? "<tr><th>单词</th><th>发音</th><th>中文</th><th>学习日</th><th></th></tr>" : "<tr><th>句子</th><th>中文</th><th>学习日</th><th></th></tr>";
-    $("#libraryBody").innerHTML = items.map(item => {
+    $("#libraryHead").innerHTML = libraryType === "word" ? "<tr><th class=\"sequence-cell\">序号</th><th>单词</th><th>发音</th><th>中文</th><th>学习日</th><th></th></tr>" : "<tr><th class=\"sequence-cell\">序号</th><th>句子</th><th>中文</th><th>学习日</th><th></th></tr>";
+    $("#libraryBody").innerHTML = items.map((item, index) => {
       const action = item.preview ? '<span class="type-badge">预习</span>' : `<button class="table-action" type="button" data-practice="${item.id}">练习</button>`;
       const dayLabel = item.preview ? `第 ${item.day} 天预习` : `第 ${item.day} 天`;
       return libraryType === "word"
-        ? `<tr><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, `播放 ${item.english} 的发音`)}</span></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">${dayLabel}</td><td>${action}</td></tr>`
-        : `<tr><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, "播放句子发音")}</span></td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">${dayLabel}</td><td>${action}</td></tr>`;
+        ? `<tr><td class="sequence-cell">${index + 1}</td><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, `播放 ${item.english} 的发音`)}</span></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">${dayLabel}</td><td>${action}</td></tr>`
+        : `<tr><td class="sequence-cell">${index + 1}</td><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, "播放句子发音")}</span></td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">${dayLabel}</td><td>${action}</td></tr>`;
     }).join("");
     $("#libraryEmpty").hidden = items.length > 0;
     $$('[data-practice]').forEach(button => button.addEventListener("click", () => practiceTask(`${button.dataset.practice}:en-zh`)));
@@ -3851,13 +3905,19 @@
   function mistakeRows() {
     const seeded = DATA.seedMistakes.map(item => ({ ...item, seeded: true }));
     const dynamic = (model.mistakes || []).map(item => ({ ...item, seeded: false }));
-    return [...dynamic.reverse(), ...seeded];
+    const seen = new Set();
+    return [...dynamic.reverse(), ...seeded].filter(row => {
+      if (!row.taskId || seen.has(row.taskId) || mistakeIsResolved(model.attempts, row.taskId)) return false;
+      seen.add(row.taskId);
+      row.correctStreak = mistakeCorrectStreak(model.attempts, row.taskId);
+      return true;
+    });
   }
 
   function renderMistakes() {
     const rows = mistakeRows();
     $("#mistakeCount").textContent = `${rows.length} 条`;
-    $("#mistakeBody").innerHTML = rows.map(row => `<tr><td>${escapeHtml(row.prompt)}</td><td>${escapeHtml(row.userAnswer)}</td><td>${escapeHtml(row.correctAnswer)}</td><td class="day-cell">第 ${row.day} 天</td><td><button class="table-action" type="button" data-mistake-task="${escapeHtml(row.taskId)}">再练</button></td></tr>`).join("");
+    $("#mistakeBody").innerHTML = rows.map(row => `<tr><td>${escapeHtml(row.prompt)}</td><td>${escapeHtml(row.userAnswer)}</td><td>${escapeHtml(row.correctAnswer)}</td><td class="day-cell">第 ${row.day} 天</td><td><span class="mistake-resolution-progress">连续答对 ${row.correctStreak}/${MISTAKE_AUTO_RESOLVE_STREAK}</span></td><td><button class="table-action" type="button" data-mistake-task="${escapeHtml(row.taskId)}">再练</button></td></tr>`).join("");
     $("#mistakeEmpty").hidden = rows.length > 0;
     $$('[data-mistake-task]').forEach(button => button.addEventListener("click", () => practiceMistakeQueue(button.dataset.mistakeTask)));
   }
@@ -3964,6 +4024,14 @@
     $("#minimizeAiTutorButton").addEventListener("click", toggleAiTutorMinimize);
     $("#maximizeAiTutorButton").addEventListener("click", toggleAiTutorMaximize);
     $("#clearAiTutorButton").addEventListener("click", clearAiTutor);
+    $("#aiTutorProvider").addEventListener("change", event => {
+      const provider = availableAiTutorProviders().find(item => item.id === event.target.value);
+      if (!provider) return;
+      const practice = normalizeClientAiPractice(model.aiPractice);
+      const modelName = provider.models.includes(practice.tutorSettings.model) ? practice.tutorSettings.model : provider.models[0] || "";
+      updateAiTutorPreferences({ providerId: provider.id, model: modelName });
+      renderAiTutorWindow();
+    });
     $("#aiTutorModel").addEventListener("change", event => {
       updateAiTutorPreferences({ model: event.target.value });
       renderAiTutorWindow();
@@ -4088,7 +4156,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=32", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=33", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

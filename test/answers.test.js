@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
+const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
 
 test("today review accepts only formally learned content", () => {
   const today = "2026-08-03";
@@ -109,6 +109,33 @@ test("mistake practice starts at the selected row and continues through unique m
   ]);
   assert.deepEqual(buildMistakePracticeQueue(rows, "unknown", valid), []);
   assert.deepEqual(buildMistakePracticeQueue(rows, "sentence-a:en-zh", []), []);
+});
+
+test("ordinary review automatically resolves a mistake after two fully correct answers and reopens it after another error", () => {
+  const taskId = "cat:en-zh";
+  const wrong = { taskId, answer: "狗", correct: false, score: 0, gradingStatus: "incorrect" };
+  const correct = { taskId, answer: "猫", correct: true, score: 1, gradingStatus: "correct" };
+  const partial = { taskId, answer: "一只猫", correct: true, score: 0.8, gradingStatus: "partial" };
+
+  assert.equal(MISTAKE_AUTO_RESOLVE_STREAK, 2);
+  assert.equal(mistakeCorrectStreak([wrong, correct], taskId), 1);
+  assert.equal(mistakeIsResolved([wrong, correct], taskId), false);
+  assert.equal(mistakeCorrectStreak([wrong, correct, partial], taskId), 0, "partial credit must not count as fully correct");
+  assert.equal(mistakeIsResolved([wrong, correct, correct], taskId), true);
+  assert.equal(mistakeIsResolved([wrong, correct, correct, wrong], taskId), false, "a later error must reopen the mistake");
+
+  const content = { words: [{ id: "cat", day: 1, english: "cat", chinese: "猫", directions: ["en-zh"] }], sentences: [] };
+  const resolved = repairReviewEvidence(content, {
+    attempts: [{ ...wrong, date: "2026-08-01" }, { ...correct, date: "2026-08-02" }, { ...correct, date: "2026-08-03" }],
+    mistakes: [{ id: "old-cat", taskId, prompt: "cat", userAnswer: "狗", correctAnswer: "猫" }]
+  });
+  assert.deepEqual(resolved.state.mistakes, []);
+
+  const reopened = repairReviewEvidence(content, {
+    attempts: [...resolved.state.attempts, { ...wrong, date: "2026-08-04" }],
+    mistakes: [{ id: "new-cat", taskId, prompt: "cat", userAnswer: "狗", correctAnswer: "猫" }]
+  });
+  assert.deepEqual(reopened.state.mistakes.map(item => item.id), ["new-cat"]);
 });
 
 test("AI tutor sends with Enter while preserving multiline and IME input", () => {

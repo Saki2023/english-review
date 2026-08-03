@@ -231,6 +231,7 @@ function sanitizeAiPractice(value) {
       count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
     },
     tutorSettings: {
+      providerId: cleanText(tutorSettings.providerId, 64),
       model: cleanText(tutorSettings.model, 120),
       reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
     },

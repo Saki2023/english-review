@@ -744,13 +744,27 @@ function publicAiOptions(user) {
   const current = aiSettingsStore.public();
   const practice = user ? sanitizeAiPractice(getUserState(user).aiPractice) : sanitizeAiPractice(null);
   const selectedModel = current.availableModels.includes(practice.settings.model) ? practice.settings.model : current.defaultModel;
-  const selectedTutorModel = current.availableModels.includes(practice.tutorSettings.model) ? practice.tutorSettings.model : current.defaultModel;
+  const providers = current.providers.map(provider => ({ id: provider.id, name: provider.name, enabled: provider.enabled, models: [...provider.models] }));
+  const enabledTutorProviders = providers.filter(provider => provider.enabled && provider.models.length);
+  const selectedTutorProvider = enabledTutorProviders.find(provider => provider.id === practice.tutorSettings.providerId)
+    || enabledTutorProviders.find(provider => provider.id === current.manualProviderId)
+    || enabledTutorProviders[0]
+    || null;
+  const selectedTutorModel = selectedTutorProvider
+    ? selectedTutorProvider.models.includes(practice.tutorSettings.model)
+      ? practice.tutorSettings.model
+      : selectedTutorProvider.models.includes(current.defaultModel)
+        ? current.defaultModel
+        : selectedTutorProvider.models[0]
+    : "";
   return {
     configured: current.configured,
     models: current.availableModels,
+    providers,
     defaultModel: current.defaultModel,
     efforts: current.efforts,
     selectedModel,
+    selectedTutorProviderId: selectedTutorProvider ? selectedTutorProvider.id : "",
     selectedTutorModel,
     selectedEffort: practice.settings.reasoningEffort,
     selectedTutorEffort: practice.tutorSettings.reasoningEffort,
@@ -1038,10 +1052,12 @@ async function handleAiTutorAsk(req, res, user) {
     const rate = takeAiRequest(user.id);
     if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
     const contextModel = historyItem ? historyItem.model : set.model;
-    const availableModels = getAvailableModels(aiSettings);
-    const requestedModel = [body.model, practice.tutorSettings.model, contextModel, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
+    const requestedProviderId = String(body.providerId || practice.tutorSettings.providerId || "").trim();
+    const selectedProvider = requestedProviderId && Array.isArray(aiSettings && aiSettings.providers) ? aiSettings.providers.find(provider => provider.id === requestedProviderId) : null;
+    const availableModels = selectedProvider ? selectedProvider.models : getAvailableModels(aiSettings);
+    const requestedModel = [body.model, practice.tutorSettings.model, contextModel, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || availableModels[0] || aiSettings.defaultModel;
     const tutorEffort = AI_EFFORTS.includes(body.reasoningEffort) ? body.reasoningEffort : practice.tutorSettings.reasoningEffort;
-    const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: tutorEffort });
+    const route = selectAiCandidates(aiSettings, { providerId: requestedProviderId, model: requestedModel, reasoningEffort: tutorEffort });
     const thread = tutorThreadFromHistory(practice, threadSetId, threadQuestionId);
     thread.historyId = historyItem ? historyItem.id : "";
     thread.source = historyItem ? "history" : "current";
@@ -1082,6 +1098,7 @@ async function handleAiTutorAsk(req, res, user) {
     });
     practice.tutorHistory = [...practice.tutorHistory, exchange].filter(Boolean).slice(-MAX_TUTOR_HISTORY);
     practice.tutor = thread;
+    practice.tutorSettings.providerId = routed.config.providerId;
     practice.tutorSettings.model = route.model;
     practice.tutorSettings.reasoningEffort = route.reasoningEffort;
     practice.updatedAt = createdAt;

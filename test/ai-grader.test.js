@@ -451,7 +451,7 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(tutorBody.tutor.messages.length, 2);
     assert.equal(tutorBody.exchange.question, "这个句子应该先看哪里？");
     assert.equal(tutorBody.exchange.historyId, questionResult.practice.history[0].id);
-    assert.deepEqual(tutorBody.tutorSettings, { model: "strong-model", reasoningEffort: "low" });
+    assert.deepEqual(tutorBody.tutorSettings, { providerId: "legacy-primary", model: "strong-model", reasoningEffort: "low" });
     assert.equal(providerRequests.length, 5);
     assert.equal(providerRequests[4].body.reasoning_effort, "low");
     assert.equal(Object.hasOwn(providerRequests[4].body, "response_format"), false);

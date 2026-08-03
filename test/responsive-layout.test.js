@@ -13,7 +13,10 @@ test("mobile styles keep AI, exam, ability, dictation, focused, pronunciation, n
   const mobile = css.slice(css.indexOf("@media (max-width: 520px)"));
 
   assert.match(tablet, /\.side-nav\s*\{[^}]*grid-auto-flow:\s*column[^}]*grid-auto-columns:\s*minmax\(62px, 1fr\)[^}]*overflow-x:\s*auto/s);
+  assert.match(css, /\.side-nav\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/s);
+  assert.match(tablet, /\.ai-settings-nav-item\s*\{[^}]*margin-top:\s*0/s);
   assert.match(tablet, /\.ai-tutor-window\s*\{[^}]*right:\s*10px[^}]*left:\s*10px[^}]*resize:\s*none/s);
+  assert.match(css, /\.ai-tutor-control-actions\s*\{[^}]*display:\s*grid[^}]*repeat\(2, minmax\(0, 1fr\)\)/s);
   assert.match(css, /\.brand-name\s*\{[^}]*white-space:\s*nowrap/s);
   assert.match(mobile, /\.topbar-actions\s*\{[^}]*gap:\s*8px/s);
   assert.match(mobile, /\.brand-mark\s*\{[^}]*width:\s*30px[^}]*height:\s*30px/s);

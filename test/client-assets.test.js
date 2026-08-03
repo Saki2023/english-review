@@ -17,7 +17,8 @@ test("AI tutor Enter handling is wired to form submission", () => {
   assert.match(app, /aiTutorInput"\)\.addEventListener\("keydown", event => \{\s*if \(!shouldSubmitOnEnter\(event\)\) return;\s*event\.preventDefault\(\);\s*\$\("#aiTutorForm"\)\.requestSubmit\(\);/s);
   assert.match(html, /id="aiTutorEffort"/);
   assert.match(html, /id="aiTutorModel"/);
-  assert.match(app, /message,\s*model: practice\.tutorSettings\.model,\s*reasoningEffort: practice\.tutorSettings\.reasoningEffort/s);
+  assert.match(html, /id="aiTutorProvider"/);
+  assert.match(app, /message,\s*providerId: practice\.tutorSettings\.providerId,\s*model: practice\.tutorSettings\.model,\s*reasoningEffort: practice\.tutorSettings\.reasoningEffort/s);
   assert.match(app, /data-ai-history-ask/);
   assert.match(app, /const available = aiOptions\.configured && target/);
   assert.match(app, /tutorHistory: \(Array\.isArray\(source\.tutorHistory\)/);
@@ -64,6 +65,7 @@ test("exam weaknesses jump to and highlight their related wrong questions", () =
 test("AI settings UI manages providers and exposes manual or automatic routing", () => {
   const app = read("app.js");
   const html = read("index.html");
+  const css = read("styles.css");
   assert.match(html, /data-ai-routing-mode="manual"/);
   assert.match(html, /data-ai-routing-mode="auto"/);
   assert.match(html, /id="aiManualProvider"/);
@@ -75,6 +77,25 @@ test("AI settings UI manages providers and exposes manual or automatic routing",
   assert.match(app, /providerId: provider\.id/);
   assert.match(app, /const testEffort = selectedAiSettings\(\)\.reasoningEffort/);
   assert.match(app, /appliedReasoningEffort/);
+  const nav = html.slice(html.indexOf('<nav class="side-nav"'), html.indexOf("</nav>"));
+  const aiHeading = html.slice(html.indexOf('id="view-ai"'), html.indexOf('id="aiControls"'));
+  assert.match(nav, /id="openAiConfigButton"/);
+  assert.doesNotMatch(aiHeading, /id="openAiConfigButton"/);
+  assert.match(css, /\.ai-settings-nav-item\s*\{[^}]*margin-top:\s*auto/s);
+});
+
+test("mistake book automatically closes mastered items while retaining a two-answer threshold", () => {
+  const app = read("app.js");
+  const answers = read("answer-utils.js");
+  const html = read("index.html");
+  assert.match(answers, /const MISTAKE_AUTO_RESOLVE_STREAK = 2/);
+  assert.match(answers, /function mistakeCorrectStreak\(attempts, taskId\)/);
+  assert.match(answers, /attempt\.gradingStatus !== "partial"/);
+  assert.match(answers, /function mistakeIsResolved\(attempts, taskId\)/);
+  assert.match(app, /model\.mistakes = \(model\.mistakes \|\| \[\]\)\.filter\(mistake => !mistakeIsResolved/);
+  assert.match(app, /mistakeIsResolved\(model\.attempts, row\.taskId\)/);
+  assert.match(app, /连续答对 \$\{row\.correctStreak\}\/\$\{MISTAKE_AUTO_RESOLVE_STREAK\}/);
+  assert.match(html, /连续 2 次完全答对后自动销号/);
 });
 
 test("exam UI uses dedicated APIs, optional listening, and whole-paper submission", () => {
@@ -128,12 +149,12 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=32/);
+  assert.match(html, /pronunciation-data\.js\?v=33/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /speechButtonHtml\(item\.example/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=32/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=33/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -165,6 +186,15 @@ test("today review removes preview words from new, cached, library, and mistake 
   assert.match(app, /let changed = pruneReviewSession\(session\)/);
   assert.match(app, /buildMistakePracticeQueue[\s\S]*\.filter\(candidate => reviewTaskIsEligible\(taskById\.get\(candidate\)\)\)/);
   assert.match(app, /item\.preview \? '<span class="type-badge">预习<\/span>'/);
+});
+
+test("filtered word and sentence library rows receive continuous visible sequence numbers", () => {
+  const app = read("app.js");
+  const css = read("styles.css");
+  assert.match(app, /class=\\"sequence-cell\\">序号/);
+  assert.match(app, /items\.map\(\(item, index\) =>/);
+  assert.match(app, /class="sequence-cell">\$\{index \+ 1\}/);
+  assert.match(css, /\.data-table \.sequence-cell\s*\{[^}]*text-align:\s*center/s);
 });
 
 test("preview words have a next-day-only page with speech and learned-feature isolation", () => {
@@ -212,7 +242,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 32", () => {
+test("PWA client assets consistently use the displayed cache version 33", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -223,6 +253,6 @@ test("PWA client assets consistently use the displayed cache version 32", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "32");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v32"/);
+  assert.equal(displayedVersion[1], "33");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v33"/);
 });

@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=32">
+  <link rel="stylesheet" href="styles.css?v=33">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v32">v32</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v33">v33</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -94,6 +94,9 @@
         </button>
         <button class="nav-item" type="button" data-view="progress">
           <i data-lucide="bar-chart-3" aria-hidden="true"></i><span>学习进度</span>
+        </button>
+        <button class="nav-item ai-settings-nav-item" type="button" id="openAiConfigButton" aria-label="AI 连接设置" hidden>
+          <i data-lucide="settings-2" aria-hidden="true"></i><span>AI 设置</span>
         </button>
       </nav>
 
@@ -181,9 +184,6 @@
               <h1 id="aiTitle">AI 出题</h1>
               <p class="heading-note" id="aiStatus">正在读取 AI 配置…</p>
             </div>
-            <button class="secondary-button ai-settings-button" type="button" id="openAiConfigButton" aria-label="AI 连接设置" hidden>
-              <i data-lucide="settings-2" aria-hidden="true"></i><span>AI 设置</span>
-            </button>
           </div>
 
           <div class="ai-controls" id="aiControls">
@@ -691,14 +691,14 @@
             <div>
               <p class="eyebrow">REVIEW AGAIN</p>
               <h1 id="mistakesTitle">错题本</h1>
-              <p class="heading-note">错过的题会在后续复习中优先出现。</p>
+              <p class="heading-note">错过的题会优先复习；连续 2 次完全答对后自动销号，以后再错会重新加入。</p>
             </div>
             <span class="count-badge" id="mistakeCount">0 条</span>
           </div>
           <div class="table-wrap">
             <table class="data-table mistake-table">
               <thead>
-                <tr><th>题目</th><th>你的答案</th><th>正确答案</th><th>来源</th><th></th></tr>
+                <tr><th>题目</th><th>你的答案</th><th>正确答案</th><th>来源</th><th>销号进度</th><th></th></tr>
               </thead>
               <tbody id="mistakeBody"></tbody>
             </table>
@@ -759,10 +759,13 @@
       <div class="ai-tutor-controls">
         <div class="ai-tutor-session-state"><i data-lucide="cloud-check" aria-hidden="true"></i><span id="aiTutorPersistenceStatus">已按账号自动保存</span></div>
         <div class="ai-tutor-control-actions">
+          <label class="ai-tutor-provider-field" for="aiTutorProvider"><span>AI 供应商</span>
+            <select id="aiTutorProvider" aria-label="选择问答 AI 供应商"></select>
+          </label>
           <label class="ai-tutor-model-field" for="aiTutorModel"><span>问答模型</span>
             <select id="aiTutorModel" aria-label="选择问答模型"></select>
           </label>
-          <label for="aiTutorEffort"><span>问答强度</span>
+          <label class="ai-tutor-effort-field" for="aiTutorEffort"><span>问答强度</span>
             <select id="aiTutorEffort">
               <option value="low">轻度</option>
               <option value="medium" selected>中</option>
@@ -891,11 +894,11 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=32"></script>
-  <script src="data.js?v=32"></script>
-  <script src="pronunciation-data.js?v=32"></script>
-  <script src="review-variants.js?v=32"></script>
-  <script src="answer-utils.js?v=32"></script>
+  <script src="vendor/lucide.min.js?v=33"></script>
+  <script src="data.js?v=33"></script>
+  <script src="pronunciation-data.js?v=33"></script>
+  <script src="review-variants.js?v=33"></script>
+  <script src="answer-utils.js?v=33"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -911,7 +914,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=32";
+      appScript.src = "app.js?v=33";
       document.body.appendChild(appScript);
     })();
   </script>

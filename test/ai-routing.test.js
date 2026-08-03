@@ -126,6 +126,60 @@ test("manual mode stays fixed while automatic mode fails over and rotates", asyn
     assert.deepEqual(calls, ["second"]);
     visible = await (await fetch(`${baseUrl}/api/admin/ai-config`, { headers: { "Cookie": cookie } })).json();
     assert.equal(visible.rotationCursor, 0);
+
+    assert.equal((await saveConfig("manual")).status, 200);
+    const historyId = "tutor-set:tutor-question";
+    const savedState = await fetch(`${baseUrl}/api/state`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ aiPractice: {
+        settings: { model: "route-model", reasoningEffort: "high", count: 5 },
+        tutorSettings: { providerId: "second", model: "route-model", reasoningEffort: "max" },
+        history: [{ id: historyId, setId: "tutor-set", direction: "en-zh", prompt: "cat", userAnswer: "狗", correctAnswer: "猫", correct: false, score: 0, gradingStatus: "incorrect" }]
+      } })
+    });
+    assert.equal(savedState.status, 200);
+
+    const options = await (await fetch(`${baseUrl}/api/ai/options`, { headers: { "Cookie": cookie } })).json();
+    assert.equal(options.selectedTutorProviderId, "second");
+    assert.equal(options.selectedTutorModel, "route-model");
+    assert.deepEqual(options.providers.map(item => item.id), ["first", "second"]);
+    assert.deepEqual(Object.keys(options.providers[0]).sort(), ["enabled", "id", "models", "name"]);
+    assert.equal(JSON.stringify(options).includes("first-key"), false);
+    assert.equal(JSON.stringify(options).includes("baseUrl"), false);
+
+    calls.length = 0;
+    assert.equal((await grade()).status, 200, "global grading should keep using the manual provider");
+    assert.deepEqual(calls, ["first"]);
+
+    calls.length = 0;
+    const tutor = await fetch(`${baseUrl}/api/ai/questions/ask`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ historyId, message: "请给我一个提示。", providerId: "second", model: "route-model", reasoningEffort: "max" })
+    });
+    assert.equal(tutor.status, 200);
+    assert.deepEqual(calls, ["second"], "tutor selection must not follow the global manual provider");
+    const tutorBody = await tutor.json();
+    assert.equal(tutorBody.provider.id, "second");
+    assert.equal(tutorBody.tutorSettings.providerId, "second");
+
+    let persisted = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
+    assert.deepEqual(persisted.aiPractice.tutorSettings, { providerId: "second", model: "route-model", reasoningEffort: "max" });
+    assert.equal(persisted.aiPractice.tutorHistory[0].providerId, "second");
+    assert.equal(persisted.aiPractice.tutorHistory[0].providerName, "Second");
+    assert.equal(persisted.aiPractice.tutorHistory[0].model, "route-model");
+    assert.equal(persisted.aiPractice.tutorHistory[0].reasoningEffort, "max");
+
+    assert.equal((await fetch(`${baseUrl}/api/auth/logout`, { method: "POST", headers: { "Cookie": cookie } })).status, 200);
+    const relogin = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "owner", password: "routing-test-password" })
+    });
+    const reloginCookie = relogin.headers.get("set-cookie").split(";")[0];
+    persisted = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": reloginCookie } })).json();
+    assert.equal(persisted.aiPractice.tutorSettings.providerId, "second", "tutor provider should survive a fresh login");
   } finally {
     child.kill();
     if (child.exitCode === null) await Promise.race([once(child, "exit"), new Promise(resolve => setTimeout(resolve, 2000))]);

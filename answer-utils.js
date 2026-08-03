@@ -7,6 +7,7 @@
   "use strict";
 
   const EVIDENCE_REPAIR_VERSION = 2;
+  const MISTAKE_AUTO_RESOLVE_STREAK = 2;
   const PARTIAL_TRANSLATION_SCORE = 0.8;
   const REQUIRED_ENGLISH_FUNCTION_WORDS = ["a", "an", "the", "on", "in", "am", "is", "are"];
   const CHINESE_MEASURE_WORDS = "个|只|头|张|支|块|家|本|辆|杯|条|位|件|台|把|朵|颗|枚";
@@ -123,6 +124,27 @@
     const startIndex = taskIds.indexOf(String(startTaskId || ""));
     if (startIndex < 0) return [];
     return [...taskIds.slice(startIndex), ...taskIds.slice(0, startIndex)];
+  }
+
+  function mistakeCorrectStreak(attempts, taskId) {
+    const target = String(taskId || "");
+    if (!target) return 0;
+    let streak = 0;
+    const records = Array.isArray(attempts) ? attempts : [];
+    for (let index = records.length - 1; index >= 0; index -= 1) {
+      const attempt = records[index] && typeof records[index] === "object" ? records[index] : {};
+      if (String(attempt.taskId || "") !== target) continue;
+      const score = Number.isFinite(Number(attempt.score)) ? Number(attempt.score) : (attempt.correct ? 1 : 0);
+      const fullyCorrect = attempt.correct === true && attempt.gradingStatus !== "partial" && score >= 1;
+      if (!fullyCorrect) break;
+      streak += 1;
+      if (streak >= MISTAKE_AUTO_RESOLVE_STREAK) break;
+    }
+    return streak;
+  }
+
+  function mistakeIsResolved(attempts, taskId) {
+    return mistakeCorrectStreak(attempts, taskId) >= MISTAKE_AUTO_RESOLVE_STREAK;
   }
 
   function shouldSubmitOnEnter(event) {
@@ -249,10 +271,17 @@
       return !shouldRemove;
     });
 
+    mistakes = mistakes.filter(mistake => {
+      const resolved = mistakeIsResolved(attempts, mistake && mistake.taskId);
+      if (resolved) changed = true;
+      return !resolved;
+    });
+
     attempts.forEach((attempt, index) => {
       if (attempt.correct !== false || originalAttempts[index] && originalAttempts[index].correct !== true) return;
       const task = reviewTask(content, attempt.taskId);
       if (!task) return;
+      if (mistakeIsResolved(attempts, task.taskId)) return;
       const exists = mistakes.some(mistake => mistake.taskId === task.taskId && answerIdentity(task, mistake.userAnswer) === answerIdentity(task, attempt.answer));
       if (!exists) mistakes.push(repairedMistake(task, attempt, index));
     });
@@ -284,6 +313,7 @@
 
   return {
     EVIDENCE_REPAIR_VERSION,
+    MISTAKE_AUTO_RESOLVE_STREAK,
     PARTIAL_TRANSLATION_SCORE,
     REQUIRED_ENGLISH_FUNCTION_WORDS,
     buildMistakePracticeQueue,
@@ -295,6 +325,8 @@
     englishSourceWordResults,
     englishWordResults,
     isReviewEligibleItem,
+    mistakeCorrectStreak,
+    mistakeIsResolved,
     normalizeChinese,
     normalizeEnglish,
     repairReviewEvidence,

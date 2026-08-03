@@ -40,11 +40,12 @@ test("learning profile prioritizes weak learned content and excludes future less
 test("AI practice state keeps a bounded question set and per-account settings", () => {
   const set = createQuestionSet([{ direction: "en-zh", english: "cat", chinese: "猫", acceptedEnglish: ["cat"], acceptedChinese: ["猫"], focus: "单词复习" }], { providerId: "provider-a", providerName: "NewAPI", model: "model-a", reasoningEffort: "max" });
   const tutorMessages = Array.from({ length: 14 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `message-${index}` }));
-  const practice = sanitizeAiPractice({ settings: { model: "model-a", reasoningEffort: "max", count: 10 }, tutorSettings: { reasoningEffort: "low" }, currentSet: set, tutor: { setId: set.id, questionId: set.questions[0].id, messages: tutorMessages } });
+  const practice = sanitizeAiPractice({ settings: { model: "model-a", reasoningEffort: "max", count: 10 }, tutorSettings: { providerId: "provider-b", reasoningEffort: "low" }, currentSet: set, tutor: { setId: set.id, questionId: set.questions[0].id, messages: tutorMessages } });
   assert.equal(practice.settings.model, "model-a");
   assert.equal(practice.settings.reasoningEffort, "max");
   assert.equal(practice.settings.count, 10);
   assert.equal(practice.tutorSettings.reasoningEffort, "low");
+  assert.equal(practice.tutorSettings.providerId, "provider-b");
   assert.equal(practice.currentSet.questions.length, 1);
   assert.equal(practice.currentSet.reasoningEffort, "max");
   assert.equal(practice.currentSet.providerId, "provider-a");
@@ -53,7 +54,7 @@ test("AI practice state keeps a bounded question set and per-account settings", 
   assert.equal(practice.tutor.messages[0].content, "message-2");
   assert.equal(practice.tutorHistory.length, 6);
   assert.equal(practice.tutorHistory[0].question, "message-2");
-  assert.deepEqual(sanitizeAiPractice({ settings: { reasoningEffort: "max" }, tutorSettings: { model: "tutor-model", reasoningEffort: "high" } }).tutorSettings, { model: "tutor-model", reasoningEffort: "high" });
+  assert.deepEqual(sanitizeAiPractice({ settings: { reasoningEffort: "max" }, tutorSettings: { providerId: "provider-c", model: "tutor-model", reasoningEffort: "high" } }).tutorSettings, { providerId: "provider-c", model: "tutor-model", reasoningEffort: "high" });
   assert.equal(sanitizeAiPractice({ settings: { reasoningEffort: "max" } }).tutorSettings.reasoningEffort, "medium");
 });
 
