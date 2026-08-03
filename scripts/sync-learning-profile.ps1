@@ -52,6 +52,8 @@ function Read-LearningDocument([string]$Path, [int]$MaximumLength = 16000) {
   return @{ name = [IO.Path]::GetFileName($Path); content = $content }
 }
 
+. (Join-Path $PSScriptRoot "preview-words.ps1")
+
 if ($WriteToken) {
   $progressDocument = Read-LearningDocument (Join-Path $workspaceRoot "学习进度.md")
   $mistakeDocument = Read-LearningDocument (Join-Path $workspaceRoot "错题本.md")
@@ -63,10 +65,16 @@ if ($WriteToken) {
   $previewDirectory = Join-Path $workspaceRoot "预习"
   $previewDocument = $null
   $previewDocuments = @()
+  $latestPreviewFile = $null
+  $previewWords = @()
   if (Test-Path -LiteralPath $previewDirectory) {
     $previewFiles = @(Get-ChildItem -LiteralPath $previewDirectory -File -Filter "*.md" | Sort-Object Name -Descending | Select-Object -First 30 | Sort-Object Name)
     $previewDocuments = @($previewFiles | ForEach-Object { Read-LearningDocument $_.FullName 10000 })
-    if ($previewDocuments.Count -gt 0) { $previewDocument = $previewDocuments[-1] }
+    if ($previewDocuments.Count -gt 0) {
+      $previewDocument = $previewDocuments[-1]
+      $latestPreviewFile = $previewFiles[-1]
+      $previewWords = @(ConvertFrom-PreviewWordTable $latestPreviewFile.FullName)
+    }
   }
   $teachingProfile = @{
     updatedAt = (Get-Date).ToUniversalTime().ToString("o")
@@ -87,9 +95,19 @@ if ($WriteToken) {
   if (Test-Path -LiteralPath $courseContentPath) {
     $courseContentJson = [IO.File]::ReadAllText($courseContentPath, [Text.Encoding]::UTF8)
     $courseContent = $courseContentJson | ConvertFrom-Json
+    $formalWordIds = @{}
+    $formalEnglish = @{}
+    foreach ($word in @($courseContent.words)) {
+      if ($word.id) { $formalWordIds[[string]$word.id] = $true }
+      if ($word.english) { $formalEnglish[[string]$word.english] = $true }
+    }
+    $previewWords = @($previewWords | Where-Object { -not $formalWordIds.ContainsKey([string]$_.id) -and -not $formalEnglish.ContainsKey([string]$_.english) })
+    $courseContent | Add-Member -NotePropertyName previewWords -NotePropertyValue @($previewWords) -Force
+    $courseContentJson = $courseContent | ConvertTo-Json -Depth 40
     $courseUri = "$base/api/content/batch"
     $courseResult = Invoke-RestMethod -Method Put -Uri $courseUri -Headers $writeHeaders -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($courseContentJson))
     Write-Host "网站课程内容已同步：第 $($courseResult.currentDay) 天，$($courseResult.words) 个单词、$($courseResult.sentences) 个句子、$($courseResult.notes) 份笔记（词句新增 $($courseResult.added)、更新 $($courseResult.updated)；笔记新增 $($courseResult.notesAdded)、更新 $($courseResult.notesUpdated)）。"
+    if ($latestPreviewFile) { Write-Host "预习单词已同步：$($latestPreviewFile.BaseName)，$($courseResult.previewWords) 个未学单词。" }
   } else {
     Write-Warning "未找到 学习同步\网站课程内容.json，本次未更新词句库。"
   }

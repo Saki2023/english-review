@@ -64,9 +64,15 @@ function historyEnglish(item) {
   return item.direction === "zh-en" ? item.correctAnswer : item.prompt;
 }
 
+function taskItemId(taskId) {
+  const value = String(taskId || "");
+  const separator = value.lastIndexOf(":");
+  return separator > 0 ? value.slice(0, separator) : "";
+}
+
 function reviewItemProgress(content, state, aiHistory) {
   const taskStates = state.taskStates && typeof state.taskStates === "object" ? state.taskStates : {};
-  return [...content.words.map(item => ({ ...item, kind: "word" })), ...content.sentences.map(item => ({ ...item, kind: "sentence" }))].map(item => {
+  return [...content.words.filter(item => !item.preview).map(item => ({ ...item, kind: "word" })), ...content.sentences.filter(item => !item.preview).map(item => ({ ...item, kind: "sentence" }))].map(item => {
     const directions = Array.isArray(item.directions) && item.directions.length ? item.directions : ["en-zh"];
     const directionStates = directions.map(direction => {
       const taskId = `${item.id}:${direction}`;
@@ -123,7 +129,7 @@ function reviewItemProgress(content, state, aiHistory) {
 }
 
 function aiWordSignals(content, history) {
-  const words = new Map((content.words || []).map(item => [String(item.english || "").toLocaleLowerCase(), item]));
+  const words = new Map((content.words || []).filter(item => !item.preview).map(item => [String(item.english || "").toLocaleLowerCase(), item]));
   const signals = new Map();
   history.forEach(item => {
     (Array.isArray(item.wordResults) ? item.wordResults : []).forEach(result => {
@@ -260,10 +266,11 @@ function buildLearningSyncProfile(content, state, user) {
   const aiPractice = sanitizeAiPractice(state.aiPractice);
   const aiHistory = aiPractice.history;
   const aiCorrect = Math.round(aiHistory.reduce((sum, item) => sum + evidenceScore(item), 0) * 100) / 100;
-  const attempts = Array.isArray(state.attempts) ? state.attempts : [];
+  const formalItemIds = new Set([...(content.words || []), ...(content.sentences || [])].filter(item => !item.preview).map(item => item.id));
+  const attempts = (Array.isArray(state.attempts) ? state.attempts : []).filter(item => formalItemIds.has(taskItemId(item && item.taskId)));
   const reviewCorrect = Math.round(attempts.reduce((sum, item) => sum + evidenceScore(item), 0) * 100) / 100;
   const itemProgress = reviewItemProgress(content, state, aiHistory);
-  const mistakes = Array.isArray(state.mistakes) ? state.mistakes.slice(-80) : [];
+  const mistakes = (Array.isArray(state.mistakes) ? state.mistakes : []).filter(item => formalItemIds.has(taskItemId(item && item.taskId))).slice(-80);
   const recentAiMistakes = aiHistory.filter(item => !item.correct).slice(-100).reverse();
   const aiSets = summarizeAiSets(aiHistory);
   const aiExam = sanitizeAiExamState(state.aiExam);
@@ -286,8 +293,9 @@ function buildLearningSyncProfile(content, state, user) {
     course: {
       currentDay: Number(content.currentDay) || 1,
       contentUpdatedAt: String(content.updatedAt || ""),
-      words: (content.words || []).length,
-      sentences: (content.sentences || []).length,
+      words: (content.words || []).filter(item => !item.preview).length,
+      previewWords: (content.words || []).filter(item => item.preview).length,
+      sentences: (content.sentences || []).filter(item => !item.preview).length,
       notes: (content.notes || []).length
     },
     summary: {

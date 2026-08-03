@@ -43,9 +43,9 @@ function itemForTask(content, taskId) {
   const id = value.slice(0, separator);
   const direction = value.slice(separator + 1);
   const word = (content.words || []).find(item => item.id === id);
-  if (word) return { item: word, kind: "word", direction };
+  if (word && !word.preview) return { item: word, kind: "word", direction };
   const sentence = (content.sentences || []).find(item => item.id === id);
-  return sentence ? { item: sentence, kind: "sentence", direction } : null;
+  return sentence && !sentence.preview ? { item: sentence, kind: "sentence", direction } : null;
 }
 
 function ordinaryWeights(kind, direction) {

@@ -77,6 +77,11 @@ test("teaching profile write token updates only the local teaching profile", asy
     const courseBody = JSON.stringify({
       updatedAt: "2026-08-04",
       words: [{ id: "d5-sun", day: 5, learned: "2026-08-04", english: "sun", chinese: "太阳", phonetic: "/sʌn/", acceptedChinese: ["太阳"], directions: ["en-zh", "zh-en"] }],
+      previewWords: [
+        { id: "d6-dog", day: 6, learned: "", preview: true, english: "dog", chinese: "狗", phonetic: "/dɔɡ/", acceptedChinese: ["狗"], directions: ["en-zh", "zh-en"] },
+        { id: "d7-far", day: 7, learned: "", preview: true, english: "far", chinese: "远的", phonetic: "/fɑr/", acceptedChinese: ["远的"], directions: ["en-zh", "zh-en"] },
+        { id: "d6-sun-again", day: 6, learned: "", preview: true, english: "sun", chinese: "太阳", phonetic: "/sʌn/", acceptedChinese: ["太阳"], directions: ["en-zh", "zh-en"] }
+      ],
       sentences: [{ id: "d5-s1", day: 5, learned: "2026-08-04", english: "It is fun.", chinese: "它很有趣。", acceptedChinese: ["它很有趣"], acceptedEnglish: ["it is fun"], directions: ["en-zh", "zh-en"] }],
       notes: [{ day: 5, date: "2026-08-04", score: "9 / 10", summary: "学习 /ʌ/。", goals: ["拼读 sun"], pronunciation: ["/ʌ/ 要短促。"], patterns: [], mistakes: [], review: "复习 sun。" }]
     });
@@ -85,17 +90,41 @@ test("teaching profile write token updates only the local teaching profile", asy
     const writtenCourse = await fetch(courseEndpoint, { method: "PUT", headers: { Authorization: `Bearer ${deriveTeachingProfileWriteToken(apiToken)}`, "Content-Type": "application/json" }, body: courseBody });
     assert.equal(writtenCourse.status, 200);
     const courseResult = await writtenCourse.json();
-    assert.deepEqual({ added: courseResult.added, updated: courseResult.updated, notesAdded: courseResult.notesAdded, currentDay: courseResult.currentDay }, { added: 2, updated: 0, notesAdded: 1, currentDay: 5 });
+    assert.deepEqual({ added: courseResult.added, updated: courseResult.updated, previewWords: courseResult.previewWords, notesAdded: courseResult.notesAdded, currentDay: courseResult.currentDay }, { added: 3, updated: 0, previewWords: 1, notesAdded: 1, currentDay: 5 });
     const repeatedCourse = await (await fetch(courseEndpoint, { method: "PUT", headers: { Authorization: `Bearer ${deriveTeachingProfileWriteToken(apiToken)}`, "Content-Type": "application/json" }, body: courseBody })).json();
-    assert.deepEqual({ added: repeatedCourse.added, updated: repeatedCourse.updated, notesUpdated: repeatedCourse.notesUpdated }, { added: 0, updated: 2, notesUpdated: 1 });
+    assert.deepEqual({ added: repeatedCourse.added, updated: repeatedCourse.updated, previewWords: repeatedCourse.previewWords, notesUpdated: repeatedCourse.notesUpdated }, { added: 0, updated: 3, previewWords: 1, notesUpdated: 1 });
     const syncedCourse = await (await fetch(`${baseUrl}/api/content`)).json();
     assert.equal(syncedCourse.currentDay, 5);
     assert.equal(syncedCourse.words.some(item => item.id === "d5-sun"), true);
+    assert.equal(syncedCourse.words.some(item => item.id === "d6-dog" && item.preview === true && item.learned === ""), true);
+    assert.equal(syncedCourse.words.some(item => item.id === "d7-far" || item.id === "d6-sun-again"), false);
     assert.equal(syncedCourse.sentences.some(item => item.id === "d5-s1"), true);
     assert.equal(syncedCourse.notes.some(item => item.day === 5 && /sun/.test(item.review)), true);
 
     const login = await fetch(`${baseUrl}/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "learner", password: "teaching-sync-password" }) });
     const cookie = login.headers.get("set-cookie").split(";")[0];
+    const anonymousPreviewWords = await fetch(`${baseUrl}/api/preview/words`);
+    assert.equal(anonymousPreviewWords.status, 401);
+    const previewWordsResponse = await fetch(`${baseUrl}/api/preview/words`, { headers: { Cookie: cookie } });
+    assert.equal(previewWordsResponse.status, 200);
+    const previewWords = await previewWordsResponse.json();
+    assert.deepEqual({ currentDay: previewWords.currentDay, nextDay: previewWords.nextDay, words: previewWords.words.map(item => item.english) }, { currentDay: 5, nextDay: 6, words: ["dog"] });
+
+    const promotedBody = JSON.stringify({
+      updatedAt: "2026-08-05",
+      words: [{ id: "d6-dog", day: 6, learned: "2026-08-05", english: "dog", chinese: "狗", phonetic: "/dɔɡ/", acceptedChinese: ["狗"], directions: ["en-zh", "zh-en"] }],
+      previewWords: [{ id: "d7-run", day: 7, learned: "", preview: true, english: "run", chinese: "跑", phonetic: "/rʌn/", acceptedChinese: ["跑"], directions: ["en-zh", "zh-en"] }],
+      sentences: [],
+      notes: []
+    });
+    const promoted = await (await fetch(courseEndpoint, { method: "PUT", headers: { Authorization: `Bearer ${deriveTeachingProfileWriteToken(apiToken)}`, "Content-Type": "application/json" }, body: promotedBody })).json();
+    assert.deepEqual({ currentDay: promoted.currentDay, added: promoted.added, updated: promoted.updated, previewWords: promoted.previewWords }, { currentDay: 6, added: 1, updated: 1, previewWords: 1 });
+    const promotedContent = await (await fetch(`${baseUrl}/api/content`)).json();
+    assert.equal(promotedContent.words.some(item => item.id === "d6-dog" && item.preview === false && item.learned === "2026-08-05"), true);
+    assert.equal(promotedContent.words.some(item => item.id === "d7-run" && item.preview === true), true);
+    const nextPreviewWords = await (await fetch(`${baseUrl}/api/preview/words`, { headers: { Cookie: cookie } })).json();
+    assert.deepEqual({ currentDay: nextPreviewWords.currentDay, nextDay: nextPreviewWords.nextDay, words: nextPreviewWords.words.map(item => item.english) }, { currentDay: 6, nextDay: 7, words: ["run"] });
+
     const anonymousPreview = await fetch(`${baseUrl}/api/preview`);
     assert.equal(anonymousPreview.status, 401);
     const previewResponse = await fetch(`${baseUrl}/api/preview`, { headers: { Cookie: cookie } });

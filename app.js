@@ -2,7 +2,9 @@
   "use strict";
 
   const DATA = window.ENGLISH_REVIEW_DATA;
-  const { buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
+  const PRONUNCIATION = window.ENGLISH_PRONUNCIATION_DATA || { concepts: [], phonemes: [] };
+  const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, sanitizeGeneratedSentenceVariant: () => null };
+  const { buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, isReviewEligibleItem, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const STORAGE_KEY = "daily-english-review-v1";
   const EXAM_GENERATION_API_VERSION = "2";
   const DAILY_TARGET = 10;
@@ -10,6 +12,7 @@
   const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
   const AI_EFFORT_LABELS = { low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高" };
   const MAX_CLIENT_TUTOR_HISTORY = 1000;
+  const MAX_CLIENT_TUTOR_RESETS = 1000;
   const FOCUSED_TYPE_LABELS = { listening: "听力", choice: "选择", "fill-blank": "填空", "true-false": "判断", translation: "翻译", cloze: "完形填空", reading: "材料题", essay: "作文" };
   const DEFAULT_AI_TIMEOUT_MS = 30000;
   const AI_CLIENT_TIMEOUT_MS = 125000;
@@ -18,6 +21,7 @@
   let remoteReady = !API_ENABLED;
   let remoteSaveTimer;
   const allItems = [...DATA.words.map(item => ({ ...item, type: "word" })), ...DATA.sentences.map(item => ({ ...item, type: "sentence" }))];
+  const learnedItems = allItems.filter(item => !item.preview);
   const itemById = new Map(allItems.map(item => [item.id, item]));
   const taskById = new Map();
   allItems.forEach(item => (item.directions || ["en-zh"]).forEach(direction => taskById.set(`${item.id}:${direction}`, { item, direction, taskId: `${item.id}:${direction}` })));
@@ -25,7 +29,8 @@
   let activeView = "home";
   let reviewMode = "all";
   let libraryType = "word";
-  let notesDay = Math.max(1, Number(DATA.currentDay) || 1, ...allItems.map(item => Number(item.day) || 0));
+  let pronunciationFilter = "learned";
+  let notesDay = Math.max(1, Number(DATA.currentDay) || 1, ...learnedItems.map(item => Number(item.day) || 0));
   let currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
   let appEventsBound = false;
   let authEventsBound = false;
@@ -34,12 +39,14 @@
   let gradingInProgress = false;
   let aiRequestInProgress = false;
   let aiTutorRequestInProgress = false;
+  let reviewVariantPreparation = null;
   let aiTutorDrag = null;
   let aiTutorLaunchDrag = null;
   let aiTutorLaunchSuppressClickUntil = 0;
   let aiTutorTarget = null;
   let aiStatusMessage = "";
   let aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
+  let aiOptionsLoaded = false;
   let aiConfigDraft = null;
   let activeAiProviderId = "";
   let examState = normalizeClientAiExam(null);
@@ -72,6 +79,7 @@
   const focusedSpeechCache = new Map();
   let previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
   let selectedPreviewName = "";
+  let previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -106,7 +114,31 @@
       const content = String(item.content || "").trim().slice(0, item.role === "assistant" ? 1200 : 500);
       return content ? { role: item.role, content, createdAt: String(item.createdAt || "").slice(0, 40) } : null;
     }).filter(Boolean).slice(-12);
-    return { setId, questionId, messages };
+    return {
+      setId,
+      questionId,
+      historyId: String(value.historyId || "").slice(0, 180),
+      source: ["current", "history"].includes(value.source) ? value.source : "",
+      prompt: String(value.prompt || "").trim().slice(0, 300),
+      updatedAt: String(value.updatedAt || "").slice(0, 40),
+      messages
+    };
+  }
+
+  function normalizeClientTutorReset(value) {
+    if (!value || typeof value !== "object") return null;
+    const setId = String(value.setId || "").slice(0, 80);
+    const questionId = String(value.questionId || "").slice(0, 80);
+    const resetAt = String(value.resetAt || "").slice(0, 40);
+    if (!setId || !questionId || !resetAt) return null;
+    return {
+      setId,
+      questionId,
+      historyId: String(value.historyId || "").slice(0, 180),
+      source: ["current", "history"].includes(value.source) ? value.source : "",
+      prompt: String(value.prompt || "").trim().slice(0, 300),
+      resetAt
+    };
   }
 
   function normalizeClientTutorExchange(value) {
@@ -150,13 +182,56 @@
         count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
       },
       tutorSettings: {
+        model: String(tutorSettings.model || ""),
         reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
       },
       currentSet: source.currentSet && Array.isArray(source.currentSet.questions) ? source.currentSet : null,
       tutor: normalizeClientTutor(source.tutor),
       tutorHistory: (Array.isArray(source.tutorHistory) ? source.tutorHistory : []).map(normalizeClientTutorExchange).filter(Boolean).slice(-MAX_CLIENT_TUTOR_HISTORY),
+      tutorResets: (Array.isArray(source.tutorResets) ? source.tutorResets : []).map(normalizeClientTutorReset).filter(Boolean).slice(-MAX_CLIENT_TUTOR_RESETS),
       history: Array.isArray(source.history) ? source.history.slice(-1000) : [],
       updatedAt: String(source.updatedAt || "")
+    };
+  }
+
+  function normalizeClientReviewVariant(value) {
+    if (!value || typeof value !== "object") return null;
+    const id = String(value.id || "").trim().slice(0, 180);
+    const english = String(value.english || "").trim().slice(0, 180);
+    const chinese = String(value.chinese || "").trim().slice(0, 180);
+    if (!id || !english || !chinese) return null;
+    return {
+      id,
+      family: String(value.family || "").slice(0, 30),
+      english,
+      chinese,
+      acceptedEnglish: Array.from(new Set((Array.isArray(value.acceptedEnglish) ? value.acceptedEnglish : [english]).map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8),
+      acceptedChinese: Array.from(new Set((Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [chinese]).map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8),
+      source: value.source === "ai" ? "ai" : "local",
+      providerId: String(value.providerId || "").slice(0, 64),
+      providerName: String(value.providerName || "").slice(0, 60),
+      model: String(value.model || "").slice(0, 120),
+      reasoningEffort: AI_EFFORTS.includes(value.reasoningEffort) ? value.reasoningEffort : "",
+      generatedAt: String(value.generatedAt || "").slice(0, 40)
+    };
+  }
+
+  function normalizeClientReviewSession(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const variants = {};
+    Object.entries(source.variants && typeof source.variants === "object" ? source.variants : {}).forEach(([taskId, variant]) => {
+      const normalized = normalizeClientReviewVariant(variant);
+      if (normalized) variants[String(taskId).slice(0, 180)] = normalized;
+    });
+    return {
+      date: String(source.date || "").slice(0, 20),
+      mode: ["all", "word", "sentence"].includes(source.mode) ? source.mode : "all",
+      taskIds: Array.isArray(source.taskIds) ? source.taskIds.map(item => String(item || "").slice(0, 180)).filter(Boolean).slice(0, 100) : [],
+      index: Math.max(0, Number(source.index) || 0),
+      doneTaskIds: Array.isArray(source.doneTaskIds) ? source.doneTaskIds.map(item => String(item || "").slice(0, 180)).filter(Boolean).slice(0, 100) : [],
+      currentTaskId: String(source.currentTaskId || "").slice(0, 180),
+      batchComplete: Boolean(source.batchComplete),
+      variants
     };
   }
 
@@ -914,7 +989,7 @@
     next.taskStates = next.taskStates || {};
     next.history = next.history || {};
     next.attempts = Array.isArray(next.attempts) ? next.attempts : [];
-    next.sessions = next.sessions || {};
+    next.sessions = Object.fromEntries(Object.entries(next.sessions && typeof next.sessions === "object" ? next.sessions : {}).map(([date, session]) => [date, normalizeClientReviewSession(session)]));
     next.aiPractice = normalizeClientAiPractice(next.aiPractice);
     next.schema = 1;
     allItems.forEach(item => (item.directions || ["en-zh"]).forEach(direction => {
@@ -969,8 +1044,9 @@
     merged.mistakes = merged.mistakes.slice(-80);
     Object.entries(remote && remote.sessions ? remote.sessions : {}).forEach(([date, remoteSession]) => {
       const localSession = merged.sessions[date];
-      if (!localSession || (remoteSession.doneTaskIds || []).length >= (localSession.doneTaskIds || []).length) merged.sessions[date] = remoteSession;
+      if (!localSession || (remoteSession.doneTaskIds || []).length >= (localSession.doneTaskIds || []).length) merged.sessions[date] = normalizeClientReviewSession(remoteSession);
     });
+    Object.keys(merged.sessions).forEach(date => { merged.sessions[date] = normalizeClientReviewSession(merged.sessions[date]); });
     return repairReviewEvidence(DATA, merged).state;
   }
 
@@ -1050,6 +1126,7 @@
       model = loadModel();
       previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
       selectedPreviewName = "";
+      previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
       remoteReady = false;
       showAppView();
       bindAppEvents();
@@ -1066,6 +1143,7 @@
     currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
     previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
     selectedPreviewName = "";
+    previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
     remoteReady = !API_ENABLED;
     if (API_ENABLED) showAuthView();
   }
@@ -1101,6 +1179,19 @@
     saveModel();
   }
 
+  function populateAiTutorModelSelect(practice = normalizeClientAiPractice(model.aiPractice)) {
+    const select = $("#aiTutorModel");
+    const selected = aiOptions.models.includes(practice.tutorSettings.model) ? practice.tutorSettings.model : aiOptions.defaultModel;
+    select.replaceChildren(...aiOptions.models.map(modelName => {
+      const option = document.createElement("option");
+      option.value = modelName;
+      option.textContent = modelName;
+      return option;
+    }));
+    if (selected) select.value = selected;
+    select.disabled = aiTutorRequestInProgress || !aiOptions.configured || !aiOptions.models.length;
+  }
+
   function populateAiModelSelect() {
     const select = $("#aiModelSelect");
     const settings = selectedAiSettings();
@@ -1126,6 +1217,7 @@
     aiStatusMessage = "";
     if (!API_ENABLED) {
       aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
+      aiOptionsLoaded = true;
       renderAiView();
       return;
     }
@@ -1135,15 +1227,19 @@
       aiOptions = await response.json();
       const practice = normalizeClientAiPractice(model.aiPractice);
       if (!aiOptions.models.includes(practice.settings.model)) practice.settings.model = aiOptions.selectedModel || aiOptions.defaultModel || "";
+      if (!aiOptions.models.includes(practice.tutorSettings.model)) practice.tutorSettings.model = aiOptions.selectedTutorModel || aiOptions.defaultModel || "";
       if (AI_EFFORTS.includes(aiOptions.selectedEffort) && !practice.updatedAt) practice.settings.reasoningEffort = aiOptions.selectedEffort;
+      if (AI_EFFORTS.includes(aiOptions.selectedTutorEffort) && !practice.updatedAt) practice.tutorSettings.reasoningEffort = aiOptions.selectedTutorEffort;
       if ([5, 10].includes(Number(aiOptions.selectedCount)) && !practice.updatedAt) practice.settings.count = Number(aiOptions.selectedCount);
       model.aiPractice = practice;
     } catch (_) {
       aiOptions = { configured: false, models: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: Boolean(currentUser && currentUser.role === "admin") };
     }
+    aiOptionsLoaded = true;
     populateAiModelSelect();
     renderAiView();
     renderExamView();
+    if (activeView === "home") renderHome();
   }
 
   async function loadAiExams() {
@@ -1192,6 +1288,30 @@
     };
   }
 
+  function aiTutorTargetForSavedThread(practice) {
+    const tutor = normalizeClientTutor(practice.tutor);
+    if (!tutor) return null;
+    if (tutor.historyId) {
+      const exactHistory = practice.history.find(item => item.id === tutor.historyId);
+      if (exactHistory) return aiTutorTargetForHistory(exactHistory);
+    }
+    const latestExchange = [...practice.tutorHistory].reverse().find(item => item.setId === tutor.setId && item.questionId === tutor.questionId && item.historyId);
+    if (latestExchange) {
+      const exchangeHistory = practice.history.find(item => item.id === latestExchange.historyId);
+      if (exchangeHistory) return aiTutorTargetForHistory(exchangeHistory);
+    }
+    const matchingHistory = [...practice.history].reverse().find(item => item.setId === tutor.setId && aiHistoryQuestionId(item) === tutor.questionId);
+    if (matchingHistory) return aiTutorTargetForHistory(matchingHistory);
+    const set = practice.currentSet;
+    const question = set && set.id === tutor.setId ? set.questions.find(item => item.id === tutor.questionId) : null;
+    if (!question) return null;
+    return { kind: "current", historyId: "", setId: set.id, questionId: question.id, prompt: question.direction === "en-zh" ? question.english : question.chinese };
+  }
+
+  function aiTutorResetForTarget(practice, target) {
+    return practice.tutorResets.filter(item => item.setId === target.setId && item.questionId === target.questionId).sort((left, right) => right.resetAt.localeCompare(left.resetAt))[0] || null;
+  }
+
   function resolveAiTutorTarget(practice) {
     if (aiTutorTarget && aiTutorTarget.kind === "history") {
       const historyItem = practice.history.find(item => item.id === aiTutorTarget.historyId);
@@ -1202,6 +1322,8 @@
       const question = set && set.id === aiTutorTarget.setId ? set.questions.find(item => item.id === aiTutorTarget.questionId) : null;
       if (question) return { ...aiTutorTarget, prompt: question.direction === "en-zh" ? question.english : question.chinese };
     }
+    const savedTarget = aiTutorTargetForSavedThread(practice);
+    if (savedTarget) return savedTarget;
     const set = practice.currentSet;
     const question = currentAiQuestion();
     if (set && question && !set.completed) {
@@ -1213,7 +1335,8 @@
   function tutorThreadForTarget(practice, target) {
     const tutor = normalizeClientTutor(practice.tutor);
     if (aiTutorRequestInProgress && tutor && tutor.setId === target.setId && tutor.questionId === target.questionId) return tutor;
-    const messages = practice.tutorHistory.filter(item => item.setId === target.setId && item.questionId === target.questionId).flatMap(item => [
+    const resetAt = aiTutorResetForTarget(practice, target)?.resetAt || "";
+    const messages = practice.tutorHistory.filter(item => item.setId === target.setId && item.questionId === target.questionId && (!resetAt || item.askedAt > resetAt)).flatMap(item => [
       { role: "user", content: item.question, createdAt: item.askedAt },
       { role: "assistant", content: item.answer, createdAt: item.answeredAt }
     ]);
@@ -1240,8 +1363,11 @@
     aiTutorTarget = target;
     $("#aiTutorTitle").textContent = target.kind === "history" ? "历史题问答" : "题目问答";
     $("#aiTutorContext").textContent = target.prompt;
+    populateAiTutorModelSelect(practice);
     $("#aiTutorEffort").value = practice.tutorSettings.reasoningEffort;
     const thread = tutorThreadForTarget(practice, target);
+    const reset = aiTutorResetForTarget(practice, target);
+    $("#aiTutorPersistenceStatus").textContent = reset && !thread.messages.length ? "新会话已建立 · 旧问答不会继续作为上下文" : "已按账号自动保存 · AI 最多使用本会话最近 6 轮";
     const messageList = $("#aiTutorMessages");
     if (!thread.messages.length) {
       const empty = document.createElement("div");
@@ -1263,6 +1389,7 @@
       requestAnimationFrame(() => { messageList.scrollTop = messageList.scrollHeight; });
     }
     $("#clearAiTutorButton").disabled = aiTutorRequestInProgress || !thread.messages.length;
+    $("#aiTutorModel").disabled = aiTutorRequestInProgress || !aiOptions.models.length;
     $("#aiTutorEffort").disabled = aiTutorRequestInProgress;
     $("#aiTutorInput").disabled = aiTutorRequestInProgress;
     $("#sendAiTutorButton").disabled = aiTutorRequestInProgress;
@@ -1316,16 +1443,42 @@
     updateAiTutorWindowActions();
   }
 
-  function clearAiTutor() {
+  async function clearAiTutor() {
     if (aiTutorRequestInProgress) return;
     const practice = normalizeClientAiPractice(model.aiPractice);
     const target = resolveAiTutorTarget(practice);
-    if (target) practice.tutorHistory = practice.tutorHistory.filter(item => item.setId !== target.setId || item.questionId !== target.questionId);
-    practice.tutor = null;
-    practice.updatedAt = new Date().toISOString();
-    model.aiPractice = practice;
-    saveModel();
+    if (!target) return;
+    aiTutorRequestInProgress = true;
     renderAiTutorWindow();
+    try {
+      if (API_ENABLED) {
+        const data = await responseJson(await fetch("/api/ai/questions/tutor/clear", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ setId: target.setId, questionId: target.questionId, historyId: target.historyId })
+        }));
+        model.aiPractice = normalizeClientAiPractice(data.practice);
+      } else {
+        const resetAt = new Date().toISOString();
+        practice.tutorResets = [
+          ...practice.tutorResets.filter(item => item.setId !== target.setId || item.questionId !== target.questionId),
+          { setId: target.setId, questionId: target.questionId, historyId: target.historyId, source: target.kind, prompt: target.prompt, resetAt }
+        ].slice(-MAX_CLIENT_TUTOR_RESETS);
+        practice.tutor = { setId: target.setId, questionId: target.questionId, historyId: target.historyId, source: target.kind, prompt: target.prompt, updatedAt: resetAt, messages: [] };
+        practice.updatedAt = resetAt;
+        model.aiPractice = practice;
+      }
+      aiTutorTarget = target;
+      saveModel();
+      showToast("当前会话已清除，旧问答仍保留为学习记录");
+    } catch (error) {
+      showToast(error.message || "清除会话失败，请稍后重试");
+    } finally {
+      aiTutorRequestInProgress = false;
+      renderAiTutorWindow();
+      requestAnimationFrame(() => $("#aiTutorInput").focus());
+    }
   }
 
   async function submitAiTutorQuestion(event) {
@@ -1362,6 +1515,7 @@
           questionId: target.questionId,
           historyId: target.historyId,
           message,
+          model: practice.tutorSettings.model,
           reasoningEffort: practice.tutorSettings.reasoningEffort
         })
       }));
@@ -1768,6 +1922,59 @@
       previewState = { ...previewState, loaded: true, loading: false, error: error.message || "获取预习失败，请稍后重试。" };
     }
     renderPreview();
+  }
+
+  function normalizeClientPreviewWord(value) {
+    if (!value || typeof value !== "object") return null;
+    const id = String(value.id || "").trim().slice(0, 100);
+    const english = String(value.english || "").trim().slice(0, 100);
+    const chinese = String(value.chinese || "").trim().slice(0, 180);
+    const day = Math.max(0, Number(value.day) || 0);
+    if (!id || !english || !chinese || !day || value.preview !== true || String(value.learned || "").trim()) return null;
+    return {
+      id,
+      day,
+      preview: true,
+      learned: "",
+      english,
+      phonetic: String(value.phonetic || "").trim().slice(0, 100),
+      chinese,
+      pronunciation: String(value.pronunciation || "").trim().slice(0, 300)
+    };
+  }
+
+  function normalizePreviewWordsResponse(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const currentDay = Math.max(1, Number(source.currentDay) || Number(DATA.currentDay) || 1);
+    const nextDay = currentDay + 1;
+    const words = (Array.isArray(source.words) ? source.words : []).map(normalizeClientPreviewWord).filter(item => item && item.day === nextDay);
+    return {
+      loaded: true,
+      loading: false,
+      currentDay,
+      nextDay,
+      updatedAt: String(source.updatedAt || "").slice(0, 40),
+      words,
+      error: ""
+    };
+  }
+
+  async function loadPreviewWords() {
+    if (previewWordsState.loading) return;
+    if (!API_ENABLED) {
+      previewWordsState = { ...previewWordsState, loaded: true, loading: false, words: [], error: "预习单词需要登录网站后读取。" };
+      renderPreviewWords();
+      return;
+    }
+    previewWordsState = { ...previewWordsState, loading: true, error: "" };
+    renderPreviewWords();
+    try {
+      const response = await fetch("/api/preview/words", { cache: "no-store", credentials: "same-origin" });
+      previewWordsState = normalizePreviewWordsResponse(await responseJson(response));
+    } catch (error) {
+      previewWordsState = { ...previewWordsState, loaded: true, loading: false, error: error.message || "获取预习单词失败，请稍后重试。" };
+    }
+    renderPreviewWords();
   }
 
   async function generateAiQuestions() {
@@ -2910,11 +3117,12 @@
     const today = localDate();
     const existing = model.sessions[today];
     if (!existing || existing.mode !== reviewMode) {
-      const next = { date: today, mode: reviewMode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false };
+      const next = { date: today, mode: reviewMode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false, variants: {} };
       model.sessions[today] = next;
       saveModel();
       return next;
     }
+    existing.variants = existing.variants && typeof existing.variants === "object" ? existing.variants : {};
     return existing;
   }
 
@@ -2923,10 +3131,44 @@
     return model.taskStates[taskId];
   }
 
+  function reviewTaskIsEligible(task, studyDate = localDate()) {
+    return Boolean(task && isReviewEligibleItem(task.item, DATA.currentDay, studyDate));
+  }
+
+  function reviewTaskMatchesMode(task, mode) {
+    if (!task) return false;
+    if (mode === "word") return task.item.type === "word";
+    if (mode === "sentence") return task.item.type === "sentence";
+    return true;
+  }
+
+  function pruneReviewSession(session) {
+    const before = JSON.stringify({ taskIds: session.taskIds, index: session.index, doneTaskIds: session.doneTaskIds, currentTaskId: session.currentTaskId, batchComplete: session.batchComplete, variants: session.variants });
+    const originalTaskIds = Array.isArray(session.taskIds) ? session.taskIds : [];
+    const originalIndex = Math.max(0, Math.min(Number(session.index) || 0, originalTaskIds.length));
+    const studyDate = localDate();
+    const eligible = taskId => {
+      const task = taskById.get(taskId);
+      return reviewTaskIsEligible(task, studyDate) && reviewTaskMatchesMode(task, session.mode);
+    };
+    const taskIds = originalTaskIds.filter(eligible);
+    const doneTaskIds = (Array.isArray(session.doneTaskIds) ? session.doneTaskIds : []).filter(eligible);
+    const validTaskIds = new Set(taskIds);
+    const variants = Object.fromEntries(Object.entries(session.variants && typeof session.variants === "object" ? session.variants : {}).filter(([taskId]) => validTaskIds.has(taskId)));
+    const removedTasks = taskIds.length !== originalTaskIds.length;
+    const index = Math.min(originalTaskIds.slice(0, originalIndex).filter(eligible).length, taskIds.length);
+    session.taskIds = taskIds;
+    session.index = index;
+    session.doneTaskIds = doneTaskIds;
+    session.currentTaskId = taskIds[index] || null;
+    session.batchComplete = taskIds.length ? index >= taskIds.length : (removedTasks ? false : Boolean(session.batchComplete));
+    session.variants = variants;
+    return before !== JSON.stringify({ taskIds: session.taskIds, index: session.index, doneTaskIds: session.doneTaskIds, currentTaskId: session.currentTaskId, batchComplete: session.batchComplete, variants: session.variants });
+  }
+
   function isDue(task) {
-    const item = task.item;
     const today = localDate();
-    return item.learned <= today && taskState(task.taskId).nextDue <= today;
+    return reviewTaskIsEligible(task, today) && taskState(task.taskId).nextDue <= today;
   }
 
   function taskCandidates(mode = reviewMode, excluded = new Set()) {
@@ -2963,21 +3205,102 @@
     return selected.map(task => task.taskId);
   }
 
-  function currentTask() {
+  function currentBaseTask() {
     const session = getSession();
     const taskId = session.taskIds[session.index];
     return taskId ? taskById.get(taskId) : null;
   }
 
+  function reviewVariantForTask(task, session = getSession()) {
+    if (!task || task.item.type !== "sentence") return task;
+    const variant = normalizeClientReviewVariant(session.variants && session.variants[task.taskId]);
+    if (!variant) return task;
+    return { ...task, item: { ...task.item, ...variant }, reviewVariant: variant, baseItem: task.item };
+  }
+
+  function currentTask() {
+    return reviewVariantForTask(currentBaseTask());
+  }
+
+  function localReviewVariantForTask(task, session) {
+    const recentIds = (model.attempts || []).filter(item => item && item.taskId === task.taskId).slice(-8).map(item => item.variantId).filter(Boolean);
+    const usedIds = Object.values(session.variants || {}).map(item => item && item.id).filter(Boolean);
+    const chosen = REVIEW_VARIANTS.chooseSentenceVariant(DATA, task.item, `${session.date}|${task.taskId}|${taskState(task.taskId).reviewCount || 0}`, [...recentIds, ...usedIds]);
+    if (chosen) return { ...chosen, source: "local", generatedAt: new Date().toISOString() };
+    return {
+      id: `library-${task.item.id}`,
+      family: REVIEW_VARIANTS.sentenceFamily ? REVIEW_VARIANTS.sentenceFamily(task.item) : "",
+      english: task.item.english,
+      chinese: task.item.chinese,
+      acceptedEnglish: task.item.acceptedEnglish || [task.item.english],
+      acceptedChinese: task.item.acceptedChinese || [task.item.chinese],
+      source: "local",
+      generatedAt: new Date().toISOString()
+    };
+  }
+
+  function storeLocalReviewVariants(session, tasks) {
+    tasks.forEach(task => {
+      if (task && task.item.type === "sentence" && !session.variants[task.taskId]) session.variants[task.taskId] = localReviewVariantForTask(task, session);
+    });
+    saveModel();
+  }
+
+  function sentenceTasksMissingVariants(session) {
+    return session.taskIds.map(taskId => taskById.get(taskId)).filter(task => task && task.item.type === "sentence" && !session.variants[task.taskId]);
+  }
+
+  async function prepareReviewSentenceVariants(session) {
+    const missing = sentenceTasksMissingVariants(session);
+    if (!missing.length) return;
+    const key = `${session.date}|${session.mode}|${session.taskIds.join(",")}`;
+    if (reviewVariantPreparation && reviewVariantPreparation.key === key) return reviewVariantPreparation.promise;
+    if (!API_ENABLED || (aiOptionsLoaded && !aiOptions.configured)) {
+      storeLocalReviewVariants(session, missing);
+      return;
+    }
+    if (!aiOptionsLoaded) return;
+    const promise = (async () => {
+      try {
+        const data = await responseJson(await fetch("/api/review/sentence-variants", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ date: session.date, taskIds: missing.map(task => task.taskId) })
+        }));
+        const returned = new Map((Array.isArray(data.variants) ? data.variants : []).map(item => [String(item.taskId || ""), normalizeClientReviewVariant(item)]));
+        missing.forEach(task => {
+          const variant = returned.get(task.taskId);
+          session.variants[task.taskId] = variant || localReviewVariantForTask(task, session);
+        });
+        if (data.source === "local") showToast(data.notice || "AI 暂时不可用，已使用本地自然变式");
+        saveModel();
+      } catch (_) {
+        storeLocalReviewVariants(session, missing);
+        showToast("AI 变式暂时不可用，已使用本地自然变式");
+      } finally {
+        reviewVariantPreparation = null;
+        const current = currentBaseTask();
+        if (activeView === "home" && current && current.item.type === "sentence" && session.variants[current.taskId]) renderHome();
+      }
+    })();
+    reviewVariantPreparation = { key, promise };
+    return promise;
+  }
+
   function ensureBatch() {
     const session = getSession();
+    let changed = pruneReviewSession(session);
     if (!session.taskIds.length && !session.batchComplete) {
       session.taskIds = buildBatch();
       session.index = 0;
       session.currentTaskId = session.taskIds[0] || null;
       if (!session.taskIds.length) session.batchComplete = true;
-      saveModel();
+      changed = true;
     }
+    if (changed) saveModel();
+    const sessionTasks = sentenceTasksMissingVariants(session);
+    if (sessionTasks.length) prepareReviewSentenceVariants(session);
     return session;
   }
 
@@ -3000,8 +3323,10 @@
     if (view === "dictation") { renderDictationView(); loadDictation(); }
     if (view === "focused") { renderFocusedView(); loadFocused(); }
     if (view === "library") renderLibrary();
+    if (view === "pronunciation") renderPronunciation();
     if (view === "notes") renderNotes();
     if (view === "preview") { renderPreview(); loadPreview(); }
+    if (view === "preview-words") { renderPreviewWords(); loadPreviewWords(); }
     if (view === "mistakes") renderMistakes();
     if (view === "progress") renderProgress();
     renderAiTutorWindow();
@@ -3011,7 +3336,7 @@
   function setReviewMode(mode) {
     reviewMode = mode;
     const today = localDate();
-    model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false };
+    model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false, variants: {} };
     saveModel();
     $$("[data-mode]").forEach(button => {
       const active = button.dataset.mode === mode;
@@ -3032,6 +3357,7 @@
     $("#accuracyCount").textContent = stats.reviewed ? `${Math.round((stats.correct / stats.reviewed) * 100)}%` : "—";
     $("#goalReadout").textContent = `${Math.min(done, DAILY_TARGET)} / ${DAILY_TARGET}`;
     $("#queueNote").textContent = due ? "先复习错题，再练新词和句子。" : "今天的到期题已完成，可以回到词句库自由练习。";
+    const baseTask = currentBaseTask();
     const task = currentTask();
     const panel = $("#reviewPanel"); const complete = $("#reviewComplete");
     if (!task) {
@@ -3042,7 +3368,23 @@
       return;
     }
     panel.hidden = false; complete.hidden = true;
-    $("#promptType").textContent = task.item.type === "word" ? "单词" : "句子";
+    if (baseTask.item.type === "sentence" && !session.variants[baseTask.taskId]) {
+      $("#promptType").textContent = "句子变式";
+      $("#promptDay").textContent = `第 ${baseTask.item.day} 天 · 正在准备`;
+      $("#questionCount").textContent = `${session.index + 1} / ${session.taskIds.length}`;
+      $("#directionLabel").textContent = "根据学习进度生成中";
+      $("#promptText").textContent = "AI 正在根据你已经学过的单词和句型准备新句子…";
+      $("#promptSpeech").innerHTML = "";
+      $("#phoneticLine").textContent = "不会加入未学单词；AI 暂时不可用时会自动使用本地变式。";
+      $("#exampleLine").textContent = "";
+      $("#answerInput").value = "";
+      $("#answerInput").disabled = true;
+      $("#submitAnswer").disabled = true;
+      $("#feedback").hidden = true;
+      $("#feedbackActions").hidden = true;
+      return;
+    }
+    $("#promptType").textContent = task.item.type === "word" ? "单词" : "句子变式";
     $("#promptDay").textContent = `第 ${task.item.day} 天`;
     $("#questionCount").textContent = `${session.index + 1} / ${session.taskIds.length}`;
     $("#directionLabel").textContent = formatDirection(task.direction);
@@ -3050,7 +3392,7 @@
     $("#promptText").textContent = prompt;
     $("#promptSpeech").innerHTML = task.direction === "en-zh" ? speechButtonHtml(task.item.english, "播放题目发音") : "";
     $("#phoneticLine").textContent = task.item.type === "word" && task.direction === "en-zh" ? task.item.phonetic : "";
-    $("#exampleLine").textContent = "";
+    $("#exampleLine").textContent = task.reviewVariant ? `已学句型变式 · ${task.reviewVariant.source === "ai" ? "AI 生成" : "本地备用"} · 原句仍保留在词句库` : "";
     $("#answerInput").value = "";
     $("#answerInput").placeholder = task.direction === "en-zh" ? "输入中文答案" : "输入英文答案";
     $("#answerInput").disabled = false;
@@ -3091,7 +3433,7 @@
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId: task.taskId, answer, model: settings.model, reasoningEffort: settings.reasoningEffort }),
+        body: JSON.stringify({ taskId: task.taskId, variantId: task.reviewVariant?.id || "", reviewVariant: task.reviewVariant || null, answer, model: settings.model, reasoningEffort: settings.reasoningEffort }),
         signal: controller.signal
       });
       if (response.status === 401) showAuthView();
@@ -3174,8 +3516,9 @@
     model.history[today] = model.history[today] || { reviewed: 0, correct: 0 };
     model.history[today].reviewed += 1;
     model.history[today].correct = Math.round((model.history[today].correct + grading.score) * 100) / 100;
-    model.attempts.push({ taskId: task.taskId, date: today, answer, correct, score: grading.score, gradingStatus: grading.gradingStatus, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation, problemWords: grading.problemWords, wordResults: grading.wordResults });
-    if (!correct) model.mistakes = [...(model.mistakes || []), { id: `attempt-${Date.now()}`, taskId: task.taskId, day: task.item.day, prompt: task.direction === "en-zh" ? task.item.english : task.item.chinese, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: grading.explanation || "本次复习未答对。" }].slice(-80);
+    const reviewVariant = task.reviewVariant ? { ...task.reviewVariant } : null;
+    model.attempts.push({ taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, answer, correct, score: grading.score, gradingStatus: grading.gradingStatus, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation, problemWords: grading.problemWords, wordResults: grading.wordResults });
+    if (!correct) model.mistakes = [...(model.mistakes || []), { id: `attempt-${Date.now()}`, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, day: task.item.day, prompt: task.direction === "en-zh" ? task.item.english : task.item.chinese, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: grading.explanation || "本次复习未答对。" }].slice(-80);
     const session = getSession();
     session.currentTaskId = task.taskId;
     session.doneTaskIds = Array.from(new Set([...(session.doneTaskIds || []), task.taskId]));
@@ -3215,6 +3558,10 @@
   function practiceTask(taskId) {
     const task = taskById.get(taskId);
     if (!task) return;
+    if (!reviewTaskIsEligible(task)) {
+      showToast("预习单词不会进入今日复习，正式学完后才能练习");
+      return;
+    }
     const today = localDate();
     reviewMode = task.item.type;
     model.sessions[today] = { date: today, mode: reviewMode, taskIds: [taskId], index: 0, doneTaskIds: [], currentTaskId: taskId, batchComplete: false };
@@ -3224,8 +3571,11 @@
   }
 
   function practiceMistakeQueue(taskId) {
-    const taskIds = buildMistakePracticeQueue(mistakeRows(), taskId, taskById.keys());
-    if (!taskIds.length) return;
+    const taskIds = buildMistakePracticeQueue(mistakeRows(), taskId, taskById.keys()).filter(candidate => reviewTaskIsEligible(taskById.get(candidate)));
+    if (!taskIds.length) {
+      showToast("这组内容尚未正式学完，暂不加入今日复习");
+      return;
+    }
     const today = localDate();
     reviewMode = "all";
     model.sessions[today] = { date: today, mode: reviewMode, taskIds, index: 0, doneTaskIds: [], currentTaskId: taskIds[0], batchComplete: false };
@@ -3239,27 +3589,98 @@
     const day = $("#dayFilter").value;
     const items = allItems.filter(item => item.type === libraryType && (day === "all" || String(item.day) === day) && (!search || normalizeChinese(`${item.english}${item.chinese}`).includes(search) || normalizeEnglish(`${item.english}`).includes(normalizeEnglish(search))));
     $("#libraryHead").innerHTML = libraryType === "word" ? "<tr><th>单词</th><th>发音</th><th>中文</th><th>学习日</th><th></th></tr>" : "<tr><th>句子</th><th>中文</th><th>学习日</th><th></th></tr>";
-    $("#libraryBody").innerHTML = items.map(item => libraryType === "word" ? `<tr><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, `播放 ${item.english} 的发音`)}</span></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">第 ${item.day} 天</td><td><button class="table-action" type="button" data-practice="${item.id}">练习</button></td></tr>` : `<tr><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, "播放句子发音")}</span></td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">第 ${item.day} 天</td><td><button class="table-action" type="button" data-practice="${item.id}">练习</button></td></tr>`).join("");
+    $("#libraryBody").innerHTML = items.map(item => {
+      const action = item.preview ? '<span class="type-badge">预习</span>' : `<button class="table-action" type="button" data-practice="${item.id}">练习</button>`;
+      const dayLabel = item.preview ? `第 ${item.day} 天预习` : `第 ${item.day} 天`;
+      return libraryType === "word"
+        ? `<tr><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, `播放 ${item.english} 的发音`)}</span></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">${dayLabel}</td><td>${action}</td></tr>`
+        : `<tr><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, "播放句子发音")}</span></td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">${dayLabel}</td><td>${action}</td></tr>`;
+    }).join("");
     $("#libraryEmpty").hidden = items.length > 0;
     $$('[data-practice]').forEach(button => button.addEventListener("click", () => practiceTask(`${button.dataset.practice}:en-zh`)));
     $$("[data-library-type]").forEach(button => { const active = button.dataset.libraryType === libraryType; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
     refreshIcons();
   }
 
+  function renderPronunciation() {
+    const concepts = Array.isArray(PRONUNCIATION.concepts) ? PRONUNCIATION.concepts : [];
+    const phonemes = Array.isArray(PRONUNCIATION.phonemes) ? PRONUNCIATION.phonemes : [];
+    const items = phonemes.filter(item => {
+      if (pronunciationFilter === "learned") return item.learned === true;
+      if (["vowel", "consonant"].includes(pronunciationFilter)) return item.type === pronunciationFilter;
+      return true;
+    });
+    const filterLabels = { learned: "已学", vowel: "元音", consonant: "辅音", all: "全部" };
+    const vowelCount = phonemes.filter(item => item.type === "vowel").length;
+    const consonantCount = phonemes.filter(item => item.type === "consonant").length;
+
+    $("#pronunciationSummary").textContent = PRONUNCIATION.summary || "先学课程中已经单独讲过的音，其余内容随用随查。";
+    $("#pronunciationAudioNotice").textContent = PRONUNCIATION.audioNotice || "喇叭播放英文示范词。";
+    $("#pronunciationAccentNotice").textContent = PRONUNCIATION.accentNotice || "不同词典和口音的音标写法可能不同。";
+    $("#pronunciationCount").textContent = `显示 ${items.length} 个${filterLabels[pronunciationFilter] || ""}发音 · 元音 ${vowelCount} · 辅音 ${consonantCount}`;
+
+    $("#pronunciationConcepts").innerHTML = concepts.map((concept, index) => `
+      <article class="pronunciation-concept">
+        <span class="pronunciation-concept-number" aria-hidden="true">${String(index + 1).padStart(2, "0")}</span>
+        <div>
+          <h3>${escapeHtml(concept.title)}</h3>
+          <p>${escapeHtml(concept.summary)}</p>
+          <div class="pronunciation-concept-action"><strong>怎么做</strong><span>${escapeHtml(concept.action)}</span></div>
+          <div class="pronunciation-concept-example"><strong>例子</strong><span>${escapeHtml(concept.example)}</span></div>
+        </div>
+      </article>
+    `).join("");
+
+    $("#pronunciationGrid").innerHTML = items.map(item => {
+      const typeLabel = item.type === "vowel" ? "元音" : "辅音";
+      return `
+        <article class="pronunciation-card${item.learned ? " is-learned" : ""}">
+          <header class="pronunciation-card-header">
+            <div class="pronunciation-symbol-wrap">
+              <span>${escapeHtml(typeLabel)} · ${escapeHtml(item.subtype)}</span>
+              <strong class="pronunciation-symbol">${escapeHtml(item.symbol)}</strong>
+            </div>
+            <div class="pronunciation-card-actions">
+              ${item.learned ? '<span class="pronunciation-learned-badge">本课已学</span>' : ""}
+              ${speechButtonHtml(item.example, `慢速播放示范词 ${item.example}`)}
+            </div>
+          </header>
+          <div class="pronunciation-example">
+            <div><code>${escapeHtml(item.example)}</code><span>${escapeHtml(item.examplePhonetic)}</span></div>
+            <span>${escapeHtml(item.exampleZh)}</span>
+          </div>
+          <dl class="pronunciation-steps">
+            <div><dt>口型舌位</dt><dd>${escapeHtml(item.mouth)}</dd></div>
+            <div><dt>发音动作</dt><dd>${escapeHtml(item.action)}</dd></div>
+            <div><dt>中文辅助</dt><dd>${escapeHtml(item.chineseHint)}</dd></div>
+            <div><dt>注意</dt><dd>${escapeHtml(item.pitfall)}</dd></div>
+          </dl>
+        </article>
+      `;
+    }).join("");
+    $("#pronunciationEmpty").hidden = items.length > 0;
+    $$('[data-pronunciation-filter]').forEach(button => {
+      const active = button.dataset.pronunciationFilter === pronunciationFilter;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    refreshIcons();
+  }
+
   function renderNotes() {
     const noteDays = Array.from(new Set([
-      ...allItems.map(item => Number(item.day) || 0),
+      ...learnedItems.map(item => Number(item.day) || 0),
       ...(Array.isArray(DATA.notes) ? DATA.notes.map(note => Number(note.day) || 0) : [])
     ].filter(Boolean))).sort((left, right) => left - right);
     if (!noteDays.includes(notesDay)) notesDay = noteDays[noteDays.length - 1] || 1;
     const note = (Array.isArray(DATA.notes) ? DATA.notes : []).find(item => Number(item.day) === notesDay) || {};
-    const words = DATA.words.filter(item => Number(item.day) === notesDay);
-    const sentences = DATA.sentences.filter(item => Number(item.day) === notesDay);
+    const words = DATA.words.filter(item => !item.preview && Number(item.day) === notesDay);
+    const sentences = DATA.sentences.filter(item => !item.preview && Number(item.day) === notesDay);
     const date = String(note.date || words[0]?.learned || sentences[0]?.learned || "");
     const select = $("#notesDaySelect");
     select.replaceChildren(...noteDays.map(day => {
       const entry = (Array.isArray(DATA.notes) ? DATA.notes : []).find(item => Number(item.day) === day) || {};
-      const dayDate = String(entry.date || DATA.words.find(item => Number(item.day) === day)?.learned || DATA.sentences.find(item => Number(item.day) === day)?.learned || "");
+      const dayDate = String(entry.date || DATA.words.find(item => !item.preview && Number(item.day) === day)?.learned || DATA.sentences.find(item => !item.preview && Number(item.day) === day)?.learned || "");
       const option = document.createElement("option");
       option.value = String(day);
       option.textContent = dayDate ? `${displayDate(dayDate)} · 第 ${day} 天` : `第 ${day} 天`;
@@ -3397,6 +3818,36 @@
     refreshIcons();
   }
 
+  function renderPreviewWords() {
+    const words = Array.isArray(previewWordsState.words) ? previewWordsState.words : [];
+    const nextDay = Math.max(1, Number(previewWordsState.nextDay) || (Number(DATA.currentDay) || 1) + 1);
+    const button = $("#refreshPreviewWordsButton");
+    button.disabled = previewWordsState.loading;
+    $("#previewWordsGrid").innerHTML = words.map(item => `
+      <article class="preview-word-card">
+        <header>
+          <span class="type-badge">第 ${item.day} 天预习</span>
+          ${speechButtonHtml(item.english, `慢速播放预习单词 ${item.english}`)}
+        </header>
+        <div class="preview-word-english"><code>${escapeHtml(item.english)}</code><span>${escapeHtml(item.phonetic || "等待正式课讲解")}</span></div>
+        <div class="preview-word-meaning"><span>中文</span><strong>${escapeHtml(item.chinese)}</strong></div>
+        <p>${escapeHtml(item.pronunciation || `先点击喇叭听 ${item.english}，正式课程会详细讲解发音。`)}</p>
+      </article>
+    `).join("");
+    $("#previewWordsEmpty").hidden = words.length > 0 || previewWordsState.loading;
+
+    if (previewWordsState.loading && !words.length) {
+      $("#previewWordsStatus").textContent = `正在获取第 ${nextDay} 天预习单词…`;
+    } else if (previewWordsState.error) {
+      $("#previewWordsStatus").textContent = previewWordsState.error;
+    } else if (!words.length) {
+      $("#previewWordsStatus").textContent = `当前课程第 ${previewWordsState.currentDay} 天 · 第 ${nextDay} 天暂无未学新词`;
+    } else {
+      $("#previewWordsStatus").textContent = `当前课程第 ${previewWordsState.currentDay} 天 · 只显示第 ${nextDay} 天的 ${words.length} 个未学单词`;
+    }
+    refreshIcons();
+  }
+
   function mistakeRows() {
     const seeded = DATA.seedMistakes.map(item => ({ ...item, seeded: true }));
     const dynamic = (model.mistakes || []).map(item => ({ ...item, seeded: false }));
@@ -3413,15 +3864,15 @@
 
   function renderProgress() {
     const stats = todayStats();
-    $("#libraryTotal").textContent = String(allItems.length);
-    const mastered = allItems.filter(item => (item.directions || ["en-zh"]).every(direction => taskState(`${item.id}:${direction}`).level >= 2)).length;
+    $("#libraryTotal").textContent = String(learnedItems.length);
+    const mastered = learnedItems.filter(item => (item.directions || ["en-zh"]).every(direction => taskState(`${item.id}:${direction}`).level >= 2)).length;
     $("#masteredTotal").textContent = String(mastered);
     $("#streakTotal").textContent = `${calculateStreak()} 天`;
     $("#updatedAtLabel").textContent = DATA.updatedAt;
     const days = Array.from({ length: 7 }, (_, index) => addDays(localDate(), index - 6));
     const max = Math.max(1, ...days.map(day => (model.history[day] || { reviewed: 0 }).reviewed));
     $("#weeklyChart").innerHTML = days.map(day => { const count = (model.history[day] || { reviewed: 0 }).reviewed; const height = Math.max(3, Math.round((count / max) * 100)); return `<div class="bar-column"><span class="bar-value">${count || ""}</span><div class="bar-track"><div class="bar-fill" style="height:${height}%"></div></div><span class="bar-day">${day.slice(5).replace("-", "/")}</span></div>`; }).join("");
-    const dayRows = Array.from(new Set(allItems.map(item => item.day))).sort((a, b) => a - b).map(day => { const words = DATA.words.filter(item => item.day === day).length; const sentences = DATA.sentences.filter(item => item.day === day).length; const total = words + sentences; return { day, words, sentences, total }; });
+    const dayRows = Array.from(new Set(learnedItems.map(item => item.day))).sort((a, b) => a - b).map(day => { const words = DATA.words.filter(item => !item.preview && item.day === day).length; const sentences = DATA.sentences.filter(item => !item.preview && item.day === day).length; const total = words + sentences; return { day, words, sentences, total }; });
     const maxTotal = Math.max(1, ...dayRows.map(row => row.total));
     $("#dayBreakdownBody").innerHTML = dayRows.map(row => `<div class="day-row"><span class="day-row-label">第 ${row.day} 天</span><div class="day-row-bar"><div class="day-row-fill" style="width:${Math.round((row.total / maxTotal) * 100)}%"></div></div><span class="day-row-count">${row.words} 词 · ${row.sentences} 句</span></div>`).join("");
     refreshIcons();
@@ -3463,6 +3914,10 @@
     $$("[data-library-type]").forEach(button => button.addEventListener("click", () => { libraryType = button.dataset.libraryType; renderLibrary(); }));
     $("#librarySearch").addEventListener("input", renderLibrary);
     $("#dayFilter").addEventListener("change", renderLibrary);
+    $$("[data-pronunciation-filter]").forEach(button => button.addEventListener("click", () => {
+      pronunciationFilter = button.dataset.pronunciationFilter;
+      renderPronunciation();
+    }));
     $("#notesDaySelect").addEventListener("change", event => {
       notesDay = Number(event.target.value) || notesDay;
       renderNotes();
@@ -3472,6 +3927,7 @@
       renderPreview();
     });
     $("#refreshPreviewButton").addEventListener("click", loadPreview);
+    $("#refreshPreviewWordsButton").addEventListener("click", loadPreviewWords);
     $("#aiModelSelect").addEventListener("change", event => {
       aiStatusMessage = "";
       updateAiPreferences({ model: event.target.value });
@@ -3508,6 +3964,10 @@
     $("#minimizeAiTutorButton").addEventListener("click", toggleAiTutorMinimize);
     $("#maximizeAiTutorButton").addEventListener("click", toggleAiTutorMaximize);
     $("#clearAiTutorButton").addEventListener("click", clearAiTutor);
+    $("#aiTutorModel").addEventListener("change", event => {
+      updateAiTutorPreferences({ model: event.target.value });
+      renderAiTutorWindow();
+    });
     $("#aiTutorEffort").addEventListener("change", event => {
       updateAiTutorPreferences({ reasoningEffort: event.target.value });
     });
@@ -3628,7 +4088,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=30", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=32", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

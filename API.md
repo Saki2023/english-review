@@ -50,7 +50,9 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | GET | `/api/sync/profile?username=账号名` | 获取供本地学习窗口使用的学习档案，需要只读同步令牌 |
 | PUT | `/api/sync/teaching-profile?username=账号名` | 上传本地教学档案，需要独立的教学写入令牌 |
 | GET | `/api/preview` | 获取当前账号最新及近期预习，需要登录 |
+| GET | `/api/preview/words` | 获取当前课程紧邻下一天的未学预习词，需要登录 |
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
+| POST | `/api/review/sentence-variants` | 为今日复习生成已学范围内的句子变式，需要登录；AI 失败时返回本地变式 |
 | GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
 | POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录及当前试卷接口版本头，返回 `202` |
 | PUT | `/api/ai/exams/current` | 保存当前试卷草稿答案，需要登录 |
@@ -141,9 +143,24 @@ Invoke-RestMethod -Uri 'http://localhost:8080/api/content' -Headers $headers
 
 ## 自动同步每日课程内容
 
-完整学习工作区会把当天新增内容写入父目录 `学习同步\网站课程内容.json`。该文件包含 `updatedAt`、`words`、`sentences` 和 `notes`；每个单词或句子必须使用稳定且唯一的 `id`，每份结构化笔记使用唯一的正整数 `day`。
+完整学习工作区会把当天正式新增内容写入父目录 `学习同步\网站课程内容.json`。该文件包含 `updatedAt`、`words`、`sentences` 和 `notes`；每个单词或句子必须使用稳定且唯一的 `id`，每份结构化笔记使用唯一的正整数 `day`。同步脚本还会读取最新的 `预习\第NNN天预习.md`，从“单词 / 发音 / 中文”表格生成 `previewWords`，无需手工重复录入。
 
-同步脚本使用教学写入令牌调用 `PUT /api/content/batch`。接口会先验证整个请求，再按 `id` 更新或新增词句、按 `day` 更新或新增笔记；重复运行不会产生重复内容，也不会删除请求中未包含的旧课程。响应会分别返回词句和笔记的新增、更新数量，以及同步后的天数和总数。
+同步脚本使用教学写入令牌调用 `PUT /api/content/batch`。接口会先验证整个请求，再按 `id` 更新或新增正式词句、按 `day` 更新或新增笔记；重复运行不会产生重复内容，也不会删除请求中未包含的旧正式课程。`previewWords` 使用替换语义，只接受 `currentDay + 1` 的词，自动排除已学英文、重复项和更远日期；正式 `words` 与预习项同 ID 时正式内容优先。响应中的 `previewWords` 是当前保留的预习词数量。
+
+`GET /api/preview/words` 返回：
+
+```json
+{
+  "currentDay": 5,
+  "nextDay": 6,
+  "updatedAt": "2026-08-04",
+  "words": [
+    { "id": "d6-dog", "day": 6, "learned": "", "preview": true, "english": "dog", "phonetic": "/dɔɡ/", "chinese": "狗" }
+  ]
+}
+```
+
+响应只包含紧邻下一天、尚无正式学习日期且未在正式词库学过的词。预习词不会进入今日复习、听写、能力证据或同步档案中的 `learnedContent`。
 
 ## 调试示例
 
@@ -200,7 +217,7 @@ Invoke-RestMethod -Uri "https://你的域名/api/sync/profile?username=你的账
 powershell -ExecutionPolicy Bypass -File ".\每日英语复习\scripts\sync-learning-profile.ps1"
 ```
 
-脚本会先上传本地教学档案，将最新预习设为网页默认内容并保留最近 30 份预习供选择；随后读取 `学习同步\网站课程内容.json`，幂等更新网站词句库与“学习笔记”；最后把网站档案保存为 `学习同步\网站学习档案.json`，供独立的英语学习窗口读取。省略 `SYNC_WRITE_TOKEN` 时会退化为只下载模式。不要提交 `.sync.env`，也不要把任何令牌发到聊天中。
+脚本会先上传本地教学档案，将最新预习设为网页默认内容并保留最近 30 份预习供选择；随后解析最新预习的单词表，并与 `学习同步\网站课程内容.json` 一起幂等更新网站正式词句、预习词与“学习笔记”；最后把网站档案保存为 `学习同步\网站学习档案.json`，供独立的英语学习窗口读取。省略 `SYNC_WRITE_TOKEN` 时会退化为只下载模式。不要提交 `.sync.env`，也不要把任何令牌发到聊天中。
 
 ## 数据保存位置
 
@@ -243,8 +260,10 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | POST | `/api/admin/ai-config/models` | 管理员 | 使用当前或已保存的连接信息获取上游模型列表，不保存配置 |
 | POST | `/api/admin/ai-config/test` | 管理员 | 测试指定供应商和模型，不触发轮换 |
 | POST | `/api/ai/questions/generate` | 已登录 | 根据当前账号进度生成 5 或 10 道题 |
-| POST | `/api/ai/questions/ask` | 已登录 | 询问当前或历史 AI 题目，并按账号及题目追加长期问答记录 |
+| POST | `/api/ai/questions/ask` | 已登录 | 询问当前或历史 AI 题目；请求可带独立 `model` 和 `reasoningEffort`，并按账号及题目追加长期问答记录 |
+| POST | `/api/ai/questions/tutor/clear` | 已登录 | 切断指定题目的当前 AI 会话上下文，旧问答仍保留为学习历史 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
+| POST | `/api/review/sentence-variants` | 已登录 | 按已学词句、近期变式和薄弱点生成今日复习句子变式，并进行超纲校验 |
 | GET | `/api/ai/exams` | 已登录 | 获取脱敏后的试卷状态和历史 |
 | POST | `/api/ai/exams/generate` | 已登录 | 创建 100 分或 150 分完整试卷的后台生成任务，需发送 `X-English-Review-Exam-Version: 2`，返回 `202`；旧网页会收到明确的刷新提示 |
 | PUT | `/api/ai/exams/current` | 已登录 | 保存整卷草稿，不触发判分 |

@@ -24,6 +24,16 @@
       .trim();
   }
 
+  function isReviewEligibleItem(item, currentDay, studyDate) {
+    if (!item || item.preview === true) return false;
+    const day = Number(item.day);
+    const maximumDay = Number(currentDay);
+    const learned = String(item.learned || "").trim();
+    const date = String(studyDate || "").trim();
+    if (!Number.isFinite(day) || day < 1 || !Number.isFinite(maximumDay) || day > maximumDay) return false;
+    return Boolean(learned && date && learned <= date);
+  }
+
   function englishAnswerMatches(answer, acceptedAnswers) {
     const normalized = normalizeEnglish(answer);
     return Boolean(normalized && acceptedAnswers.some(expected => normalizeEnglish(expected) === normalized));
@@ -284,6 +294,7 @@
     englishFunctionWordsMatch,
     englishSourceWordResults,
     englishWordResults,
+    isReviewEligibleItem,
     normalizeChinese,
     normalizeEnglish,
     repairReviewEvidence,

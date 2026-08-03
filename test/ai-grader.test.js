@@ -10,7 +10,7 @@ const { once } = require("node:events");
 const { spawn } = require("node:child_process");
 const { test } = require("node:test");
 const { createUser, loadUsers, saveUsers } = require("../server/accounts");
-const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl, createAiGrader, createAiTutor, createRateLimiter, parseGeneratedQuestions, parseGradeResponse, parseModelList } = require("../server/ai-grader");
+const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl, createAiGrader, createAiReviewVariantGenerator, createAiTutor, createRateLimiter, parseGeneratedQuestions, parseGradeResponse, parseModelList, parseReviewVariantResponse } = require("../server/ai-grader");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -192,6 +192,13 @@ test("AI tutor requests plain Chinese guidance with the selected maximum effort"
   assert.equal(requestBody.reasoning_effort, "max");
   assert.equal(Object.hasOwn(requestBody, "response_format"), false);
   assert.match(requestBody.messages[0].content, /never reveal the full translation or final answer/);
+});
+
+test("AI review variant parser keeps task ids and Chinese answer alternatives", () => {
+  const result = parseReviewVariantResponse({ choices: [{ message: { content: JSON.stringify({ variants: [
+    { taskId: "d2-s3:en-zh", english: "A pig sat on a box.", chinese: "一头猪坐在一个箱子上。", acceptedChinese: ["一只猪坐在箱子上"] }
+  ] }) } }] });
+  assert.deepEqual(result[0], { taskId: "d2-s3:en-zh", english: "A pig sat on a box.", chinese: "一头猪坐在一个箱子上。", acceptedChinese: ["一头猪坐在一个箱子上。", "一只猪坐在箱子上"] });
 });
 
 test("generated questions reject unlearned English words and duplicates", () => {
@@ -444,7 +451,7 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(tutorBody.tutor.messages.length, 2);
     assert.equal(tutorBody.exchange.question, "这个句子应该先看哪里？");
     assert.equal(tutorBody.exchange.historyId, questionResult.practice.history[0].id);
-    assert.deepEqual(tutorBody.tutorSettings, { reasoningEffort: "low" });
+    assert.deepEqual(tutorBody.tutorSettings, { model: "strong-model", reasoningEffort: "low" });
     assert.equal(providerRequests.length, 5);
     assert.equal(providerRequests[4].body.reasoning_effort, "low");
     assert.equal(Object.hasOwn(providerRequests[4].body, "response_format"), false);
@@ -458,6 +465,32 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(stateAfterTutor.aiPractice.tutorHistory.length, 1);
     assert.equal(stateAfterTutor.aiPractice.tutorHistory[0].question, "这个句子应该先看哪里？");
     assert.equal(stateAfterTutor.aiPractice.tutorHistory[0].answer, "先看句子的主语和位置词，再自己试一次。");
+    assert.equal(stateAfterTutor.aiPractice.tutor.historyId, questionResult.practice.history[0].id);
+    assert.equal(stateAfterTutor.aiPractice.tutor.source, "history");
+
+    const clearTutor = await fetch(`${baseUrl}/api/ai/questions/tutor/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ historyId: questionResult.practice.history[0].id })
+    });
+    assert.equal(clearTutor.status, 200);
+    const clearedTutor = await clearTutor.json();
+    assert.equal(clearedTutor.practice.tutorHistory.length, 1, "clearing context must retain the archived question and answer");
+    assert.deepEqual(clearedTutor.practice.tutor.messages, []);
+    assert.equal(clearedTutor.practice.tutorResets.length, 1);
+
+    const restartedTutor = await fetch(`${baseUrl}/api/ai/questions/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ historyId: questionResult.practice.history[0].id, message: "现在重新解释一次。", reasoningEffort: "low" })
+    });
+    assert.equal(restartedTutor.status, 200);
+    assert.equal(providerRequests.length, 6);
+    const restartedTutorRequest = JSON.parse(providerRequests[5].body.messages[1].content);
+    assert.deepEqual(restartedTutorRequest.conversation, [], "a cleared session must not send archived messages back to AI");
+    const stateAfterRestart = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
+    assert.equal(stateAfterRestart.aiPractice.tutorHistory.length, 2);
+    assert.equal(stateAfterRestart.aiPractice.tutorResets.length, 1);
 
     const unavailableGeneration = await fetch(`${baseUrl}/api/ai/questions/generate`, {
       method: "POST",
@@ -477,6 +510,7 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(memberState.aiPractice.currentSet, null);
     assert.equal(memberState.aiPractice.tutor, null);
     assert.deepEqual(memberState.aiPractice.tutorHistory, []);
+    assert.deepEqual(memberState.aiPractice.tutorResets, []);
     assert.deepEqual(memberState.aiPractice.history, []);
     const memberOptions = await (await fetch(`${baseUrl}/api/ai/options`, { headers: { "Cookie": memberCookie } })).json();
     assert.equal(memberOptions.selectedModel, "test-model");

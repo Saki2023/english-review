@@ -16,12 +16,19 @@ test("AI tutor Enter handling is wired to form submission", () => {
   const html = read("index.html");
   assert.match(app, /aiTutorInput"\)\.addEventListener\("keydown", event => \{\s*if \(!shouldSubmitOnEnter\(event\)\) return;\s*event\.preventDefault\(\);\s*\$\("#aiTutorForm"\)\.requestSubmit\(\);/s);
   assert.match(html, /id="aiTutorEffort"/);
-  assert.match(app, /message,\s*reasoningEffort: practice\.tutorSettings\.reasoningEffort/s);
+  assert.match(html, /id="aiTutorModel"/);
+  assert.match(app, /message,\s*model: practice\.tutorSettings\.model,\s*reasoningEffort: practice\.tutorSettings\.reasoningEffort/s);
   assert.match(app, /data-ai-history-ask/);
   assert.match(app, /const available = aiOptions\.configured && target/);
   assert.match(app, /tutorHistory: \(Array\.isArray\(source\.tutorHistory\)/);
-  assert.match(app, /practice\.tutorHistory\.filter\(item => item\.setId === target\.setId && item\.questionId === target\.questionId\)/);
+  assert.match(app, /practice\.tutorHistory\.filter\(item => item\.setId === target\.setId && item\.questionId === target\.questionId && \(!resetAt \|\| item\.askedAt > resetAt\)\)/);
   assert.match(app, /normalizeClientTutorExchange\(data\.exchange\)/);
+  assert.match(html, /id="aiTutorPersistenceStatus"/);
+  assert.match(html, /id="clearAiTutorButton"[^>]*>[\s\S]*清除会话/);
+  assert.match(app, /function aiTutorTargetForSavedThread\(practice\)/);
+  assert.match(app, /\/api\/ai\/questions\/tutor\/clear/);
+  assert.match(app, /tutorResets:/);
+  assert.match(app, /旧问答仍保留为学习记录/);
 });
 
 test("AI tutor launcher supports persistent pointer dragging", () => {
@@ -110,6 +117,25 @@ test("ability, dictation, and focused practice UI share speech and evidence cont
   assert.match(app, /question\.direction === "en-zh" \? speechButtonHtml/);
 });
 
+test("pronunciation lesson lists and filters reference sounds without pretending word speech is isolated IPA", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  const serviceWorker = read("sw.js");
+
+  assert.match(html, /data-view="pronunciation"/);
+  assert.match(html, /id="pronunciationConcepts"/);
+  assert.match(html, /data-pronunciation-filter="learned"/);
+  assert.match(html, /data-pronunciation-filter="vowel"/);
+  assert.match(html, /data-pronunciation-filter="consonant"/);
+  assert.match(html, /data-pronunciation-filter="all"/);
+  assert.match(html, /pronunciation-data\.js\?v=32/);
+  assert.match(app, /function renderPronunciation\(\)/);
+  assert.match(app, /item\.learned === true/);
+  assert.match(app, /speechButtonHtml\(item\.example/);
+  assert.match(app, /中文辅助/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=32/);
+});
+
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
   const app = read("app.js");
   const html = read("index.html");
@@ -129,6 +155,34 @@ test("daily preview loads the latest synced document and renders bounded Markdow
   assert.match(sync, /网站课程内容\.json/);
   assert.match(sync, /\/api\/content\/batch/);
   assert.match(sync, /notesAdded/);
+});
+
+test("today review removes preview words from new, cached, library, and mistake entry paths", () => {
+  const app = read("app.js");
+  assert.match(app, /function reviewTaskIsEligible\(task, studyDate = localDate\(\)\)/);
+  assert.match(app, /isReviewEligibleItem\(task\.item, DATA\.currentDay, studyDate\)/);
+  assert.match(app, /function pruneReviewSession\(session\)/);
+  assert.match(app, /let changed = pruneReviewSession\(session\)/);
+  assert.match(app, /buildMistakePracticeQueue[\s\S]*\.filter\(candidate => reviewTaskIsEligible\(taskById\.get\(candidate\)\)\)/);
+  assert.match(app, /item\.preview \? '<span class="type-badge">预习<\/span>'/);
+});
+
+test("preview words have a next-day-only page with speech and learned-feature isolation", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  const css = read("styles.css");
+  const server = read("server.js");
+  assert.match(html, /data-view="preview-words"/);
+  assert.match(html, /id="previewWordsGrid"/);
+  assert.match(html, /id="refreshPreviewWordsButton"/);
+  assert.match(app, /fetch\("\/api\/preview\/words", \{ cache: "no-store", credentials: "same-origin" \}\)/);
+  assert.match(app, /function normalizePreviewWordsResponse\(value\)/);
+  assert.match(app, /item => item && item\.day === nextDay/);
+  assert.match(app, /speechButtonHtml\(item\.english, `慢速播放预习单词/);
+  assert.match(app, /const learnedItems = allItems\.filter\(item => !item\.preview\)/);
+  assert.match(css, /\.preview-words-grid\s*\{[^}]*grid-template-columns:/s);
+  assert.match(server, /url\.pathname === "\/api\/preview\/words"/);
+  assert.match(server, /content\.words\.filter\(item => !item\.preview && item\.learned/);
 });
 
 test("partial answers have distinct feedback and preserve mastery", () => {
@@ -158,7 +212,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 30", () => {
+test("PWA client assets consistently use the displayed cache version 32", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -169,6 +223,6 @@ test("PWA client assets consistently use the displayed cache version 30", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "30");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v30"/);
+  assert.equal(displayedVersion[1], "32");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v32"/);
 });

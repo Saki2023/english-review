@@ -7,7 +7,7 @@ const { test } = require("node:test");
 
 const ROOT = path.resolve(__dirname, "..");
 
-test("mobile styles keep AI, exam, ability, dictation, focused, notes, and preview controls within a narrow viewport", () => {
+test("mobile styles keep AI, exam, ability, dictation, focused, pronunciation, notes, and preview controls within a narrow viewport", () => {
   const css = fs.readFileSync(path.join(ROOT, "styles.css"), "utf8");
   const tablet = css.slice(css.indexOf("@media (max-width: 760px)"), css.indexOf("@media (max-width: 520px)"));
   const mobile = css.slice(css.indexOf("@media (max-width: 520px)"));
@@ -27,12 +27,18 @@ test("mobile styles keep AI, exam, ability, dictation, focused, notes, and previ
   assert.match(mobile, /\.dictation-controls\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.focused-controls\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.focused-skill-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(tablet, /\.pronunciation-concepts,\s*\.pronunciation-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(tablet, /\.pronunciation-controls\s*\{[^}]*flex-direction:\s*column/s);
+  assert.match(mobile, /\.pronunciation-filter\s*\{[^}]*width:\s*100%[^}]*overflow-x:\s*auto/s);
+  assert.match(mobile, /\.pronunciation-filter \.segment\s*\{[^}]*flex:\s*1/s);
   assert.match(mobile, /\.ai-history-heading\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(mobile, /\.ai-history-answers\s*>\s*div\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.notes-columns\s*\{[^}]*grid-template-columns:\s*1fr/s);
-  assert.match(tablet, /\.preview-heading\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(mobile, /\.preview-toolbar\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(mobile, /\.preview-toolbar \.notes-day-picker,\s*\.preview-toolbar \.secondary-button\s*\{[^}]*width:\s*100%/s);
+  assert.match(tablet, /\.preview-heading,\s*\.preview-words-heading\s*\{[^}]*flex-direction:\s*column/s);
+  assert.match(mobile, /\.preview-words-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(mobile, /\.preview-words-heading \.secondary-button\s*\{[^}]*width:\s*100%/s);
   assert.match(tablet, /\.ai-provider-workspace\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.ai-routing-settings\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.ai-provider-list\s*\{[^}]*grid-template-columns:\s*1fr/s);

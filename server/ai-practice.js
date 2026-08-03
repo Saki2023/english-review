@@ -11,6 +11,7 @@ const MAX_AI_HISTORY = 1000;
 const MAX_QUESTION_COUNT = 10;
 const MAX_TUTOR_MESSAGES = 12;
 const MAX_TUTOR_HISTORY = 1000;
+const MAX_TUTOR_RESETS = 1000;
 const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 function cleanText(value, maximum = 300) {
@@ -55,7 +56,27 @@ function sanitizeTutorThread(value) {
   return {
     setId,
     questionId,
+    historyId: cleanText(value.historyId, 180),
+    source: ["current", "history"].includes(value.source) ? value.source : "",
+    prompt: cleanText(value.prompt, 300),
+    updatedAt: cleanText(value.updatedAt, 40),
     messages: (Array.isArray(value.messages) ? value.messages : []).map(sanitizeTutorMessage).filter(Boolean).slice(-MAX_TUTOR_MESSAGES)
+  };
+}
+
+function sanitizeTutorReset(value) {
+  if (!value || typeof value !== "object") return null;
+  const setId = cleanText(value.setId, 80);
+  const questionId = cleanText(value.questionId, 80);
+  const resetAt = cleanText(value.resetAt, 40);
+  if (!setId || !questionId || !resetAt) return null;
+  return {
+    setId,
+    questionId,
+    historyId: cleanText(value.historyId, 180),
+    source: ["current", "history"].includes(value.source) ? value.source : "",
+    prompt: cleanText(value.prompt, 300),
+    resetAt
   };
 }
 
@@ -197,6 +218,12 @@ function sanitizeAiPractice(value) {
   const tutorSettings = source.tutorSettings && typeof source.tutorSettings === "object" ? source.tutorSettings : {};
   const tutor = sanitizeTutorThread(source.tutor);
   const savedTutorHistory = (Array.isArray(source.tutorHistory) ? source.tutorHistory : []).map(sanitizeTutorExchange).filter(Boolean);
+  const tutorResetMap = new Map();
+  (Array.isArray(source.tutorResets) ? source.tutorResets : []).map(sanitizeTutorReset).filter(Boolean).forEach(item => {
+    const key = `${item.setId}\u0000${item.questionId}`;
+    const previous = tutorResetMap.get(key);
+    if (!previous || item.resetAt > previous.resetAt) tutorResetMap.set(key, item);
+  });
   return {
     settings: {
       model: cleanText(settings.model, 120),
@@ -204,11 +231,13 @@ function sanitizeAiPractice(value) {
       count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
     },
     tutorSettings: {
+      model: cleanText(tutorSettings.model, 120),
       reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
     },
     currentSet: sanitizeQuestionSet(source.currentSet),
     tutor,
     tutorHistory: (savedTutorHistory.length ? savedTutorHistory : legacyTutorHistory(tutor)).slice(-MAX_TUTOR_HISTORY),
+    tutorResets: Array.from(tutorResetMap.values()).slice(-MAX_TUTOR_RESETS),
     history: (Array.isArray(source.history) ? source.history : []).map(sanitizeHistoryItem).slice(-MAX_AI_HISTORY),
     updatedAt: cleanText(source.updatedAt, 40)
   };
@@ -216,12 +245,13 @@ function sanitizeAiPractice(value) {
 
 function tutorThreadFromHistory(value, setId, questionId) {
   const practice = sanitizeAiPractice(value);
-  const messages = practice.tutorHistory.filter(item => item.setId === setId && item.questionId === questionId).flatMap(item => [
+  if (practice.tutor && practice.tutor.setId === setId && practice.tutor.questionId === questionId) return practice.tutor;
+  const resetAt = practice.tutorResets.filter(item => item.setId === setId && item.questionId === questionId).sort((left, right) => right.resetAt.localeCompare(left.resetAt))[0]?.resetAt || "";
+  const messages = practice.tutorHistory.filter(item => item.setId === setId && item.questionId === questionId && (!resetAt || item.askedAt > resetAt)).flatMap(item => [
     { role: "user", content: item.question, createdAt: item.askedAt },
     { role: "assistant", content: item.answer, createdAt: item.answeredAt }
   ]).slice(-MAX_TUTOR_MESSAGES);
   if (messages.length) return { setId, questionId, messages };
-  if (practice.tutor && practice.tutor.setId === setId && practice.tutor.questionId === questionId) return practice.tutor;
   return { setId, questionId, messages: [] };
 }
 
@@ -246,8 +276,8 @@ function englishTokens(value) {
 
 function buildLearningProfile(content, state, studyDate = "") {
   const taskStates = state.taskStates && typeof state.taskStates === "object" ? state.taskStates : {};
-  const learnedWords = content.words.filter(item => !studyDate || !item.learned || String(item.learned) <= studyDate);
-  const learnedSentences = content.sentences.filter(item => !studyDate || !item.learned || String(item.learned) <= studyDate);
+  const learnedWords = content.words.filter(item => !item.preview && (!studyDate || !item.learned || String(item.learned) <= studyDate));
+  const learnedSentences = content.sentences.filter(item => !item.preview && (!studyDate || !item.learned || String(item.learned) <= studyDate));
   const rankedWords = [...learnedWords].sort((a, b) => {
     const weakA = itemWeakness(a, taskStates);
     const weakB = itemWeakness(b, taskStates);
@@ -335,12 +365,14 @@ module.exports = {
   MAX_AI_HISTORY,
   MAX_TUTOR_HISTORY,
   MAX_TUTOR_MESSAGES,
+  MAX_TUTOR_RESETS,
   buildLearningProfile,
   createQuestionSet,
   sanitizeAiPractice,
   sanitizeQuestion,
   sanitizeQuestionSet,
   sanitizeTutorExchange,
+  sanitizeTutorReset,
   sanitizeTutorThread,
   taskItem,
   tutorThreadFromHistory

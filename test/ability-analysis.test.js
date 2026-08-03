@@ -18,6 +18,15 @@ test("abilities keep unpracticed skills separate from wrong answers", () => {
   assert.equal(report.abilities.find(item => item.id === "listening").measuredAccuracy, null);
 });
 
+test("preview-word attempts never become ability evidence", () => {
+  const report = analyzeAbilities({
+    words: [{ id: "dog-preview", day: 3, learned: "", preview: true, english: "dog", chinese: "狗" }],
+    sentences: []
+  }, { attempts: [{ taskId: "dog-preview:zh-en", correct: false, date: "2026-08-03" }] });
+  assert.equal(report.totalEvidence, 0);
+  assert.equal(report.practicedAbilities, 0);
+});
+
 test("review, AI, exam, dictation, and focused evidence share one score model", () => {
   const report = analyzeAbilities(content, {
     attempts: [

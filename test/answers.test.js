@@ -2,7 +2,16 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
+const { buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
+
+test("today review accepts only formally learned content", () => {
+  const today = "2026-08-03";
+  assert.equal(isReviewEligibleItem({ day: 4, learned: "2026-08-03", preview: false }, 4, today), true);
+  assert.equal(isReviewEligibleItem({ day: 5, learned: "", preview: true }, 4, today), false);
+  assert.equal(isReviewEligibleItem({ day: 4, learned: "", preview: false }, 4, today), false);
+  assert.equal(isReviewEligibleItem({ day: 5, learned: "2026-08-03", preview: false }, 4, today), false);
+  assert.equal(isReviewEligibleItem({ day: 4, learned: "2026-08-04", preview: false }, 4, today), false);
+});
 
 test("Chinese answers accept explicit equivalent location wording", () => {
   const accepted = ["一只猫坐在一张垫子上", "一只猫坐在垫子上"];

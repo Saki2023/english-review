@@ -8,7 +8,10 @@ test("learning sync profile combines review and AI evidence without account secr
   const content = {
     currentDay: 2,
     updatedAt: "2026-08-01",
-    words: [{ id: "cat", day: 2, english: "cat", chinese: "猫", phonetic: "/kæt/", directions: ["en-zh", "zh-en"] }],
+    words: [
+      { id: "cat", day: 2, learned: "2026-08-01", english: "cat", chinese: "猫", phonetic: "/kæt/", directions: ["en-zh", "zh-en"] },
+      { id: "dog-preview", day: 3, learned: "", preview: true, english: "dog", chinese: "狗", phonetic: "/dɔɡ/", directions: ["en-zh", "zh-en"] }
+    ],
     sentences: [{ id: "cat-sentence", day: 2, english: "A cat sat on a mat.", chinese: "一只猫坐在垫子上。", directions: ["en-zh"] }]
   };
   const state = {
@@ -64,6 +67,8 @@ test("learning sync profile combines review and AI evidence without account secr
   assert.equal(profile.summary.aiAccuracy, 0);
   assert.equal(profile.summary.tutorQuestions, 1);
   assert.equal(profile.course.notes, 0);
+  assert.equal(profile.course.words, 1);
+  assert.equal(profile.course.previewWords, 1);
   assert.equal(profile.summary.weakItems, 2);
   assert.equal(profile.summary.strongItems, 0);
   assert.equal(profile.weakPoints.aiWordSignals[0].english, "cat");
@@ -74,6 +79,7 @@ test("learning sync profile combines review and AI evidence without account secr
   assert.equal(profile.tutorHistory[0].learnerQuestion, "为什么这里是 cat？");
   assert.equal(profile.tutorHistory[0].aiAnswer, "因为 cat 表示猫。");
   assert.equal(profile.activity.tutorQuestions[0].id, "tutor-1");
+  assert.equal(profile.learnedContent.some(item => item.id === "dog-preview"), false);
   assert.equal(Object.hasOwn(profile.user, "passwordHash"), false);
   assert.equal(JSON.stringify(profile).includes("never-return-this"), false);
 });

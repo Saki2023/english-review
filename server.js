@@ -6,13 +6,14 @@ const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
 const { chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
-const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiQuestionGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
-const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, buildLearningProfile, createQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
+const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
+const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
 const { buildLearningSyncProfile } = require("./server/learning-sync");
 const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./server/learning-sync-token");
 const { publicTeachingProfile, sanitizeTeachingProfile } = require("./server/teaching-profile");
 const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis");
+const { chooseSentenceVariant, normalizeEnglish: normalizeVariantEnglish, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById } = require("./review-variants");
 const { repairLearningEvidence } = require("./server/evidence-repair");
 const {
   completeDictation,
@@ -108,7 +109,12 @@ function readSeedContent() {
 
 function mergeById(seedItems, storedItems) {
   const map = new Map((Array.isArray(seedItems) ? seedItems : []).map(item => [item.id, item]));
-  (Array.isArray(storedItems) ? storedItems : []).forEach(item => { if (item && item.id) map.set(item.id, item); });
+  (Array.isArray(storedItems) ? storedItems : []).forEach(item => {
+    if (!item || !item.id) return;
+    const existing = map.get(item.id);
+    if (item.preview && existing && !existing.preview) return;
+    map.set(item.id, item);
+  });
   return Array.from(map.values());
 }
 
@@ -135,7 +141,7 @@ function mergeContent(seed, stored) {
 }
 
 function recalculateCurrentDay(target, seedDay = 0) {
-  const itemDays = [...(target.words || []), ...(target.sentences || []), ...(target.notes || [])].map(item => Number(item.day) || 0);
+  const itemDays = [...(target.words || []), ...(target.sentences || []), ...(target.notes || [])].filter(item => !item.preview).map(item => Number(item.day) || 0);
   target.currentDay = Math.max(Number(seedDay) || 0, ...itemDays);
 }
 
@@ -370,7 +376,8 @@ function normalizeContentItem(body) {
   if (!english || !chinese) throw Object.assign(new Error("english and chinese are required"), { statusCode: 400 });
   const day = Number(body.day || content.currentDay || 1);
   if (!Number.isInteger(day) || day < 1) throw Object.assign(new Error("day must be a positive integer"), { statusCode: 400 });
-  const base = { id: String(body.id || `api-d${day}-${kind}-${slug(english)}-${Date.now()}`).trim(), day, learned: String(body.learned || today()), english, chinese, directions: Array.isArray(body.directions) && body.directions.length ? body.directions : ["en-zh", "zh-en"] };
+  const preview = kind === "word" && body.preview === true;
+  const base = { id: String(body.id || `api-d${day}-${kind}-${slug(english)}-${Date.now()}`).trim(), day, learned: preview ? String(body.learned || "").trim() : String(body.learned || today()), preview, english, chinese, directions: Array.isArray(body.directions) && body.directions.length ? body.directions : ["en-zh", "zh-en"] };
   if (kind === "word") return { ...base, phonetic: String(body.phonetic || "").trim(), acceptedChinese: Array.isArray(body.acceptedChinese) && body.acceptedChinese.length ? body.acceptedChinese : [chinese], pronunciation: String(body.pronunciation || "").trim(), example: String(body.example || "").trim(), exampleZh: String(body.exampleZh || "").trim() };
   return { ...base, acceptedChinese: Array.isArray(body.acceptedChinese) && body.acceptedChinese.length ? body.acceptedChinese : [chinese], acceptedEnglish: Array.isArray(body.acceptedEnglish) && body.acceptedEnglish.length ? body.acceptedEnglish : [english.toLowerCase().replace(/[.,!?;:]/g, "").trim()] };
 }
@@ -410,19 +417,44 @@ function normalizeContentNote(body) {
 
 function syncCourseContent(body) {
   const source = body && typeof body === "object" ? body : {};
+  const replacePreviewWords = Object.hasOwn(source, "previewWords");
+  const formalWords = Array.isArray(source.words) ? source.words.map(item => ({ ...item, kind: "word", preview: false })) : [];
+  const formalIds = new Set(formalWords.map(item => String(item.id || "")).filter(Boolean));
+  const projectedCurrentDay = Math.max(
+    Number(content.currentDay) || 0,
+    Number(readSeedContent().currentDay) || 0,
+    ...formalWords.map(item => Number(item.day) || 0),
+    ...(Array.isArray(source.sentences) ? source.sentences.map(item => Number(item && item.day) || 0) : []),
+    ...(Array.isArray(source.notes) ? source.notes.map(item => Number(item && item.day) || 0) : [])
+  );
+  const learnedEnglish = new Set([
+    ...content.words.filter(item => !item.preview).map(item => String(item.english || "").toLocaleLowerCase()),
+    ...formalWords.map(item => String(item.english || "").toLocaleLowerCase())
+  ].filter(Boolean));
+  const seenPreviewEnglish = new Set();
+  const previewWords = Array.isArray(source.previewWords) ? source.previewWords.filter(item => {
+    const id = String(item && item.id || "");
+    const english = String(item && item.english || "").toLocaleLowerCase();
+    if (!id || !english || formalIds.has(id) || learnedEnglish.has(english) || seenPreviewEnglish.has(english)) return false;
+    if (Number(item && item.day) !== projectedCurrentDay + 1) return false;
+    seenPreviewEnglish.add(english);
+    return true;
+  }).map(item => ({ ...item, kind: "word", preview: true, learned: "" })) : [];
   const incoming = [
-    ...(Array.isArray(source.words) ? source.words.map(item => ({ ...item, kind: "word" })) : []),
-    ...(Array.isArray(source.sentences) ? source.sentences.map(item => ({ ...item, kind: "sentence" })) : [])
+    ...previewWords,
+    ...formalWords,
+    ...(Array.isArray(source.sentences) ? source.sentences.map(item => ({ ...item, kind: "sentence", preview: false })) : [])
   ];
   const normalized = incoming.map(normalizeContentItem);
   const notes = (Array.isArray(source.notes) ? source.notes : []).map(normalizeContentNote);
-  if (!normalized.length && !notes.length) throw Object.assign(new Error("words, sentences, or notes are required"), { statusCode: 400 });
+  if (!normalized.length && !notes.length && !replacePreviewWords) throw Object.assign(new Error("words, sentences, notes, or previewWords are required"), { statusCode: 400 });
 
   const incomingIds = new Set();
   normalized.forEach(item => {
     if (incomingIds.has(item.id)) throw Object.assign(new Error(`duplicate incoming id: ${item.id}`), { statusCode: 409 });
     incomingIds.add(item.id);
   });
+
   const noteDays = new Set();
   notes.forEach(note => {
     if (noteDays.has(note.day)) throw Object.assign(new Error(`duplicate incoming note day: ${note.day}`), { statusCode: 409 });
@@ -435,10 +467,16 @@ function syncCourseContent(body) {
     }
   });
 
+  if (replacePreviewWords) {
+    const retainedPreviewIds = new Set([...previewWords.map(item => item.id), ...formalIds]);
+    content.words = content.words.filter(item => !item.preview || retainedPreviewIds.has(item.id));
+  }
+
   let added = 0;
   let updated = 0;
   normalized.forEach(item => {
     const found = findContentItem(item.id);
+    if (item.preview && found && (!found.item.preview || Number(item.day) <= Number(content.currentDay || 0))) return;
     const target = item.phonetic !== undefined ? content.words : content.sentences;
     if (!found) {
       target.push(item);
@@ -465,8 +503,9 @@ function syncCourseContent(body) {
   content.notes.sort((left, right) => Number(left.day) - Number(right.day));
   content.updatedAt = [content.updatedAt, boundedContentText(source.updatedAt, 40) || today()].map(String).filter(Boolean).sort().at(-1);
   recalculateCurrentDay(content, readSeedContent().currentDay);
+  content.words = content.words.filter(item => !item.preview || Number(item.day) === Number(content.currentDay) + 1);
   persistContent();
-  return { added, updated, notesAdded, notesUpdated, currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, notes: content.notes.length, updatedAt: content.updatedAt };
+  return { added, updated, previewWords: content.words.filter(item => item.preview).length, notesAdded, notesUpdated, currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, notes: content.notes.length, updatedAt: content.updatedAt };
 }
 
 function addContentItem(body) {
@@ -555,6 +594,20 @@ function handlePreview(req, res, user) {
   });
 }
 
+function handlePreviewWords(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "GET") return sendError(res, 404, "preview words endpoint not found");
+  refreshContent();
+  const currentDay = Number(content.currentDay) || 1;
+  const nextDay = currentDay + 1;
+  const learnedEnglish = new Set(content.words.filter(item => !item.preview).map(item => String(item.english || "").toLocaleLowerCase()).filter(Boolean));
+  const words = content.words.filter(item => item.preview === true
+    && Number(item.day) === nextDay
+    && !String(item.learned || "").trim()
+    && !learnedEnglish.has(String(item.english || "").toLocaleLowerCase()));
+  return sendJson(res, 200, { currentDay, nextDay, updatedAt: content.updatedAt, words });
+}
+
 function handleAbilities(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "GET") return sendError(res, 404, "ability endpoint not found");
@@ -562,20 +615,115 @@ function handleAbilities(req, res, user) {
   return sendJson(res, 200, analyzeAbilities(content, getUserState(user)));
 }
 
-function findSentenceTask(taskId) {
+function findSentenceTask(taskId, variantId = "", suppliedVariant = null) {
   const value = String(taskId || "");
   const separator = value.lastIndexOf(":");
   if (separator <= 0) return null;
   const id = value.slice(0, separator);
   const direction = value.slice(separator + 1);
   if (!["en-zh", "zh-en"].includes(direction)) return null;
-  const item = content.sentences.find(sentence => sentence.id === id);
-  return item ? { item, direction, taskId: value } : null;
+  const baseItem = content.sentences.find(sentence => sentence.id === id);
+  if (!baseItem) return null;
+  if (!variantId) return { item: baseItem, baseItem, direction, taskId: value, variant: null };
+  const localVariant = sentenceVariantById(content, baseItem, variantId);
+  const generatedVariant = !localVariant && suppliedVariant && String(suppliedVariant.id || "") === String(variantId)
+    ? sanitizeGeneratedSentenceVariant(content, baseItem, suppliedVariant)
+    : null;
+  const variant = localVariant || generatedVariant;
+  if (!variant) return null;
+  return { item: { ...baseItem, ...variant }, baseItem, direction, taskId: value, variant };
 }
 
 function localSentenceAnswerMatches(task, answer) {
   if (task.direction === "zh-en") return englishAnswerMatches(answer, task.item.acceptedEnglish || [task.item.english]);
   return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese]);
+}
+
+function recentReviewVariants(state) {
+  return (Array.isArray(state.attempts) ? state.attempts : []).slice(-60).map(attempt => ({
+    taskId: String(attempt && attempt.taskId || ""),
+    id: String(attempt && attempt.variantId || ""),
+    english: String(attempt && attempt.reviewVariant && attempt.reviewVariant.english || "")
+  })).filter(item => item.taskId && (item.id || item.english));
+}
+
+function fallbackSentenceVariants(tasks, state, date) {
+  const recent = recentReviewVariants(state);
+  const selectedIds = [];
+  return tasks.map(task => {
+    const excludedIds = [...selectedIds, ...recent.filter(item => item.taskId === task.taskId).map(item => item.id).filter(Boolean)];
+    const chosen = chooseSentenceVariant(content, task.baseItem, `${date}|${task.taskId}|${recent.length}`, excludedIds);
+    const variant = chosen || {
+      id: `library-${task.baseItem.id}`,
+      family: sentenceFamily(task.baseItem),
+      english: task.baseItem.english,
+      chinese: task.baseItem.chinese,
+      acceptedEnglish: task.baseItem.acceptedEnglish || [normalizeVariantEnglish(task.baseItem.english)],
+      acceptedChinese: task.baseItem.acceptedChinese || [task.baseItem.chinese]
+    };
+    selectedIds.push(variant.id);
+    return { ...variant, taskId: task.taskId, source: "local", generatedAt: new Date().toISOString() };
+  });
+}
+
+async function handleReviewSentenceVariants(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "POST") return sendError(res, 404, "review variant endpoint not found");
+  try {
+    refreshContent();
+    const body = await readBody(req);
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date || "")) ? String(body.date) : today();
+    const taskIds = Array.from(new Set((Array.isArray(body.taskIds) ? body.taskIds : []).map(value => String(value || "")).filter(Boolean))).slice(0, 10);
+    if (!taskIds.length) return sendError(res, 400, "taskIds are required");
+    const tasks = taskIds.map(taskId => findSentenceTask(taskId)).filter(Boolean);
+    if (tasks.length !== taskIds.length) return sendError(res, 404, "sentence task not found");
+    const state = getUserState(user);
+    const fallback = () => sendJson(res, 200, { variants: fallbackSentenceVariants(tasks, state, date), source: "local", notice: "AI 暂时不可用，已使用本地自然变式" });
+    if (!aiConfigured()) return fallback();
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) return fallback();
+
+    const practice = sanitizeAiPractice(state.aiPractice);
+    const availableModels = getAvailableModels(aiSettings);
+    const requestedModel = [practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
+    const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: "low" });
+    const profile = buildLearningProfile(content, state, date);
+    const recent = recentReviewVariants(state);
+    const fixedEnglish = content.sentences.map(item => item.english);
+    const excludedEnglish = Array.from(new Set([...fixedEnglish, ...recent.map(item => item.english).filter(Boolean)]));
+    const grammarFamilies = {
+      identity: "subject + am/is + a person or identity",
+      description: "It is + an adjective, or It is a/an + adjective/noun",
+      "sat-on": "subject + sat on + a surface or object",
+      inside: "subject + is in + a place or container",
+      on: "subject + is on + a surface or object"
+    };
+
+    try {
+      const routed = await runAiRoute(route, config => createAiReviewVariantGenerator(config).generate({
+        allowedWords: profile.allowedWords,
+        grammarFamilies,
+        targets: tasks.map(task => ({ taskId: task.taskId, grammarFamily: sentenceFamily(task.baseItem), sourceEnglish: task.baseItem.english, sourceChinese: task.baseItem.chinese })),
+        excludedEnglish,
+        weakItems: profile.weakItems.slice(0, 12)
+      }));
+      const rawByTask = new Map(routed.value.map(item => [item.taskId, item]));
+      const generatedAt = new Date().toISOString();
+      const selectedEnglish = [...excludedEnglish];
+      const variants = tasks.map(task => {
+        const variant = sanitizeGeneratedSentenceVariant(content, task.baseItem, rawByTask.get(task.taskId), selectedEnglish);
+        if (!variant) throw new Error("AI provider returned an invalid or repeated review variant");
+        selectedEnglish.push(variant.english);
+        return { ...variant, taskId: task.taskId, source: "ai", providerId: routed.config.providerId, providerName: routed.config.providerName, model: routed.config.model, reasoningEffort: route.reasoningEffort, generatedAt };
+      });
+      return sendJson(res, 200, { variants, source: "ai", provider: { id: routed.config.providerId, name: routed.config.providerName }, model: routed.config.model, reasoningEffort: route.reasoningEffort });
+    } catch (error) {
+      console.warn(`AI review variant generation failed, using local fallback: ${error && error.message ? error.message : "unknown error"}`);
+      return fallback();
+    }
+  } catch (error) {
+    return sendError(res, error.statusCode || 400, error.message);
+  }
 }
 
 function aiSelectionForState(state, requested = {}) {
@@ -596,13 +744,16 @@ function publicAiOptions(user) {
   const current = aiSettingsStore.public();
   const practice = user ? sanitizeAiPractice(getUserState(user).aiPractice) : sanitizeAiPractice(null);
   const selectedModel = current.availableModels.includes(practice.settings.model) ? practice.settings.model : current.defaultModel;
+  const selectedTutorModel = current.availableModels.includes(practice.tutorSettings.model) ? practice.tutorSettings.model : current.defaultModel;
   return {
     configured: current.configured,
     models: current.availableModels,
     defaultModel: current.defaultModel,
     efforts: current.efforts,
     selectedModel,
+    selectedTutorModel,
     selectedEffort: practice.settings.reasoningEffort,
+    selectedTutorEffort: practice.tutorSettings.reasoningEffort,
     selectedCount: practice.settings.count,
     routingMode: current.mode,
     admin: Boolean(user && user.role === "admin")
@@ -790,7 +941,7 @@ async function handleAiGrade(req, res, user) {
     const answer = String(body.answer || "").trim();
     if (!answer) return sendError(res, 400, "answer is required");
     if (answer.length > MAX_AI_ANSWER_LENGTH) return sendError(res, 400, "answer is too long");
-    const task = findSentenceTask(body.taskId);
+    const task = findSentenceTask(body.taskId, body.variantId, body.reviewVariant);
     if (!task) return sendError(res, 404, "sentence task not found");
     const acceptedAnswers = task.direction === "zh-en" ? (task.item.acceptedEnglish || [task.item.english]) : (task.item.acceptedChinese || [task.item.chinese]);
     const localGrade = localTranslationGrade(task.direction, task.item.english, answer, acceptedAnswers);
@@ -888,10 +1039,13 @@ async function handleAiTutorAsk(req, res, user) {
     if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
     const contextModel = historyItem ? historyItem.model : set.model;
     const availableModels = getAvailableModels(aiSettings);
-    const requestedModel = availableModels.includes(contextModel) ? contextModel : aiSettings.defaultModel;
+    const requestedModel = [body.model, practice.tutorSettings.model, contextModel, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
     const tutorEffort = AI_EFFORTS.includes(body.reasoningEffort) ? body.reasoningEffort : practice.tutorSettings.reasoningEffort;
     const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: tutorEffort });
     const thread = tutorThreadFromHistory(practice, threadSetId, threadQuestionId);
+    thread.historyId = historyItem ? historyItem.id : "";
+    thread.source = historyItem ? "history" : "current";
+    thread.prompt = historyItem ? historyItem.prompt : (exercise.direction === "en-zh" ? exercise.english : exercise.chinese);
     const askedAt = new Date().toISOString();
     const routed = await runAiRoute(route, config => createAiTutor(config).answer({
       exercise,
@@ -904,6 +1058,7 @@ async function handleAiTutorAsk(req, res, user) {
       { role: "user", content: message, createdAt },
       { role: "assistant", content: routed.value, createdAt }
     ].slice(-MAX_TUTOR_MESSAGES);
+    thread.updatedAt = createdAt;
     const exchange = sanitizeTutorExchange({
       id: `tutor-${crypto.randomUUID()}`,
       setId: threadSetId,
@@ -927,6 +1082,7 @@ async function handleAiTutorAsk(req, res, user) {
     });
     practice.tutorHistory = [...practice.tutorHistory, exchange].filter(Boolean).slice(-MAX_TUTOR_HISTORY);
     practice.tutor = thread;
+    practice.tutorSettings.model = route.model;
     practice.tutorSettings.reasoningEffort = route.reasoningEffort;
     practice.updatedAt = createdAt;
     state.aiPractice = practice;
@@ -937,6 +1093,44 @@ async function handleAiTutorAsk(req, res, user) {
     console.warn(`AI tutoring failed: ${error && error.message ? error.message : "unknown error"}`);
     const failure = publicAiTutorFailure(error);
     return sendJson(res, failure.statusCode, { error: failure.message, providerStatus: failure.providerStatus });
+  }
+}
+
+async function handleAiTutorClear(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "POST") return sendError(res, 404, "AI tutor clear endpoint not found");
+  try {
+    const body = await readBody(req);
+    const state = getUserState(user);
+    const practice = sanitizeAiPractice(state.aiPractice);
+    const historyItem = body.historyId ? practice.history.find(item => item.id === body.historyId) : null;
+    const set = practice.currentSet;
+    const question = !historyItem && set && set.id === body.setId ? set.questions.find(item => item.id === body.questionId) : null;
+    if (body.historyId && !historyItem) return sendError(res, 404, "AI history question not found");
+    if (!historyItem && (!set || set.id !== body.setId)) return sendError(res, 404, "AI question set not found");
+    if (!historyItem && !question) return sendError(res, 404, "AI question not found");
+
+    const historyPrefix = historyItem && historyItem.setId ? `${historyItem.setId}:` : "";
+    const historyQuestionId = historyItem && historyPrefix && historyItem.id.startsWith(historyPrefix) ? historyItem.id.slice(historyPrefix.length) : historyItem && historyItem.id;
+    const threadSetId = historyItem ? (historyItem.setId || `history-${historyItem.id}`) : set.id;
+    const threadQuestionId = historyItem ? historyQuestionId : question.id;
+    const source = historyItem ? "history" : "current";
+    const prompt = historyItem ? historyItem.prompt : (question.direction === "en-zh" ? question.english : question.chinese);
+    const resetAt = new Date().toISOString();
+    const reset = { setId: threadSetId, questionId: threadQuestionId, historyId: historyItem ? historyItem.id : "", source, prompt, resetAt };
+    practice.tutorResets = [
+      ...practice.tutorResets.filter(item => item.setId !== threadSetId || item.questionId !== threadQuestionId),
+      reset
+    ].slice(-MAX_TUTOR_RESETS);
+    practice.tutor = { setId: threadSetId, questionId: threadQuestionId, historyId: reset.historyId, source, prompt, updatedAt: resetAt, messages: [] };
+    practice.updatedAt = resetAt;
+    state.aiPractice = practice;
+    persistUserStates();
+    return sendJson(res, 200, { practice, tutor: practice.tutor, resetAt });
+  } catch (error) {
+    if (error && [400, 404, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+    console.warn(`AI tutor clearing failed: ${error && error.message ? error.message : "unknown error"}`);
+    return sendError(res, 500, "failed to clear AI tutor session");
   }
 }
 
@@ -1241,7 +1435,7 @@ async function handleAiDictation(req, res, url, user) {
       const body = await readBody(req);
       const selection = dictationSelectionForState(state, body);
       refreshContent();
-      const learnedWords = content.words.filter(item => !item.learned || String(item.learned) <= today());
+      const learnedWords = content.words.filter(item => !item.preview && item.learned && String(item.learned) <= today());
       if (!learnedWords.length) return sendError(res, 409, "no learned words are available");
       const words = selectDictationWords(learnedWords, selection.dictation.weights, selection.count);
       selection.dictation.currentSession = createDictationSession(words, selection.route.candidates[0]);
@@ -1441,7 +1635,7 @@ function serveStatic(req, res, url) {
   let relative = decodeURIComponent(url.pathname); if (relative === "/") relative = "/index.html";
   if (relative.includes("\0") || relative.includes("..") || relative.startsWith("/server/")) return sendError(res, 404, "not found");
   const filePath = path.resolve(ROOT, `.${relative}`); if (!filePath.startsWith(ROOT + path.sep)) return sendError(res, 404, "not found");
-  fs.stat(filePath, (error, stats) => { if (error || !stats.isFile()) return sendError(res, 404, "not found"); setCommonHeaders(res, mimeType(filePath)); res.setHeader("Cache-Control", ["index.html", "styles.css", "data.js", "answer-utils.js", "app.js", "sw.js"].some(name => filePath.endsWith(name)) ? "no-cache" : "public, max-age=3600"); res.writeHead(200); fs.createReadStream(filePath).pipe(res); });
+  fs.stat(filePath, (error, stats) => { if (error || !stats.isFile()) return sendError(res, 404, "not found"); setCommonHeaders(res, mimeType(filePath)); res.setHeader("Cache-Control", ["index.html", "styles.css", "data.js", "pronunciation-data.js", "review-variants.js", "answer-utils.js", "app.js", "sw.js"].some(name => filePath.endsWith(name)) ? "no-cache" : "public, max-age=3600"); res.writeHead(200); fs.createReadStream(filePath).pipe(res); });
 }
 
 const server = http.createServer((req, res) => {
@@ -1451,16 +1645,19 @@ const server = http.createServer((req, res) => {
   if (url.pathname.startsWith("/api/admin/ai-config")) return handleAiAdmin(req, res, url, user);
   if (url.pathname === "/api/health" && req.method === "GET") {
     refreshUsers();
-    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, notes: content.notes.length, users: users.users.length, authRequired: true, aiGrading: aiConfigured(), time: new Date().toISOString() });
+    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, previewWords: content.words.filter(item => item.preview).length, sentences: content.sentences.length, notes: content.notes.length, users: users.users.length, authRequired: true, aiGrading: aiConfigured(), time: new Date().toISOString() });
   }
   if (url.pathname === "/api/ai/options" && req.method === "GET") return user ? sendJson(res, 200, publicAiOptions(user)) : sendError(res, 401, "login required");
+  if (url.pathname === "/api/preview/words") return handlePreviewWords(req, res, user);
   if (url.pathname === "/api/preview") return handlePreview(req, res, user);
   if (url.pathname === "/api/abilities") return handleAbilities(req, res, user);
+  if (url.pathname === "/api/review/sentence-variants") return handleReviewSentenceVariants(req, res, user);
   if (url.pathname === "/api/ai/grade") return handleAiGrade(req, res, user);
   if (url.pathname === "/api/ai/exams" || url.pathname.startsWith("/api/ai/exams/")) return handleAiExams(req, res, url, user);
   if (url.pathname === "/api/ai/dictation" || url.pathname.startsWith("/api/ai/dictation/")) return handleAiDictation(req, res, url, user);
   if (url.pathname === "/api/ai/focused" || url.pathname.startsWith("/api/ai/focused/")) return handleAiFocusedPractice(req, res, url, user);
   if (url.pathname === "/api/ai/questions/generate") return handleAiGenerate(req, res, user);
+  if (url.pathname === "/api/ai/questions/tutor/clear") return handleAiTutorClear(req, res, user);
   if (url.pathname === "/api/ai/questions/ask") return handleAiTutorAsk(req, res, user);
   if (url.pathname === "/api/ai/questions/grade") return handleAiQuestionGrade(req, res, user);
   if (url.pathname === "/api/sync/profile") return handleLearningSync(req, res, url);

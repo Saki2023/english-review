@@ -53,6 +53,7 @@ test("AI practice state keeps a bounded question set and per-account settings", 
   assert.equal(practice.tutor.messages[0].content, "message-2");
   assert.equal(practice.tutorHistory.length, 6);
   assert.equal(practice.tutorHistory[0].question, "message-2");
+  assert.deepEqual(sanitizeAiPractice({ settings: { reasoningEffort: "max" }, tutorSettings: { model: "tutor-model", reasoningEffort: "high" } }).tutorSettings, { model: "tutor-model", reasoningEffort: "high" });
   assert.equal(sanitizeAiPractice({ settings: { reasoningEffort: "max" } }).tutorSettings.reasoningEffort, "medium");
 });
 
@@ -66,6 +67,28 @@ test("AI tutor keeps separate persistent histories for every exercise", () => {
   assert.equal(practice.tutorHistory.length, 3);
   assert.deepEqual(tutorThreadFromHistory(practice, "set-a", "question-a").messages.map(item => item.content), ["为什么是猫？", "cat 的意思是猫。", "怎么发音？", "可以先记住 /kæt/。"]);
   assert.deepEqual(tutorThreadFromHistory(practice, "set-b", "question-b").messages.map(item => item.content), ["mat 是什么？", "mat 表示垫子。"]);
+});
+
+test("clearing a tutor session preserves learning history but cuts the active AI context", () => {
+  const archived = [
+    { id: "ask-old", setId: "set-a", questionId: "question-a", historyId: "set-a:question-a", question: "旧问题", answer: "旧回答", askedAt: "2026-08-03T10:00:00Z", answeredAt: "2026-08-03T10:00:05Z" },
+    { id: "ask-new", setId: "set-a", questionId: "question-a", historyId: "set-a:question-a", question: "新问题", answer: "新回答", askedAt: "2026-08-03T10:02:00Z", answeredAt: "2026-08-03T10:02:05Z" }
+  ];
+  const reset = { setId: "set-a", questionId: "question-a", historyId: "set-a:question-a", source: "history", prompt: "cat", resetAt: "2026-08-03T10:01:00Z" };
+  const reconstructed = sanitizeAiPractice({ tutorHistory: archived, tutorResets: [reset] });
+
+  assert.equal(reconstructed.tutorHistory.length, 2, "clearing context must not delete the learning archive");
+  assert.equal(reconstructed.tutorResets.length, 1);
+  assert.deepEqual(tutorThreadFromHistory(reconstructed, "set-a", "question-a").messages.map(item => item.content), ["新问题", "新回答"]);
+
+  const activelyCleared = sanitizeAiPractice({
+    tutorHistory: archived,
+    tutorResets: [reset],
+    tutor: { setId: "set-a", questionId: "question-a", historyId: "set-a:question-a", source: "history", prompt: "cat", updatedAt: reset.resetAt, messages: [] }
+  });
+  assert.deepEqual(tutorThreadFromHistory(activelyCleared, "set-a", "question-a").messages, []);
+  assert.equal(activelyCleared.tutor.historyId, "set-a:question-a");
+  assert.equal(activelyCleared.tutor.source, "history");
 });
 
 test("legacy AI history gains set metadata without exposing old focus hints", () => {
