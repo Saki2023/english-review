@@ -134,6 +134,26 @@ test("AI grader drops unsupported reasoning effort while retaining JSON mode", a
   assert.deepEqual(requests[1].response_format, { type: "json_object" });
 });
 
+test("AI requests send the mapped upstream effort and honor an explicit omission", async () => {
+  const mappedRequests = [];
+  const mappedFetch = async (_url, options) => {
+    mappedRequests.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ choices: [{ message: { content: "{\"correct\":true,\"explanation\":\"意思相同。\"}" } }] }), { status: 200 });
+  };
+  const mapped = createAiGrader(aiConfig({ reasoningEffort: "medium", upstreamReasoningEffort: "high" }), { fetchImpl: mappedFetch });
+  await mapped.grade({ direction: "en-zh", sourceText: "It is big.", acceptedAnswers: ["它很大"], answer: "它很大" });
+  assert.equal(mappedRequests[0].reasoning_effort, "high");
+
+  const omittedRequests = [];
+  const omittedFetch = async (_url, options) => {
+    omittedRequests.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ choices: [{ message: { content: "{\"correct\":true,\"explanation\":\"意思相同。\"}" } }] }), { status: 200 });
+  };
+  const omitted = createAiGrader(aiConfig({ reasoningEffort: "max", upstreamReasoningEffort: "" }), { fetchImpl: omittedFetch });
+  await omitted.grade({ direction: "en-zh", sourceText: "It is big.", acceptedAnswers: ["它很大"], answer: "它很大" });
+  assert.equal(Object.hasOwn(omittedRequests[0], "reasoning_effort"), false);
+});
+
 test("AI grader falls back to the Responses API when chat completions are unavailable", async () => {
   const requests = [];
   const fetchImpl = async (url, options) => {
@@ -322,6 +342,11 @@ test("admin configures AI on the web and progress-based questions use the select
       body: JSON.stringify({ model: "test-model", reasoningEffort: "medium" })
     });
     assert.equal(connectionTest.status, 200);
+    const connectionBody = await connectionTest.json();
+    assert.equal(connectionBody.reasoningEffort, "medium");
+    assert.equal(connectionBody.appliedReasoningEffort, "medium");
+    assert.equal(connectionBody.providerFamily, "openai-compatible");
+    assert.equal(connectionBody.timeoutMs, 10000);
     assert.equal(providerRequests.length, 1);
 
     const localGrade = await fetch(`${baseUrl}/api/ai/grade`, {

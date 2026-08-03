@@ -579,7 +579,16 @@ async function handleAiAdmin(req, res, url, user) {
       const body = await readBody(req);
       const config = selectAiCandidates(aiSettings, body, { allowDisabledProvider: true }).candidates[0];
       await createAiConnectionTester(config)();
-      return sendJson(res, 200, { ok: true, providerId: config.providerId, providerName: config.providerName, model: config.model, reasoningEffort: config.reasoningEffort });
+      return sendJson(res, 200, {
+        ok: true,
+        providerId: config.providerId,
+        providerName: config.providerName,
+        providerFamily: config.providerFamily,
+        model: config.model,
+        reasoningEffort: config.reasoningEffort,
+        appliedReasoningEffort: config.upstreamReasoningEffort,
+        timeoutMs: config.timeoutMs
+      });
     } catch (error) {
       console.warn(`AI connection test failed: ${error && error.message ? error.message : "unknown error"}`);
       return sendJson(res, 502, { error: "AI connection test failed", providerStatus: Number(error && error.providerStatus) || null });

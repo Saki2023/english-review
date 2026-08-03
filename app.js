@@ -2870,13 +2870,19 @@
       if (!config) return;
       const provider = config.providers.find(item => item.id === targetProviderId) || config.providers[0];
       const testModel = provider.models.includes(config.defaultModel) ? config.defaultModel : provider.models[0];
+      const testEffort = selectedAiSettings().reasoningEffort;
       const result = await responseJson(await fetch("/api/admin/ai-config/test", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providerId: provider.id, model: testModel, reasoningEffort: "medium" })
+        body: JSON.stringify({ providerId: provider.id, model: testModel, reasoningEffort: testEffort })
       }));
-      setAiConfigFeedback(`连接成功：${result.providerName} · ${result.model}`);
+      const selectedLabel = AI_EFFORT_LABELS[result.reasoningEffort] || result.reasoningEffort;
+      const appliedLabel = AI_EFFORT_LABELS[result.appliedReasoningEffort] || result.appliedReasoningEffort;
+      const effortLabel = result.appliedReasoningEffort && result.appliedReasoningEffort !== result.reasoningEffort
+        ? `${selectedLabel} → 上游${appliedLabel}`
+        : selectedLabel;
+      setAiConfigFeedback(`连接成功：${result.providerName} · ${result.model} · ${effortLabel}`);
     } catch (error) {
       setAiConfigFeedback(error.message, true);
     } finally {
@@ -3583,7 +3589,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=28", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=29", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

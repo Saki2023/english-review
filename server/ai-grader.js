@@ -189,8 +189,9 @@ async function postChatCompletion(config, messages, fetchImpl, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
   const body = { model: config.model, messages, stream: false };
+  const reasoningEffort = Object.hasOwn(config, "upstreamReasoningEffort") ? config.upstreamReasoningEffort : config.reasoningEffort;
   if (options.useJsonMode) body.response_format = { type: "json_object" };
-  if (options.useReasoningEffort && config.reasoningEffort) body.reasoning_effort = config.reasoningEffort;
+  if (options.useReasoningEffort && reasoningEffort) body.reasoning_effort = reasoningEffort;
 
   try {
     const response = await fetchImpl(config.endpoint, {
@@ -231,8 +232,9 @@ async function postResponsesCompletion(config, messages, fetchImpl, options = {}
     .filter(message => !["system", "developer"].includes(message.role))
     .map(message => ({ role: message.role, content: responseContent(message.content) }));
   const body = { model: config.model, input, stream: false };
+  const reasoningEffort = Object.hasOwn(config, "upstreamReasoningEffort") ? config.upstreamReasoningEffort : config.reasoningEffort;
   if (instructions) body.instructions = instructions;
-  if (options.useReasoningEffort && config.reasoningEffort) body.reasoning = { effort: config.reasoningEffort };
+  if (options.useReasoningEffort && reasoningEffort) body.reasoning = { effort: reasoningEffort };
 
   try {
     const response = await fetchImpl(config.responsesEndpoint || buildResponsesUrl(config.endpoint), {
@@ -258,7 +260,8 @@ async function postResponsesCompletion(config, messages, fetchImpl, options = {}
 
 async function requestChatCompletion(config, messages, fetchImpl, requestOptions = {}) {
   const jsonMode = requestOptions.jsonMode !== false;
-  const attempts = config.reasoningEffort
+  const reasoningEffort = Object.hasOwn(config, "upstreamReasoningEffort") ? config.upstreamReasoningEffort : config.reasoningEffort;
+  const attempts = reasoningEffort
     ? jsonMode
       ? [
           { useJsonMode: true, useReasoningEffort: true },
@@ -287,7 +290,8 @@ async function requestChatCompletion(config, messages, fetchImpl, requestOptions
 }
 
 async function requestResponsesCompletion(config, messages, fetchImpl) {
-  const attempts = config.reasoningEffort ? [{ useReasoningEffort: true }, { useReasoningEffort: false }] : [{ useReasoningEffort: false }];
+  const reasoningEffort = Object.hasOwn(config, "upstreamReasoningEffort") ? config.upstreamReasoningEffort : config.reasoningEffort;
+  const attempts = reasoningEffort ? [{ useReasoningEffort: true }, { useReasoningEffort: false }] : [{ useReasoningEffort: false }];
   let lastError;
   for (const attempt of attempts) {
     try { return await postResponsesCompletion(config, messages, fetchImpl, attempt); }

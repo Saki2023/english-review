@@ -66,6 +66,8 @@ test("AI settings UI manages providers and exposes manual or automatic routing",
   assert.match(app, /manualProviderId: aiConfigDraft\.manualProviderId/);
   assert.match(app, /providers: aiConfigDraft\.providers\.map/);
   assert.match(app, /providerId: provider\.id/);
+  assert.match(app, /const testEffort = selectedAiSettings\(\)\.reasoningEffort/);
+  assert.match(app, /appliedReasoningEffort/);
 });
 
 test("exam UI uses dedicated APIs, optional listening, and whole-paper submission", () => {
@@ -141,7 +143,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 28", () => {
+test("PWA client assets consistently use the displayed cache version 29", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -152,6 +154,6 @@ test("PWA client assets consistently use the displayed cache version 28", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "28");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v28"/);
+  assert.equal(displayedVersion[1], "29");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v29"/);
 });

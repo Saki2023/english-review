@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
-const { createAiSettingsStore, selectAiCandidates, selectAiSettings } = require("../server/ai-settings");
+const { createAiSettingsStore, normalizeSettings, selectAiCandidates, selectAiSettings } = require("../server/ai-settings");
 
 test("multi-provider settings preserve keys, redact secrets, and keep manual routing fixed", () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "english-review-ai-settings-"));
@@ -43,6 +43,9 @@ test("multi-provider settings preserve keys, redact secrets, and keep manual rou
     assert.equal(manualRoute.mode, "manual");
     assert.deepEqual(manualRoute.candidates.map(provider => provider.providerId), ["sub2api"]);
     assert.equal(manualRoute.candidates[0].reasoningEffort, "max");
+    assert.equal(manualRoute.candidates[0].upstreamReasoningEffort, "max");
+    assert.equal(manualRoute.candidates[0].providerFamily, "openai-compatible");
+    assert.equal(manualRoute.candidates[0].timeoutMs, 12000);
 
     const testedProvider = selectAiCandidates(store.load(), { providerId: "newapi", model: "new-model" }, { allowDisabledProvider: true });
     assert.deepEqual(testedProvider.candidates.map(provider => provider.providerId), ["newapi"]);
@@ -62,6 +65,40 @@ test("multi-provider settings preserve keys, redact secrets, and keep manual rou
   } finally {
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test("official DeepSeek V4 models map all five UI efforts and extend reasoning timeouts", () => {
+  const settings = normalizeSettings({
+    mode: "manual",
+    providers: [{
+      id: "deepseek",
+      name: "DeepSeek",
+      enabled: true,
+      baseUrl: "https://api.deepseek.com",
+      apiKey: "private-deepseek-key",
+      models: ["deepseek-v4-flash", "deepseek-v4-pro"],
+      timeoutMs: 30000
+    }],
+    manualProviderId: "deepseek",
+    defaultModel: "deepseek-v4-flash"
+  });
+  const efforts = ["low", "medium", "high", "xhigh", "max"];
+  const flashExpected = ["low", "high", "high", "high", "max"];
+  const proExpected = ["high", "high", "high", "max", "max"];
+
+  function routes(model) {
+    return efforts.map(reasoningEffort => selectAiCandidates(settings, { model, reasoningEffort }));
+  }
+
+  const flashRoutes = routes("deepseek-v4-flash");
+  const proRoutes = routes("deepseek-v4-pro");
+  assert.deepEqual(flashRoutes.map(route => route.reasoningEffort), efforts);
+  assert.deepEqual(flashRoutes.map(route => route.candidates[0].upstreamReasoningEffort), flashExpected);
+  assert.deepEqual(flashRoutes.map(route => route.candidates[0].timeoutMs), [30000, 90000, 90000, 90000, 120000]);
+  assert.deepEqual(proRoutes.map(route => route.reasoningEffort), efforts);
+  assert.deepEqual(proRoutes.map(route => route.candidates[0].upstreamReasoningEffort), proExpected);
+  assert.deepEqual(proRoutes.map(route => route.candidates[0].timeoutMs), [90000, 90000, 90000, 120000, 120000]);
+  assert.equal(flashRoutes.every(route => route.candidates[0].providerFamily === "deepseek"), true);
 });
 
 test("automatic routing rotates enabled providers that support the selected model", () => {

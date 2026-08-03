@@ -10,6 +10,7 @@ const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const AI_ROUTING_MODES = ["manual", "auto"];
 const DEFAULT_AI_TIMEOUT_MS = 30000;
 const MAX_AI_TIMEOUT_MS = 120000;
+const DEEPSEEK_HIGH_TIMEOUT_MS = 90000;
 const MAX_AI_MODELS = 200;
 const MAX_AI_PROVIDERS = 20;
 
@@ -237,17 +238,44 @@ function resolveAiConnection(settings, requested = {}) {
   return { providerId, providerName, baseUrl, apiKey, configured: true, endpoint, timeoutMs };
 }
 
+function providerFamily(baseUrl) {
+  try {
+    return new URL(baseUrl).hostname.toLocaleLowerCase() === "api.deepseek.com" ? "deepseek" : "openai-compatible";
+  } catch (_) {
+    return "openai-compatible";
+  }
+}
+
+function deepSeekReasoningEffort(model, reasoningEffort) {
+  const isV4Pro = String(model || "").trim().toLocaleLowerCase() === "deepseek-v4-pro";
+  if (isV4Pro) return ["xhigh", "max"].includes(reasoningEffort) ? "max" : "high";
+  if (reasoningEffort === "low") return "low";
+  if (reasoningEffort === "max") return "max";
+  return "high";
+}
+
 function providerConfig(settings, provider, model, reasoningEffort) {
+  const family = providerFamily(provider.baseUrl);
+  const upstreamReasoningEffort = family === "deepseek" ? deepSeekReasoningEffort(model, reasoningEffort) : reasoningEffort;
+  const minimumTimeoutMs = family !== "deepseek"
+    ? 0
+    : upstreamReasoningEffort === "low"
+      ? DEFAULT_AI_TIMEOUT_MS
+      : upstreamReasoningEffort === "max"
+        ? MAX_AI_TIMEOUT_MS
+        : DEEPSEEK_HIGH_TIMEOUT_MS;
   return {
     providerId: provider.id,
     providerName: provider.name,
+    providerFamily: family,
     apiKey: provider.apiKey,
     configured: true,
     endpoint: buildChatCompletionsUrl(provider.baseUrl),
     responsesEndpoint: buildResponsesUrl(provider.baseUrl),
     model,
     reasoningEffort,
-    timeoutMs: provider.timeoutMs,
+    upstreamReasoningEffort,
+    timeoutMs: Math.min(MAX_AI_TIMEOUT_MS, Math.max(provider.timeoutMs, minimumTimeoutMs)),
     rateLimitPerMinute: settings.rateLimitPerMinute
   };
 }
