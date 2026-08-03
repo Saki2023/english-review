@@ -22,6 +22,9 @@ test("sync center provides a safe visible report and headless entry point", () =
   assert.match(script, /"网站课程内容"/);
   assert.match(script, /courseDay/);
   assert.match(script, /课程：第 \$\(\$summary\.courseDay\) 天/);
+  assert.match(script, /function Get-DecimalValue/);
+  assert.match(script, /aiCorrect = Get-DecimalValue/);
+  assert.match(script, /网站课程已同步：第 \$\(\$websiteSummary\.courseDay\) 天/);
   assert.match(script, /Get-OutputMessages/);
   assert.match(script, /Redact-SensitiveText/);
   assert.match(script, /Register-ScheduledTask/);

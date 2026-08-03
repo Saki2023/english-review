@@ -119,6 +119,11 @@ function Get-NumberValue($Object, [string]$Name, [int]$Default = 0) {
   try { return [int]$value } catch { return $Default }
 }
 
+function Get-DecimalValue($Object, [string]$Name, [double]$Default = 0) {
+  $value = Get-ObjectValue $Object $Name $Default
+  try { return [double]$value } catch { return $Default }
+}
+
 function Read-WebsiteSummary {
   $profilePath = Join-Path $sharedDirectory "网站学习档案.json"
   if (-not (Test-Path -LiteralPath $profilePath)) { return $null }
@@ -133,7 +138,7 @@ function Read-WebsiteSummary {
       courseSentences = Get-NumberValue $course "sentences"
       courseNotes = Get-NumberValue $course "notes"
       aiQuestions = Get-NumberValue $summary "aiQuestions"
-      aiCorrect = Get-NumberValue $summary "aiCorrect"
+      aiCorrect = Get-DecimalValue $summary "aiCorrect"
       aiAccuracy = Get-NumberValue $summary "aiAccuracy"
       tutorQuestions = Get-NumberValue $summary "tutorQuestions"
       exams = Get-NumberValue $summary "exams"
@@ -239,8 +244,12 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly) {
     if (-not $errorText) { $errorText = "同步脚本返回错误代码 $exitCode。" }
   }
   $messages = @(Get-OutputMessages ($stdoutLines + $stderrLines))
+  $websiteSummary = Read-WebsiteSummary
   if ($uploaded) { $messages += "本地教学档案已上传到网站。" }
   if ($previewFiles.Count -gt 0) { $messages += "每日预习已同步：$($previewFiles[-1])（共 $($previewFiles.Count) 份）" }
+  if ($uploaded -and $websiteSummary -and ($preparedFiles -contains "学习同步\网站课程内容.json")) {
+    $messages += "网站课程已同步：第 $($websiteSummary.courseDay) 天，$($websiteSummary.courseWords) 个单词、$($websiteSummary.courseSentences) 个句子、$($websiteSummary.courseNotes) 份笔记。"
+  }
   if ($downloadedFiles.Count -gt 0) { $messages += "网站学习档案已下载到本地。" }
   $report = [ordered]@{
     schemaVersion = 1
@@ -252,7 +261,7 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly) {
     uploadedFiles = $uploadedFiles
     previewFiles = $previewFiles
     downloadedFiles = $downloadedFiles
-    summary = Read-WebsiteSummary
+    summary = $websiteSummary
     messages = @($messages | Select-Object -Unique)
     error = $errorText
   }
