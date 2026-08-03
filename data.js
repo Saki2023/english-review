@@ -1,7 +1,7 @@
 window.ENGLISH_REVIEW_DATA = {
   version: 2,
-  updatedAt: "2026-08-02",
-  currentDay: 3,
+  updatedAt: "2026-08-03",
+  currentDay: 4,
   words: [
     { id: "d1-i", day: 1, learned: "2026-07-31", english: "I", phonetic: "/aɪ/", chinese: "我", acceptedChinese: ["我"], pronunciation: "接近“爱”，一口气滑过去。", example: "I am Sam.", exampleZh: "我是萨姆。", directions: ["en-zh", "zh-en"] },
     { id: "d1-am", day: 1, learned: "2026-07-31", english: "am", phonetic: "/æm/", chinese: "是（和 I 搭配）", acceptedChinese: ["是", "和i搭配", "和我搭配"], pronunciation: "先发 /æ/，再闭唇发 /m/。", example: "I am a man.", exampleZh: "我是一个男人。", directions: ["en-zh", "zh-en"] },
@@ -24,7 +24,14 @@ window.ENGLISH_REVIEW_DATA = {
     { id: "d3-hen", day: 3, learned: "2026-08-02", english: "hen", phonetic: "/hen/", chinese: "母鸡", acceptedChinese: ["母鸡"], pronunciation: "先轻轻呼气发 /h/，再接 /e/ 和鼻音 /n/。", example: "A hen sat on a red bed.", exampleZh: "一只母鸡坐在一张红色的床上。", directions: ["en-zh", "zh-en"] },
     { id: "d3-ten", day: 3, learned: "2026-08-02", english: "ten", phonetic: "/ten/", chinese: "十", acceptedChinese: ["十", "十个"], pronunciation: "/t/ + /e/ + /n/，结尾用鼻音 /n/ 收住。", example: "ten pens", exampleZh: "十支笔。", directions: ["en-zh", "zh-en"] },
     { id: "d3-yes", day: 3, learned: "2026-08-02", english: "yes", phonetic: "/jes/", chinese: "是的", acceptedChinese: ["是的", "对", "好的"], pronunciation: "开头 /j/ 接近短促的“耶”开头，再接 /e/ 和 /s/。", example: "Yes, it is.", exampleZh: "是的，它是。", directions: ["en-zh", "zh-en"] },
-    { id: "d3-he", day: 3, learned: "2026-08-02", english: "he", phonetic: "/hiː/", chinese: "他", acceptedChinese: ["他"], pronunciation: "先轻轻呼气发 /h/，后面的 /iː/ 稍长；这里 e 不发短音 /e/。", example: "He is Sam.", exampleZh: "他是萨姆。", directions: ["en-zh", "zh-en"] }
+    { id: "d3-he", day: 3, learned: "2026-08-02", english: "he", phonetic: "/hiː/", chinese: "他", acceptedChinese: ["他"], pronunciation: "先轻轻呼气发 /h/，后面的 /iː/ 稍长；这里 e 不发短音 /e/。", example: "He is Sam.", exampleZh: "他是萨姆。", directions: ["en-zh", "zh-en"] },
+    { id: "d4-hot", day: 4, learned: "2026-08-03", english: "hot", phonetic: "/hɑt/", chinese: "热的", acceptedChinese: ["热的", "热"], pronunciation: "先轻轻呼气发 /h/，张嘴发短促的 /ɑ/，最后用 /t/ 收尾。", example: "It is hot.", exampleZh: "它很热。", directions: ["en-zh", "zh-en"] },
+    { id: "d4-top", day: 4, learned: "2026-08-03", english: "top", phonetic: "/tɑp/", chinese: "顶部；最上面的部分", acceptedChinese: ["顶部", "顶端", "最上面", "最上面的部分"], pronunciation: "/t/ + /ɑ/ + /p/，结尾 /p/ 只放出一小股气。", example: "It is on top.", exampleZh: "它在最上面。", directions: ["en-zh", "zh-en"] },
+    { id: "d4-box", day: 4, learned: "2026-08-03", english: "box", phonetic: "/bɑks/", chinese: "箱子", acceptedChinese: ["箱子", "盒子"], pronunciation: "/b/ + /ɑ/ + /k/ + /s/；字母 x 在这里连续发 /k/ 和 /s/。", example: "Tom sat on a box.", exampleZh: "汤姆坐在一个箱子上。", directions: ["en-zh", "zh-en"] },
+    { id: "d4-mom", day: 4, learned: "2026-08-03", english: "mom", phonetic: "/mɑm/", chinese: "妈妈", acceptedChinese: ["妈妈", "母亲"], pronunciation: "双唇先后两次闭合发 /m/，中间是短促的 /ɑ/；普通名词通常小写。", example: "She is a mom.", exampleZh: "她是一位妈妈。", directions: ["en-zh", "zh-en"] },
+    { id: "d4-tom", day: 4, learned: "2026-08-03", english: "Tom", phonetic: "/tɑm/", chinese: "汤姆（人名）", acceptedChinese: ["汤姆"], pronunciation: "/t/ + /ɑ/ + /m/；Tom 是人名，首字母必须大写。", example: "Tom sat on a box.", exampleZh: "汤姆坐在一个箱子上。", directions: ["en-zh", "zh-en"] },
+    { id: "d4-shop", day: 4, learned: "2026-08-03", english: "shop", phonetic: "/ʃɑp/", chinese: "商店", acceptedChinese: ["商店", "店", "店铺"], pronunciation: "sh 合起来发一个 /ʃ/，接短促的 /ɑ/，最后用 /p/ 收尾。", example: "She is in a shop.", exampleZh: "她在一家商店里。", directions: ["en-zh", "zh-en"] },
+    { id: "d4-she", day: 4, learned: "2026-08-03", english: "she", phonetic: "/ʃiː/", chinese: "她", acceptedChinese: ["她"], pronunciation: "sh 发 /ʃ/，后面的 /iː/ 稍长；she 后面和 he 一样使用 is。", example: "She is a mom.", exampleZh: "她是一位妈妈。", directions: ["en-zh", "zh-en"] }
   ],
   sentences: [
     { id: "d1-s1", day: 1, learned: "2026-07-31", english: "I am Sam.", chinese: "我是萨姆。", acceptedChinese: ["我是萨姆", "我叫萨姆"], acceptedEnglish: ["i am sam"], directions: ["en-zh", "zh-en"] },
@@ -41,7 +48,12 @@ window.ENGLISH_REVIEW_DATA = {
     { id: "d3-s2", day: 3, learned: "2026-08-02", english: "He is a man.", chinese: "他是一个男人。", acceptedChinese: ["他是一个男人", "他是男人"], acceptedEnglish: ["he is a man"], directions: ["en-zh", "zh-en"] },
     { id: "d3-s3", day: 3, learned: "2026-08-02", english: "It is a red pen.", chinese: "它是一支红色的笔。", acceptedChinese: ["它是一支红色的笔", "它是一支红笔", "它是红色的笔"], acceptedEnglish: ["it is a red pen"], directions: ["en-zh", "zh-en"] },
     { id: "d3-s4", day: 3, learned: "2026-08-02", english: "A hen sat on a red bed.", chinese: "一只母鸡坐在一张红色的床上。", acceptedChinese: ["一只母鸡坐在一张红色的床上", "一只母鸡坐在红色的床上", "一只母鸡坐在一张红床上", "母鸡坐在红床上"], acceptedEnglish: ["a hen sat on a red bed"], directions: ["en-zh", "zh-en"] },
-    { id: "d3-s5", day: 3, learned: "2026-08-02", english: "It is red.", chinese: "它是红色的。", acceptedChinese: ["它是红色的", "它是红的"], acceptedEnglish: ["it is red"], directions: ["en-zh", "zh-en"] }
+    { id: "d3-s5", day: 3, learned: "2026-08-02", english: "It is red.", chinese: "它是红色的。", acceptedChinese: ["它是红色的", "它是红的"], acceptedEnglish: ["it is red"], directions: ["en-zh", "zh-en"] },
+    { id: "d4-s1", day: 4, learned: "2026-08-03", english: "She is a mom.", chinese: "她是一位妈妈。", acceptedChinese: ["她是一位妈妈", "她是一个妈妈", "她是妈妈"], acceptedEnglish: ["she is a mom"], directions: ["en-zh", "zh-en"] },
+    { id: "d4-s2", day: 4, learned: "2026-08-03", english: "She is in a shop.", chinese: "她在一家商店里。", acceptedChinese: ["她在一家商店里", "她在一个商店里", "她在商店里", "她在一家商店", "她在一个商店"], acceptedEnglish: ["she is in a shop"], directions: ["en-zh", "zh-en"] },
+    { id: "d4-s3", day: 4, learned: "2026-08-03", english: "Tom sat on a box.", chinese: "汤姆坐在一个箱子上。", acceptedChinese: ["汤姆坐在一个箱子上", "汤姆坐在箱子上", "汤姆坐在一个盒子上", "汤姆坐在盒子上"], acceptedEnglish: ["tom sat on a box"], directions: ["en-zh", "zh-en"] },
+    { id: "d4-s4", day: 4, learned: "2026-08-03", english: "A red pen is on a box.", chinese: "一支红色的笔在一个箱子上。", acceptedChinese: ["一支红色的笔在一个箱子上", "一支红笔在一个箱子上", "一支红色的笔在箱子上", "一支红笔在箱子上"], acceptedEnglish: ["a red pen is on a box"], directions: ["en-zh", "zh-en"] },
+    { id: "d4-s5", day: 4, learned: "2026-08-03", english: "It is hot.", chinese: "它很热。", acceptedChinese: ["它很热", "它是热的"], acceptedEnglish: ["it is hot"], directions: ["en-zh", "zh-en"] }
   ],
   notes: [
     {
@@ -102,6 +114,26 @@ window.ENGLISH_REVIEW_DATA = {
       ],
       mistakes: ["pen 前面不能多写 o，不能拼成 open。", "hen 专指母鸡，不能只记成宽泛的“鸡”。", "表示“我”的 I 和人名 Sam 的首字母需要大写。"],
       review: "重点复习 pen、hen、I 与人名的大小写、I am... 与 I sat...，以及 /æ/、/ɪ/、/e/ 三个短元音。"
+    },
+    {
+      day: 4,
+      date: "2026-08-03",
+      score: "9 / 10 · 90%",
+      summary: "学习短元音 /ɑ/、She is...、7 个新词，并读懂由新旧词组成的五句短文。",
+      goals: ["认识美式英语短元音 /ɑ/", "拼读 hot、top、box、mom、Tom、shop", "认识 she 并看懂 She is...", "区分 he、she、it 与 is 的搭配"],
+      pronunciation: [
+        "/ɑ/：下巴放低，嘴巴张开，舌头放低并稍微向后；声音短促，不要拖长。",
+        "字母 O 的名称是 /oʊ/，但它在 hot、top、box、mom、Tom、shop 中发 /ɑ/。",
+        "box /bɑks/ 中的 x 连续发 /k/ 和 /s/。",
+        "shop /ʃɑp/ 和 she /ʃiː/ 中的 sh 合起来发一个 /ʃ/。"
+      ],
+      patterns: [
+        { title: "She is...", note: "介绍女性人物时表示“她是……”。", examples: [{ english: "She is a mom.", chinese: "她是一位妈妈。" }, { english: "She is in a shop.", chinese: "她在一家商店里。" }] },
+        { title: "he / she / it + is", note: "he、she、it 后面都使用 is；I 后面使用 am。", examples: [{ english: "It is hot.", chinese: "它很热。" }] },
+        { title: "sat on + a + 地点", note: "位置句中的冠词 a 不能漏掉。", examples: [{ english: "Tom sat on a box.", chinese: "汤姆坐在一个箱子上。" }] }
+      ],
+      mistakes: ["mom 是普通名词时通常小写，Tom 是人名必须大写。", "box 是箱子，mat 是垫子，不能混淆。", "继续区分 cat 与 sat，并检查位置句中的冠词 a。"],
+      review: "重点复习 box 与 mat、mom 与 Tom 的大小写、cat 与 sat、冠词 a，以及 /ɑ/ 和前三个短元音的区别。"
     }
   ],
   seedMistakes: [

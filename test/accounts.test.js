@@ -85,6 +85,7 @@ test("SSH-created account can log in and public registration is absent", async (
   try {
     const health = await waitForHealth(baseUrl, child);
     assert.equal(health.users, 1);
+    assert.deepEqual({ currentDay: health.currentDay, words: health.words, sentences: health.sentences, notes: health.notes }, { currentDay: 4, words: 29, sentences: 20, notes: 4 });
     assert.equal(Object.hasOwn(health, "registrationOpen"), false);
 
     const registerResponse = await fetch(`${baseUrl}/api/auth/register`, {
@@ -109,11 +110,11 @@ test("SSH-created account can log in and public registration is absent", async (
     const contentResponse = await fetch(`${baseUrl}/api/content`);
     assert.equal(contentResponse.status, 200);
     const content = await contentResponse.json();
-    assert.equal(content.notes.length, 3);
-    assert.match(content.notes[2].review, /pen/);
-    assert.equal(content.words.length, 22);
-    assert.equal(content.sentences.length, 15);
-    assert.equal(content.updatedAt, "2026-08-02");
+    assert.equal(content.notes.length, 4);
+    assert.match(content.notes[3].review, /box/);
+    assert.equal(content.words.length, 29);
+    assert.equal(content.sentences.length, 20);
+    assert.equal(content.updatedAt, "2026-08-03");
 
     const blockedSync = await fetch(`${baseUrl}/api/sync/profile?username=sshowner`);
     assert.equal(blockedSync.status, 401);
@@ -124,7 +125,8 @@ test("SSH-created account can log in and public registration is absent", async (
     assert.equal(syncResponse.status, 200);
     const syncProfile = await syncResponse.json();
     assert.equal(syncProfile.user.username, "sshowner");
-    assert.equal(syncProfile.course.currentDay, 3);
+    assert.equal(syncProfile.course.currentDay, 4);
+    assert.deepEqual({ words: syncProfile.course.words, sentences: syncProfile.course.sentences, notes: syncProfile.course.notes }, { words: 29, sentences: 20, notes: 4 });
     assert.equal(syncProfile.summary.aiQuestions, 0);
     assert.equal(Object.hasOwn(syncProfile.user, "passwordHash"), false);
     assert.equal(JSON.stringify(syncProfile).includes("profile-sync-test-token"), false);
@@ -132,20 +134,20 @@ test("SSH-created account can log in and public registration is absent", async (
 
     const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
     assert.doesNotMatch(html, /data-auth-mode|confirmPasswordWrap|>注册</);
-    assert.match(html, /app\.js\?v=29/);
+    assert.match(html, /app\.js\?v=30/);
     assert.match(html, /data-view="notes"/);
     assert.match(html, /id="aiTutorWindow"/);
     assert.match(html, /id="aiHistoryList"/);
     assert.doesNotMatch(html, /\?v=(?:[7-9]|1[0-4])(?:\D|$)/);
 
-    const appResponse = await fetch(`${baseUrl}/app.js?v=29`);
+    const appResponse = await fetch(`${baseUrl}/app.js?v=30`);
     assert.equal(appResponse.status, 200);
     assert.equal(appResponse.headers.get("cache-control"), "no-cache");
 
     const appSource = await appResponse.text();
     assert.match(appSource, /nextButton"\)\.focus\(\{ preventScroll: true \}\)/);
     assert.match(appSource, /nextAiQuestion"\)\.addEventListener\("keydown"/);
-    assert.match(appSource, /sw\.js\?v=29/);
+    assert.match(appSource, /sw\.js\?v=30/);
     assert.match(appSource, /api\/admin\/ai-config\/models/);
     assert.match(appSource, /api\/ai\/questions\/ask/);
     assert.match(appSource, /function renderAiHistory/);

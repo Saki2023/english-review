@@ -41,6 +41,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | GET | `/api/content/:id` | 获取一条内容 |
 | POST | `/api/content` | 添加一个单词或句子 |
 | POST | `/api/content/batch` | 批量添加内容 |
+| PUT | `/api/content/batch` | 幂等同步每日词句和结构化学习笔记，需要教学写入令牌或管理员权限 |
 | PATCH | `/api/content/:id` | 修改一条内容 |
 | DELETE | `/api/content/:id` | 删除一条内容 |
 | GET | `/api/state` | 获取当前账号的复习记录，需要登录 |
@@ -67,7 +68,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | POST | `/api/ai/focused/listening` | 获取听力专项的受控英文朗读文本，需要登录 |
 | POST | `/api/ai/focused/submit` | 完成专项后统一分析，需要登录 |
 
-登录和复习状态使用 HTTP-only Cookie。网页不提供注册接口，账号只能在服务器终端创建。内容新增、修改、删除只允许管理员账号，或使用服务器配置的 `API_TOKEN`。本地学习档案使用由 `API_TOKEN` 派生的只读令牌，不能修改词库。
+登录和复习状态使用 HTTP-only Cookie。网页不提供注册接口，账号只能在服务器终端创建。普通内容新增、修改、删除只允许管理员账号，或使用服务器配置的 `API_TOKEN`。本地学习档案使用由 `API_TOKEN` 派生的只读令牌；独立的教学写入令牌只能上传教学档案，以及通过 `PUT /api/content/batch` 幂等同步每日词句和结构化笔记，不能调用其他管理接口。
 
 ## 创建账号
 
@@ -138,6 +139,12 @@ Invoke-RestMethod -Uri 'http://localhost:8080/api/content' -Headers $headers
 }
 ```
 
+## 自动同步每日课程内容
+
+完整学习工作区会把当天新增内容写入父目录 `学习同步\网站课程内容.json`。该文件包含 `updatedAt`、`words`、`sentences` 和 `notes`；每个单词或句子必须使用稳定且唯一的 `id`，每份结构化笔记使用唯一的正整数 `day`。
+
+同步脚本使用教学写入令牌调用 `PUT /api/content/batch`。接口会先验证整个请求，再按 `id` 更新或新增词句、按 `day` 更新或新增笔记；重复运行不会产生重复内容，也不会删除请求中未包含的旧课程。响应会分别返回词句和笔记的新增、更新数量，以及同步后的天数和总数。
+
 ## 调试示例
 
 PowerShell：
@@ -173,14 +180,14 @@ docker compose -f docker-compose.vps.yml exec english-review npm run sync:token
 
 该命令不会显示原始 `API_TOKEN`。只读令牌只能调用学习档案接口，不能新增、修改或删除内容。
 
-如需让本地英语教学窗口把 `学习进度.md`、`错题本.md`、最近三份每日笔记和最近 30 份预习上传给网站 AI 与网页“每日预习”，再生成一个权限独立的教学档案写入令牌：
+如需让本地英语教学窗口把 `学习进度.md`、`错题本.md`、最近三份每日笔记、最近 30 份预习以及 `网站课程内容.json` 中的每日词句和结构化笔记上传到网站，再生成一个权限独立的教学写入令牌：
 
 ```bash
 cd /opt/english-review
 docker compose -f docker-compose.vps.yml exec english-review npm run sync:write-token
 ```
 
-只读令牌不能上传，写入令牌也不能读取学习档案或管理词库；两者不可互换。
+只读令牌不能上传；写入令牌不能读取学习档案，也不能使用单条新增、修改或删除接口，只能更新教学档案和受限的每日课程批量同步接口。两者不可互换。
 
 ```powershell
 $headers = @{ Authorization = "Bearer 你的只读同步令牌" }
@@ -193,7 +200,7 @@ Invoke-RestMethod -Uri "https://你的域名/api/sync/profile?username=你的账
 powershell -ExecutionPolicy Bypass -File ".\每日英语复习\scripts\sync-learning-profile.ps1"
 ```
 
-脚本会先上传本地教学档案，将最新预习设为网页默认内容并保留最近 30 份预习供选择，再把网站档案保存为 `学习同步\网站学习档案.json`，供独立的英语学习窗口读取。省略 `SYNC_WRITE_TOKEN` 时会退化为只下载模式。不要提交 `.sync.env`，也不要把任何令牌发到聊天中。
+脚本会先上传本地教学档案，将最新预习设为网页默认内容并保留最近 30 份预习供选择；随后读取 `学习同步\网站课程内容.json`，幂等更新网站词句库与“学习笔记”；最后把网站档案保存为 `学习同步\网站学习档案.json`，供独立的英语学习窗口读取。省略 `SYNC_WRITE_TOKEN` 时会退化为只下载模式。不要提交 `.sync.env`，也不要把任何令牌发到聊天中。
 
 ## 数据保存位置
 

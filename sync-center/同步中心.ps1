@@ -64,6 +64,7 @@ function Get-InputSnapshot {
   $documents = @()
   $documents += New-DocumentRecord (Join-Path $workspaceRoot "学习进度.md") "学习进度"
   $documents += New-DocumentRecord (Join-Path $workspaceRoot "错题本.md") "错题本"
+  $documents += New-DocumentRecord (Join-Path $sharedDirectory "网站课程内容.json") "网站课程内容"
 
   $notesDirectory = Join-Path $workspaceRoot "每日笔记"
   if (Test-Path -LiteralPath $notesDirectory) {
@@ -125,7 +126,12 @@ function Read-WebsiteSummary {
     $profile = Get-Content -Raw -Encoding UTF8 -LiteralPath $profilePath | ConvertFrom-Json
     $summary = Get-ObjectValue $profile "summary"
     $abilities = Get-ObjectValue $profile "abilities"
+    $course = Get-ObjectValue $profile "course"
     return [ordered]@{
+      courseDay = Get-NumberValue $course "currentDay"
+      courseWords = Get-NumberValue $course "words"
+      courseSentences = Get-NumberValue $course "sentences"
+      courseNotes = Get-NumberValue $course "notes"
       aiQuestions = Get-NumberValue $summary "aiQuestions"
       aiCorrect = Get-NumberValue $summary "aiCorrect"
       aiAccuracy = Get-NumberValue $summary "aiAccuracy"
@@ -315,6 +321,7 @@ function Get-ReportText($Report) {
   $summary = $Report.summary
   if ($null -eq $summary) { $lines += "  （暂无可读取的学习档案统计）" }
   else {
+    $lines += "  · 课程：第 $($summary.courseDay) 天，$($summary.courseWords) 个单词、$($summary.courseSentences) 个句子、$($summary.courseNotes) 份笔记"
     $lines += "  · AI 做题：$($summary.aiQuestions) 题，正确 $($summary.aiCorrect) 题，正确率 $($summary.aiAccuracy)%"
     $lines += "  · AI 问答：$($summary.tutorQuestions) 次"
     $lines += "  · 试卷：$($summary.exams) 份"
@@ -505,7 +512,7 @@ function Show-SyncCenter {
     if ($script:syncRunning) { return }
     $script:syncRunning = $true
     $script:syncButton.Enabled = $false
-    $script:detailBox.Text = "正在同步……`r`n`r`n正在读取学习进度、错题本、每日笔记和预习，并与网站交换学习档案。"
+    $script:detailBox.Text = "正在同步……`r`n`r`n正在读取学习进度、错题本、每日课程内容、学习笔记和预习，并与网站交换学习档案。"
     $script:syncWorker.RunWorkerAsync()
   }
 

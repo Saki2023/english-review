@@ -73,6 +73,27 @@ test("teaching profile write token updates only the local teaching profile", asy
     assert.equal(profile.localTeachingProfile.previews.length, 2);
     assert.equal(JSON.stringify(profile).includes("must-not-be-stored"), false);
 
+    const courseEndpoint = `${baseUrl}/api/content/batch`;
+    const courseBody = JSON.stringify({
+      updatedAt: "2026-08-04",
+      words: [{ id: "d5-sun", day: 5, learned: "2026-08-04", english: "sun", chinese: "太阳", phonetic: "/sʌn/", acceptedChinese: ["太阳"], directions: ["en-zh", "zh-en"] }],
+      sentences: [{ id: "d5-s1", day: 5, learned: "2026-08-04", english: "It is fun.", chinese: "它很有趣。", acceptedChinese: ["它很有趣"], acceptedEnglish: ["it is fun"], directions: ["en-zh", "zh-en"] }],
+      notes: [{ day: 5, date: "2026-08-04", score: "9 / 10", summary: "学习 /ʌ/。", goals: ["拼读 sun"], pronunciation: ["/ʌ/ 要短促。"], patterns: [], mistakes: [], review: "复习 sun。" }]
+    });
+    const rejectedCourse = await fetch(courseEndpoint, { method: "PUT", headers: { Authorization: `Bearer ${deriveLearningSyncToken(apiToken)}`, "Content-Type": "application/json" }, body: courseBody });
+    assert.equal(rejectedCourse.status, 401);
+    const writtenCourse = await fetch(courseEndpoint, { method: "PUT", headers: { Authorization: `Bearer ${deriveTeachingProfileWriteToken(apiToken)}`, "Content-Type": "application/json" }, body: courseBody });
+    assert.equal(writtenCourse.status, 200);
+    const courseResult = await writtenCourse.json();
+    assert.deepEqual({ added: courseResult.added, updated: courseResult.updated, notesAdded: courseResult.notesAdded, currentDay: courseResult.currentDay }, { added: 2, updated: 0, notesAdded: 1, currentDay: 5 });
+    const repeatedCourse = await (await fetch(courseEndpoint, { method: "PUT", headers: { Authorization: `Bearer ${deriveTeachingProfileWriteToken(apiToken)}`, "Content-Type": "application/json" }, body: courseBody })).json();
+    assert.deepEqual({ added: repeatedCourse.added, updated: repeatedCourse.updated, notesUpdated: repeatedCourse.notesUpdated }, { added: 0, updated: 2, notesUpdated: 1 });
+    const syncedCourse = await (await fetch(`${baseUrl}/api/content`)).json();
+    assert.equal(syncedCourse.currentDay, 5);
+    assert.equal(syncedCourse.words.some(item => item.id === "d5-sun"), true);
+    assert.equal(syncedCourse.sentences.some(item => item.id === "d5-s1"), true);
+    assert.equal(syncedCourse.notes.some(item => item.day === 5 && /sun/.test(item.review)), true);
+
     const login = await fetch(`${baseUrl}/api/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "learner", password: "teaching-sync-password" }) });
     const cookie = login.headers.get("set-cookie").split(";")[0];
     const anonymousPreview = await fetch(`${baseUrl}/api/preview`);

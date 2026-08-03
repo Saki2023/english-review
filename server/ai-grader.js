@@ -1,6 +1,6 @@
 "use strict";
 
-const { englishFunctionWordsMatch } = require("../answer-utils");
+const { englishFunctionWordDifferences, englishFunctionWordsMatch } = require("../answer-utils");
 const { englishTokens, safeQuestionFocus } = require("./ai-question-utils");
 
 const MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024;
@@ -61,7 +61,8 @@ function buildMessages(input) {
         "Accept harmless Chinese measure-word or location-word variants and harmless English capitalization or punctuation variants.",
         "For Chinese-to-English answers, missing or extra a, an, the, on, in, am, is, or are is an error and must never receive correct=true.",
         "Reject changes to the subject or pronoun, animal or object, size or adjective, preposition or location, negation, number, core action, or tense.",
-        "Return only a JSON object with exactly two keys: correct (boolean) and explanation (a short Simplified Chinese string no longer than 60 Chinese characters)."
+        "Return only a JSON object with correct (boolean), explanation (a short Simplified Chinese string no longer than 60 Chinese characters), and problemWords (an array containing only English source/reference words that were actually misunderstood, omitted, added, or misspelled).",
+        "For a harmless Chinese measure-word difference, return correct=true and an empty problemWords array."
       ].join(" ")
     },
     {
@@ -79,7 +80,13 @@ function buildMessages(input) {
 
 function enforceEnglishFunctionWords(input, result) {
   if (input.direction !== "zh-en" || !result.correct || englishFunctionWordsMatch(input.answer, input.acceptedAnswers)) return result;
-  return { correct: false, explanation: "冠词、介词或 be 动词有漏写或多写，请对照答案检查。" };
+  return {
+    correct: false,
+    score: 0,
+    gradingStatus: "incorrect",
+    explanation: "冠词、介词或 be 动词有漏写或多写，请对照答案检查。",
+    problemWords: englishFunctionWordDifferences(input.answer, input.acceptedAnswers)
+  };
 }
 
 function extractMessageContent(payload) {
@@ -119,7 +126,14 @@ function parseGradeResponse(payload) {
   if (typeof parsed.correct !== "boolean" || typeof parsed.explanation !== "string") throw new Error("AI provider returned an invalid grade");
   const explanation = parsed.explanation.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
   if (!explanation) throw new Error("AI provider returned an empty explanation");
-  return { correct: parsed.correct, explanation: Array.from(explanation).slice(0, 120).join("") };
+  const problemWords = Array.from(new Set((Array.isArray(parsed.problemWords) ? parsed.problemWords : []).flatMap(englishTokens))).slice(0, 12);
+  return {
+    correct: parsed.correct,
+    score: parsed.correct ? 1 : 0,
+    gradingStatus: parsed.correct ? "correct" : "incorrect",
+    explanation: Array.from(explanation).slice(0, 120).join(""),
+    problemWords
+  };
 }
 
 function providerError(status) {

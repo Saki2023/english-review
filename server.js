@@ -5,7 +5,7 @@ const vm = require("vm");
 const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
-const { chineseAnswerMatches, englishAnswerMatches } = require("./answer-utils");
+const { chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiQuestionGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
 const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, buildLearningProfile, createQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
@@ -112,6 +112,12 @@ function mergeById(seedItems, storedItems) {
   return Array.from(map.values());
 }
 
+function mergeNotes(seedNotes, storedNotes) {
+  const map = new Map((Array.isArray(storedNotes) ? storedNotes : []).filter(item => item && Number(item.day) > 0).map(item => [Number(item.day), item]));
+  (Array.isArray(seedNotes) ? seedNotes : []).forEach(item => { if (item && Number(item.day) > 0) map.set(Number(item.day), item); });
+  return Array.from(map.values()).sort((left, right) => Number(left.day) - Number(right.day));
+}
+
 function mergeContent(seed, stored) {
   const source = stored && typeof stored === "object" ? stored : {};
   const deletedIds = Array.isArray(source.deletedIds) ? Array.from(new Set(source.deletedIds.map(String))) : [];
@@ -122,14 +128,14 @@ function mergeContent(seed, stored) {
     currentDay: Math.max(Number(seed.currentDay || 0), Number(source.currentDay || 0)),
     words: mergeById(seed.words, source.words).filter(item => !deletedIds.includes(item.id)),
     sentences: mergeById(seed.sentences, source.sentences).filter(item => !deletedIds.includes(item.id)),
-    notes: Array.isArray(seed.notes) ? seed.notes : (Array.isArray(source.notes) ? source.notes : []),
+    notes: mergeNotes(seed.notes, source.notes),
     seedMistakes: Array.isArray(seed.seedMistakes) ? seed.seedMistakes : (Array.isArray(source.seedMistakes) ? source.seedMistakes : []),
     deletedIds
   };
 }
 
 function recalculateCurrentDay(target, seedDay = 0) {
-  const itemDays = [...(target.words || []), ...(target.sentences || [])].map(item => Number(item.day) || 0);
+  const itemDays = [...(target.words || []), ...(target.sentences || []), ...(target.notes || [])].map(item => Number(item.day) || 0);
   target.currentDay = Math.max(Number(seedDay) || 0, ...itemDays);
 }
 
@@ -369,6 +375,100 @@ function normalizeContentItem(body) {
   return { ...base, acceptedChinese: Array.isArray(body.acceptedChinese) && body.acceptedChinese.length ? body.acceptedChinese : [chinese], acceptedEnglish: Array.isArray(body.acceptedEnglish) && body.acceptedEnglish.length ? body.acceptedEnglish : [english.toLowerCase().replace(/[.,!?;:]/g, "").trim()] };
 }
 
+function boundedContentText(value, maximum = 500) {
+  return Array.from(String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()).slice(0, maximum).join("");
+}
+
+function boundedContentStrings(value, maximumItems = 20, maximumLength = 500) {
+  return (Array.isArray(value) ? value : []).map(item => boundedContentText(item, maximumLength)).filter(Boolean).slice(0, maximumItems);
+}
+
+function normalizeContentNote(body) {
+  const source = body && typeof body === "object" ? body : {};
+  const day = Number(source.day);
+  if (!Number.isInteger(day) || day < 1) throw Object.assign(new Error("note day must be a positive integer"), { statusCode: 400 });
+  const patterns = (Array.isArray(source.patterns) ? source.patterns : []).slice(0, 12).map(pattern => ({
+    title: boundedContentText(pattern && pattern.title, 120),
+    note: boundedContentText(pattern && pattern.note, 500),
+    examples: (Array.isArray(pattern && pattern.examples) ? pattern.examples : []).slice(0, 8).map(example => ({
+      english: boundedContentText(example && example.english, 300),
+      chinese: boundedContentText(example && example.chinese, 300)
+    })).filter(example => example.english && example.chinese)
+  })).filter(pattern => pattern.title || pattern.note || pattern.examples.length);
+  return {
+    day,
+    date: boundedContentText(source.date || today(), 20),
+    score: boundedContentText(source.score, 80),
+    summary: boundedContentText(source.summary, 1000),
+    goals: boundedContentStrings(source.goals),
+    pronunciation: boundedContentStrings(source.pronunciation, 30, 1000),
+    patterns,
+    mistakes: boundedContentStrings(source.mistakes, 30, 1000),
+    review: boundedContentText(source.review, 1200)
+  };
+}
+
+function syncCourseContent(body) {
+  const source = body && typeof body === "object" ? body : {};
+  const incoming = [
+    ...(Array.isArray(source.words) ? source.words.map(item => ({ ...item, kind: "word" })) : []),
+    ...(Array.isArray(source.sentences) ? source.sentences.map(item => ({ ...item, kind: "sentence" })) : [])
+  ];
+  const normalized = incoming.map(normalizeContentItem);
+  const notes = (Array.isArray(source.notes) ? source.notes : []).map(normalizeContentNote);
+  if (!normalized.length && !notes.length) throw Object.assign(new Error("words, sentences, or notes are required"), { statusCode: 400 });
+
+  const incomingIds = new Set();
+  normalized.forEach(item => {
+    if (incomingIds.has(item.id)) throw Object.assign(new Error(`duplicate incoming id: ${item.id}`), { statusCode: 409 });
+    incomingIds.add(item.id);
+  });
+  const noteDays = new Set();
+  notes.forEach(note => {
+    if (noteDays.has(note.day)) throw Object.assign(new Error(`duplicate incoming note day: ${note.day}`), { statusCode: 409 });
+    noteDays.add(note.day);
+  });
+  normalized.forEach(item => {
+    const found = findContentItem(item.id);
+    if (found && (found.item.phonetic !== undefined) !== (item.phonetic !== undefined)) {
+      throw Object.assign(new Error(`content kind cannot change: ${item.id}`), { statusCode: 409 });
+    }
+  });
+
+  let added = 0;
+  let updated = 0;
+  normalized.forEach(item => {
+    const found = findContentItem(item.id);
+    const target = item.phonetic !== undefined ? content.words : content.sentences;
+    if (!found) {
+      target.push(item);
+      added += 1;
+    } else {
+      found.collection[found.index] = item;
+      updated += 1;
+    }
+    content.deletedIds = (content.deletedIds || []).filter(id => id !== item.id);
+  });
+
+  let notesAdded = 0;
+  let notesUpdated = 0;
+  notes.forEach(note => {
+    const index = content.notes.findIndex(item => Number(item.day) === note.day);
+    if (index < 0) {
+      content.notes.push(note);
+      notesAdded += 1;
+    } else {
+      content.notes[index] = note;
+      notesUpdated += 1;
+    }
+  });
+  content.notes.sort((left, right) => Number(left.day) - Number(right.day));
+  content.updatedAt = [content.updatedAt, boundedContentText(source.updatedAt, 40) || today()].map(String).filter(Boolean).sort().at(-1);
+  recalculateCurrentDay(content, readSeedContent().currentDay);
+  persistContent();
+  return { added, updated, notesAdded, notesUpdated, currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, notes: content.notes.length, updatedAt: content.updatedAt };
+}
+
 function addContentItem(body) {
   const item = normalizeContentItem(body); const collection = item.phonetic !== undefined ? content.words : content.sentences;
   if ([...content.words, ...content.sentences].some(existing => existing.id === item.id)) throw Object.assign(new Error("id already exists"), { statusCode: 409 });
@@ -385,7 +485,8 @@ function handleContent(req, res, url, user) {
     return sendJson(res, 200, { ...content, words: type === "sentence" ? [] : filter(content.words), sentences: type === "word" ? [] : filter(content.sentences) });
   }
   if (match && req.method === "GET") { const found = findContentItem(decodeURIComponent(match[1])); return found ? sendJson(res, 200, found.item) : sendError(res, 404, "content item not found"); }
-  if (!canManageContent(req, user) && ["POST", "PATCH", "DELETE"].includes(req.method)) return sendError(res, user ? 403 : 401, user ? "admin role required" : "login required");
+  const teachingSync = req.method === "PUT" && url.pathname === "/api/content/batch" && isTeachingProfileWriteToken(req);
+  if (!canManageContent(req, user) && !teachingSync && ["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return sendError(res, user ? 403 : 401, user ? "admin role required" : "login required");
   if (req.method === "POST" && url.pathname === "/api/content") return readBody(req).then(body => { const item = addContentItem(body); persistContent(); sendJson(res, 201, item); }).catch(error => sendError(res, error.statusCode || 400, error.message));
   if (req.method === "POST" && url.pathname === "/api/content/batch") return readBody(req).then(body => {
     const incoming = Array.isArray(body.items) ? body.items : [...(Array.isArray(body.words) ? body.words.map(item => ({ ...item, kind: "word" })) : []), ...(Array.isArray(body.sentences) ? body.sentences.map(item => ({ ...item, kind: "sentence" })) : [])];
@@ -394,6 +495,7 @@ function handleContent(req, res, url, user) {
     normalized.forEach(item => { if (existingIds.has(item.id) || incomingIds.has(item.id)) throw Object.assign(new Error(`id already exists: ${item.id}`), { statusCode: 409 }); incomingIds.add(item.id); });
     const added = normalized.map(item => addContentItem({ ...item, kind: item.phonetic !== undefined ? "word" : "sentence" })); persistContent(); sendJson(res, 201, { added, currentDay: content.currentDay, updatedAt: content.updatedAt });
   }).catch(error => sendError(res, error.statusCode || 400, error.message));
+  if (req.method === "PUT" && url.pathname === "/api/content/batch") return readBody(req).then(body => sendJson(res, 200, syncCourseContent(body))).catch(error => sendError(res, error.statusCode || 400, error.message));
   if (match && (req.method === "PATCH" || req.method === "DELETE")) {
     const found = findContentItem(decodeURIComponent(match[1])); if (!found) return sendError(res, 404, "content item not found");
     if (req.method === "DELETE") { found.collection.splice(found.index, 1); content.deletedIds = Array.from(new Set([...(content.deletedIds || []), found.item.id])); recalculateCurrentDay(content, readSeedContent().currentDay); content.updatedAt = today(); persistContent(); return sendJson(res, 200, { deleted: true, id: found.item.id }); }
@@ -602,6 +704,33 @@ function aiQuestionMatches(question, answer) {
   return chineseAnswerMatches(answer, question.acceptedChinese || [question.chinese]);
 }
 
+function localTranslationGrade(direction, english, answer, acceptedAnswers) {
+  if (direction === "zh-en") {
+    if (!englishAnswerMatches(answer, acceptedAnswers)) return null;
+    return { correct: true, score: 1, gradingStatus: "correct", explanation: "本地规则已接受这个答案。", problemWords: [], wordResults: englishWordResults(english, answer), source: "local" };
+  }
+  const quality = chineseAnswerQuality(answer, acceptedAnswers);
+  if (!quality.correct) return null;
+  const partial = quality.gradingStatus === "partial";
+  return {
+    ...quality,
+    explanation: partial ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。" : "本地规则已接受这个答案。",
+    problemWords: [],
+    wordResults: englishSourceWordResults(english, true),
+    source: "local"
+  };
+}
+
+function completeTranslationGrade(direction, english, answer, result) {
+  const score = Number.isFinite(Number(result.score)) ? Math.max(0, Math.min(1, Number(result.score))) : (result.correct ? 1 : 0);
+  const gradingStatus = ["correct", "partial", "incorrect"].includes(result.gradingStatus) ? result.gradingStatus : (result.correct ? "correct" : "incorrect");
+  const problemWords = Array.isArray(result.problemWords) ? result.problemWords : [];
+  const wordResults = direction === "zh-en"
+    ? englishWordResults(english, answer)
+    : englishSourceWordResults(english, result.correct, problemWords);
+  return { ...result, score, gradingStatus, problemWords, wordResults };
+}
+
 function saveAiQuestionResult(state, setId, questionId, answer, result) {
   const practice = sanitizeAiPractice(state.aiPractice);
   const set = practice.currentSet;
@@ -611,6 +740,10 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
   const now = new Date().toISOString();
   question.userAnswer = answer;
   question.correct = result.correct;
+  question.score = result.score;
+  question.gradingStatus = result.gradingStatus;
+  question.problemWords = result.problemWords;
+  question.wordResults = result.wordResults;
   question.explanation = result.explanation;
   question.answeredAt = now;
   const prompt = question.direction === "en-zh" ? question.english : question.chinese;
@@ -634,6 +767,10 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
     userAnswer: answer,
     correctAnswer,
     correct: result.correct,
+    score: result.score,
+    gradingStatus: result.gradingStatus,
+    problemWords: result.problemWords,
+    wordResults: result.wordResults,
     focus: question.focus,
     explanation: result.explanation
   }].slice(-MAX_AI_HISTORY);
@@ -655,9 +792,9 @@ async function handleAiGrade(req, res, user) {
     if (answer.length > MAX_AI_ANSWER_LENGTH) return sendError(res, 400, "answer is too long");
     const task = findSentenceTask(body.taskId);
     if (!task) return sendError(res, 404, "sentence task not found");
-    if (localSentenceAnswerMatches(task, answer)) {
-      return sendJson(res, 200, { correct: true, explanation: "\u672c\u5730\u89c4\u5219\u5df2\u63a5\u53d7\u8fd9\u4e2a\u7b54\u6848\u3002", source: "local" });
-    }
+    const acceptedAnswers = task.direction === "zh-en" ? (task.item.acceptedEnglish || [task.item.english]) : (task.item.acceptedChinese || [task.item.chinese]);
+    const localGrade = localTranslationGrade(task.direction, task.item.english, answer, acceptedAnswers);
+    if (localGrade) return sendJson(res, 200, localGrade);
 
     const rate = takeAiRequest(user.id);
     if (!rate.allowed) {
@@ -667,10 +804,9 @@ async function handleAiGrade(req, res, user) {
     const state = getUserState(user);
     const selection = aiSelectionForState(state, body);
     persistUserStates();
-    const acceptedAnswers = task.direction === "zh-en" ? (task.item.acceptedEnglish || [task.item.english]) : (task.item.acceptedChinese || [task.item.chinese]);
     const sourceText = task.direction === "zh-en" ? task.item.chinese : task.item.english;
     const routed = await runAiRoute(selection.route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: task.direction, sourceText }));
-    return sendJson(res, 200, { ...routed.value, source: "ai" });
+    return sendJson(res, 200, { ...completeTranslationGrade(task.direction, task.item.english, answer, routed.value), source: "ai" });
   } catch (error) {
     if (error && [400, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI grading failed: ${error && error.message ? error.message : "unknown error"}`);
@@ -820,17 +956,18 @@ async function handleAiQuestionGrade(req, res, user) {
     const question = set.questions.find(item => item.id === body.questionId);
     if (!question) return sendError(res, 404, "AI question not found");
 
-    let result = { correct: aiQuestionMatches(question, answer), explanation: "本地规则判定。", source: "local" };
+    const acceptedAnswers = question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese;
+    let result = localTranslationGrade(question.direction, question.english, answer, acceptedAnswers);
+    if (!result) result = { correct: false, score: 0, gradingStatus: "incorrect", explanation: "本地规则判定。", problemWords: [], wordResults: [], source: "local" };
     if (!result.correct) {
       const rate = takeAiRequest(user.id);
       if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
       const availableModels = getAvailableModels(aiSettings);
       const requestedModel = availableModels.includes(set.model) ? set.model : aiSettings.defaultModel;
       const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: set.reasoningEffort });
-      const acceptedAnswers = question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese;
       const sourceText = question.direction === "zh-en" ? question.chinese : question.english;
       const routed = await runAiRoute(route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: question.direction, sourceText }));
-      result = { ...routed.value, source: "ai" };
+      result = { ...completeTranslationGrade(question.direction, question.english, answer, routed.value), source: "ai" };
     }
     const savedQuestion = saveAiQuestionResult(state, set.id, question.id, answer, result);
     return sendJson(res, 200, { ...result, question: savedQuestion, practice: state.aiPractice });
@@ -1314,7 +1451,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname.startsWith("/api/admin/ai-config")) return handleAiAdmin(req, res, url, user);
   if (url.pathname === "/api/health" && req.method === "GET") {
     refreshUsers();
-    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, users: users.users.length, authRequired: true, aiGrading: aiConfigured(), time: new Date().toISOString() });
+    return sendJson(res, 200, { ok: true, service: "daily-english-review", currentDay: content.currentDay, words: content.words.length, sentences: content.sentences.length, notes: content.notes.length, users: users.users.length, authRequired: true, aiGrading: aiConfigured(), time: new Date().toISOString() });
   }
   if (url.pathname === "/api/ai/options" && req.method === "GET") return user ? sendJson(res, 200, publicAiOptions(user)) : sendError(res, 401, "login required");
   if (url.pathname === "/api/preview") return handlePreview(req, res, user);

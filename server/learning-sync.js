@@ -12,6 +12,16 @@ function accuracy(correct, total) {
   return total ? Math.round((correct / total) * 100) : null;
 }
 
+function evidenceScore(value) {
+  const score = Number(value && value.score);
+  return Number.isFinite(score) ? Math.max(0, Math.min(1, score)) : (value && value.correct ? 1 : 0);
+}
+
+function wordEvidence(item, token) {
+  const result = (Array.isArray(item && item.wordResults) ? item.wordResults : []).find(entry => String(entry && entry.english || "").toLocaleLowerCase() === token);
+  return result && typeof result.correct === "boolean" ? result.correct : null;
+}
+
 function historySetId(item, index) {
   if (item.setId) return item.setId;
   const id = String(item.id || "");
@@ -36,7 +46,7 @@ function summarizeAiSets(history) {
     }
     const group = groups.get(setId);
     group.answeredQuestions += 1;
-    if (item.correct) group.correctQuestions += 1;
+    group.correctQuestions += evidenceScore(item);
     group.expectedQuestions = Math.max(group.expectedQuestions, Number(item.questionCount) || 0);
     if (String(item.answeredAt || "") > String(group.latestAt || "")) group.latestAt = item.answeredAt;
     if (!group.model && item.model) group.model = item.model;
@@ -72,17 +82,20 @@ function reviewItemProgress(content, state, aiHistory) {
       };
     });
     const itemTokens = englishTokens(item.english);
-    const relatedAiHistory = aiHistory.filter(entry => {
+    const candidateAiHistory = aiHistory.filter(entry => {
       const entryTokens = englishTokens(historyEnglish(entry));
       if (item.kind === "word") return itemTokens.length === 1 && entryTokens.includes(itemTokens[0]);
       return itemTokens.join(" ") === entryTokens.join(" ");
     });
-    const aiCorrect = relatedAiHistory.filter(entry => entry.correct).length;
+    const relatedAiHistory = item.kind === "word"
+      ? candidateAiHistory.map(entry => ({ entry, result: wordEvidence(entry, itemTokens[0]) })).filter(value => typeof value.result === "boolean")
+      : candidateAiHistory.map(entry => ({ entry, result: entry.correct === true }));
+    const aiCorrect = relatedAiHistory.filter(value => value.result).length;
     const aiAccuracy = accuracy(aiCorrect, relatedAiHistory.length);
     const recentAi = relatedAiHistory.slice(-3);
     const standardReviews = directionStates.reduce((total, entry) => total + entry.reviewCount, 0);
     const standardWrong = directionStates.some(entry => entry.lastResult === false);
-    const recentAiWrong = recentAi.some(entry => !entry.correct);
+    const recentAiWrong = recentAi.some(value => !value.result);
     const standardStrong = directionStates.length > 0 && directionStates.every(entry => entry.level >= 2 && entry.lastResult !== false);
     const aiStrong = relatedAiHistory.length >= 3 && aiAccuracy >= 80 && !recentAiWrong;
     let status = "unpracticed";
@@ -101,7 +114,7 @@ function reviewItemProgress(content, state, aiHistory) {
         attempts: relatedAiHistory.length,
         correct: aiCorrect,
         accuracy: aiAccuracy,
-        recentResults: recentAi.map(entry => entry.correct)
+        recentResults: recentAi.map(value => value.result)
       },
       status,
       needsReview: status !== "strong"
@@ -113,14 +126,14 @@ function aiWordSignals(content, history) {
   const words = new Map((content.words || []).map(item => [String(item.english || "").toLocaleLowerCase(), item]));
   const signals = new Map();
   history.forEach(item => {
-    const english = historyEnglish(item);
-    new Set(englishTokens(english)).forEach(token => {
+    (Array.isArray(item.wordResults) ? item.wordResults : []).forEach(result => {
+      const token = String(result && result.english || "").toLocaleLowerCase();
       const word = words.get(token);
-      if (!word) return;
+      if (!word || typeof result.correct !== "boolean") return;
       if (!signals.has(token)) signals.set(token, { english: word.english, chinese: word.chinese, attempts: 0, wrong: 0, lastWrongAt: "" });
       const signal = signals.get(token);
       signal.attempts += 1;
-      if (!item.correct) {
+      if (!result.correct) {
         signal.wrong += 1;
         signal.lastWrongAt = item.answeredAt || item.date || signal.lastWrongAt;
       }
@@ -246,9 +259,9 @@ function tutorEvidence(state) {
 function buildLearningSyncProfile(content, state, user) {
   const aiPractice = sanitizeAiPractice(state.aiPractice);
   const aiHistory = aiPractice.history;
-  const aiCorrect = aiHistory.filter(item => item.correct).length;
+  const aiCorrect = Math.round(aiHistory.reduce((sum, item) => sum + evidenceScore(item), 0) * 100) / 100;
   const attempts = Array.isArray(state.attempts) ? state.attempts : [];
-  const reviewCorrect = attempts.filter(item => item.correct === true).length;
+  const reviewCorrect = Math.round(attempts.reduce((sum, item) => sum + evidenceScore(item), 0) * 100) / 100;
   const itemProgress = reviewItemProgress(content, state, aiHistory);
   const mistakes = Array.isArray(state.mistakes) ? state.mistakes.slice(-80) : [];
   const recentAiMistakes = aiHistory.filter(item => !item.correct).slice(-100).reverse();
@@ -274,7 +287,8 @@ function buildLearningSyncProfile(content, state, user) {
       currentDay: Number(content.currentDay) || 1,
       contentUpdatedAt: String(content.updatedAt || ""),
       words: (content.words || []).length,
-      sentences: (content.sentences || []).length
+      sentences: (content.sentences || []).length,
+      notes: (content.notes || []).length
     },
     summary: {
       reviewQuestions: attempts.length,

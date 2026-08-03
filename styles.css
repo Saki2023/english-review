@@ -107,6 +107,7 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .primary-button svg, .secondary-button svg { width: 15px; height: 15px; }
 .feedback { max-width: 510px; margin: 18px auto 0; padding: 12px 14px; border-radius: 6px; text-align: left; font-size: 13px; line-height: 1.6; }
 .feedback.is-correct { color: var(--primary-deep); background: var(--primary-soft); }
+.feedback.is-partial { color: #7a5412; background: #fff4d6; }
 .feedback.is-wrong { color: #8e3333; background: var(--danger-soft); }
 .feedback-title { display: block; margin-bottom: 2px; font-weight: 500; }
 .feedback-answer { display: block; color: inherit; }
@@ -360,6 +361,7 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .ai-history-ask svg { width: 14px; height: 14px; }
 .ai-history-result { font-weight: 500; }
 .ai-history-result.is-correct { color: var(--primary); }
+.ai-history-result.is-partial { color: #9a6a16; }
 .ai-history-result.is-wrong { color: var(--danger); }
 .ai-history-prompt { margin-bottom: 12px; color: var(--ink); font-size: 15px; line-height: 1.6; overflow-wrap: anywhere; }
 .ai-history-answers { display: grid; gap: 7px; margin: 0; }

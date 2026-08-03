@@ -126,6 +126,21 @@ test("daily preview loads the latest synced document and renders bounded Markdow
   assert.match(css, /\.preview-table-wrap\s*\{[^}]*overflow-x:\s*auto/s);
   assert.match(sync, /Select-Object -First 30/);
   assert.match(sync, /previews = \$previewDocuments/);
+  assert.match(sync, /网站课程内容\.json/);
+  assert.match(sync, /\/api\/content\/batch/);
+  assert.match(sync, /notesAdded/);
+});
+
+test("partial answers have distinct feedback and preserve mastery", () => {
+  const app = read("app.js");
+  const css = read("styles.css");
+  assert.match(app, /gradingStatus === "partial"/);
+  assert.match(app, /基本理解正确/);
+  assert.match(app, /state\.level = Math\.max\(1, Number\(state\.level\) \|\| 0\)/);
+  assert.match(app, /function aiQuestionScore\(question\)/);
+  assert.match(app, /得分 \$\{formatQuestionScore\(earned\)\}/);
+  assert.match(app, /score: Number\.isFinite\(Number\(grading\.score\)\)/);
+  assert.match(css, /\.feedback\.is-partial/);
 });
 
 test("exam UI supports A3 pages, printing, draft recovery, and paper-photo grading", () => {
@@ -143,7 +158,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 29", () => {
+test("PWA client assets consistently use the displayed cache version 30", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -154,6 +169,6 @@ test("PWA client assets consistently use the displayed cache version 29", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "29");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v29"/);
+  assert.equal(displayedVersion[1], "30");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v30"/);
 });

@@ -2,6 +2,7 @@
 
 const { sanitizeAiPractice } = require("./ai-practice");
 const { sanitizeAiExamState } = require("./ai-exam");
+const { REQUIRED_ENGLISH_FUNCTION_WORDS } = require("../answer-utils");
 
 const ABILITY_DEFINITIONS = [
   { id: "vocabulary", label: "词汇" },
@@ -89,18 +90,51 @@ function addEvidence(buckets, weights, ratio, source, occurredAt) {
   });
 }
 
+function evidenceRatio(value) {
+  const score = Number(value && value.score);
+  if (Number.isFinite(score)) return boundedRatio(score);
+  return value && value.correct ? 1 : 0;
+}
+
+function resultAccuracy(results, filter = () => true) {
+  const relevant = (Array.isArray(results) ? results : []).filter(item => item && typeof item.correct === "boolean" && filter(item));
+  return relevant.length ? relevant.filter(item => item.correct).length / relevant.length : null;
+}
+
+function translationRatios(value, direction) {
+  const overall = evidenceRatio(value);
+  const wordResults = Array.isArray(value && value.wordResults) ? value.wordResults : [];
+  const allWords = resultAccuracy(wordResults);
+  if (direction === "zh-en") {
+    const lexical = resultAccuracy(wordResults, item => !REQUIRED_ENGLISH_FUNCTION_WORDS.includes(String(item.english || "").toLocaleLowerCase()));
+    const functionWords = wordResults.filter(item => REQUIRED_ENGLISH_FUNCTION_WORDS.includes(String(item.english || "").toLocaleLowerCase()));
+    const grammar = functionWords.some(item => item.correct === false) ? 0 : overall;
+    return { translation: allWords == null ? overall : allWords, grammar, spelling: lexical == null ? overall : lexical };
+  }
+  return { reading: overall, vocabulary: allWords == null ? (value && value.correct ? 1 : null) : allWords };
+}
+
+function addEvidenceRatios(buckets, weights, ratios, source, occurredAt) {
+  Object.entries(weights || {}).forEach(([ability, weight]) => {
+    if (!Object.hasOwn(ratios, ability) || ratios[ability] == null) return;
+    addEvidence(buckets, { [ability]: weight }, ratios[ability], source, occurredAt);
+  });
+}
+
 function collectReviewEvidence(content, state, buckets) {
   (Array.isArray(state.attempts) ? state.attempts : []).forEach(attempt => {
     const task = itemForTask(content, attempt && attempt.taskId);
     if (!task || typeof attempt.correct !== "boolean") return;
-    addEvidence(buckets, ordinaryWeights(task.kind, task.direction), attempt.correct ? 1 : 0, "review", attempt.answeredAt || attempt.date);
+    const weights = ordinaryWeights(task.kind, task.direction);
+    if (task.kind === "sentence") addEvidenceRatios(buckets, weights, translationRatios(attempt, task.direction), "review", attempt.answeredAt || attempt.date);
+    else addEvidence(buckets, weights, evidenceRatio(attempt), "review", attempt.answeredAt || attempt.date);
   });
 }
 
 function collectAiPracticeEvidence(state, buckets) {
   const practice = sanitizeAiPractice(state.aiPractice);
   practice.history.forEach(item => {
-    addEvidence(buckets, aiPracticeWeights(item.direction), item.correct ? 1 : 0, "ai-practice", item.answeredAt || item.date);
+    addEvidenceRatios(buckets, aiPracticeWeights(item.direction), translationRatios(item, item.direction), "ai-practice", item.answeredAt || item.date);
   });
 }
 

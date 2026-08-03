@@ -2,7 +2,7 @@
   "use strict";
 
   const DATA = window.ENGLISH_REVIEW_DATA;
-  const { buildMistakePracticeQueue, chineseAnswerMatches, englishAnswerMatches, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
+  const { buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const STORAGE_KEY = "daily-english-review-v1";
   const EXAM_GENERATION_API_VERSION = "2";
   const DAILY_TARGET = 10;
@@ -1514,6 +1514,16 @@
 
   function aiCorrectAnswer(question) { return question.direction === "zh-en" ? question.english : question.chinese; }
 
+  function aiQuestionScore(question) {
+    const score = Number(question && question.score);
+    return Number.isFinite(score) ? Math.max(0, Math.min(1, score)) : (question && question.correct === true ? 1 : 0);
+  }
+
+  function formatQuestionScore(value) {
+    const rounded = Math.round(Number(value || 0) * 100) / 100;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+  }
+
   function aiHistorySetId(item, index) {
     const explicit = String(item && item.setId || "").trim();
     if (explicit) return explicit;
@@ -1576,8 +1586,8 @@
     const practice = normalizeClientAiPractice(model.aiPractice);
     const groups = groupAiHistory(practice);
     const questions = groups.flatMap(group => group.questions);
-    const correct = questions.filter(item => item.correct === true).length;
-    const accuracy = questions.length ? Math.round((correct / questions.length) * 100) : 0;
+    const earned = questions.reduce((sum, item) => sum + aiQuestionScore(item), 0);
+    const accuracy = questions.length ? Math.round((earned / questions.length) * 100) : 0;
     $("#aiHistorySummary").textContent = questions.length ? `${groups.length} 组 · ${questions.length} 题 · 正确率 ${accuracy}%` : "暂无做题记录";
     const list = $("#aiHistoryList");
     if (!groups.length) {
@@ -1586,13 +1596,13 @@
       return;
     }
     list.innerHTML = groups.map(group => {
-      const groupCorrect = group.questions.filter(item => item.correct === true).length;
+      const groupScore = group.questions.reduce((sum, item) => sum + aiQuestionScore(item), 0);
       const complete = group.questions.length >= group.expectedCount;
       const modelLabel = [group.providerName, group.model, AI_EFFORT_LABELS[group.reasoningEffort]].filter(Boolean).join(" · ") || "历史题组";
       const questionRows = group.questions.map((item, index) => {
         const number = Number(item.questionNumber) || index + 1;
         return `<article class="ai-history-question">
-          <div class="ai-history-question-meta"><span>第 ${number} 题 · ${formatDirection(item.direction)}</span><div class="ai-history-question-actions"><span class="ai-history-result ${item.correct === true ? "is-correct" : "is-wrong"}">${item.correct === true ? "正确" : "错误"}</span><button class="text-button ai-history-ask" type="button" data-ai-history-ask="${escapeHtml(item.id)}"><i data-lucide="message-circle-question" aria-hidden="true"></i>询问</button></div></div>
+          <div class="ai-history-question-meta"><span>第 ${number} 题 · ${formatDirection(item.direction)}</span><div class="ai-history-question-actions"><span class="ai-history-result ${item.gradingStatus === "partial" ? "is-partial" : item.correct === true ? "is-correct" : "is-wrong"}">${item.gradingStatus === "partial" ? "部分正确" : item.correct === true ? "正确" : "错误"}</span><button class="text-button ai-history-ask" type="button" data-ai-history-ask="${escapeHtml(item.id)}"><i data-lucide="message-circle-question" aria-hidden="true"></i>询问</button></div></div>
           <div class="ai-history-prompt"><span class="inline-english">${escapeHtml(item.prompt || "（题目未记录）")}${item.direction === "en-zh" ? speechButtonHtml(item.prompt, "播放题目发音") : ""}</span></div>
           <dl class="ai-history-answers">
             <div><dt>你的答案</dt><dd>${escapeHtml(item.userAnswer || "（未填写）")}</dd></div>
@@ -1604,7 +1614,7 @@
       return `<details class="ai-history-group">
         <summary>
           <div class="ai-history-group-main"><strong>${escapeHtml(formatAiHistoryTime(group.createdAt, group.latestAt))}</strong><span>${escapeHtml(modelLabel)}</span></div>
-          <div class="ai-history-score"><strong>${groupCorrect} / ${group.questions.length}</strong><span>${complete ? "已完成" : `已做 ${group.questions.length} / ${group.expectedCount}`}</span></div>
+          <div class="ai-history-score"><strong>${formatQuestionScore(groupScore)} / ${group.questions.length}</strong><span>${complete ? "已完成" : `已做 ${group.questions.length} / ${group.expectedCount}`}</span></div>
           <i data-lucide="chevron-down" aria-hidden="true"></i>
         </summary>
         <div class="ai-history-questions">${questionRows}</div>
@@ -1621,8 +1631,9 @@
       return;
     }
     feedback.hidden = false;
-    feedback.className = `feedback ${question.correct ? "is-correct" : "is-wrong"}`;
-    feedback.innerHTML = `<span class="feedback-title">${question.correct ? "答对了" : "再看一次"}</span><span class="feedback-answer"><span class="inline-english">正确答案：${escapeHtml(aiCorrectAnswer(question))}${question.direction === "zh-en" ? speechButtonHtml(aiCorrectAnswer(question), "播放正确答案") : ""}</span></span>${question.correct ? "" : `<span class="feedback-note">你的答案：${escapeHtml(question.userAnswer || "（未填写）")}</span>`}${question.explanation ? `<span class="feedback-note">${escapeHtml(question.explanation)}</span>` : ""}`;
+    const partial = question.gradingStatus === "partial";
+    feedback.className = `feedback ${partial ? "is-partial" : question.correct ? "is-correct" : "is-wrong"}`;
+    feedback.innerHTML = `<span class="feedback-title">${partial ? "基本理解正确" : question.correct ? "答对了" : "再看一次"}</span><span class="feedback-answer"><span class="inline-english">正确答案：${escapeHtml(aiCorrectAnswer(question))}${question.direction === "zh-en" ? speechButtonHtml(aiCorrectAnswer(question), "播放正确答案") : ""}</span></span>${question.correct && !partial ? "" : `<span class="feedback-note">你的答案：${escapeHtml(question.userAnswer || "（未填写）")}</span>`}${partial ? `<span class="feedback-note">本题按 ${Math.round((Number(question.score) || 0.8) * 100)}% 记录，不会清空已有掌握等级。</span>` : ""}${question.explanation ? `<span class="feedback-note">${escapeHtml(question.explanation)}</span>` : ""}`;
     $("#aiFeedbackActions").hidden = false;
     requestAnimationFrame(() => $("#nextAiQuestion").focus({ preventScroll: true }));
   }
@@ -1653,8 +1664,8 @@
     if (set.completed || Number(set.index) >= set.questions.length) {
       set.completed = true;
       empty.hidden = true; panel.hidden = true; complete.hidden = false;
-      const correct = set.questions.filter(question => question.correct === true).length;
-      $("#aiCompleteNote").textContent = `答对 ${correct} / ${set.questions.length} 题`;
+      const earned = set.questions.reduce((sum, question) => sum + aiQuestionScore(question), 0);
+      $("#aiCompleteNote").textContent = `得分 ${formatQuestionScore(earned)} / ${set.questions.length}`;
       renderAiTutorWindow();
       return;
     }
@@ -3087,7 +3098,15 @@
       if (!response.ok) throw new Error("AI grading request failed");
       const result = await response.json();
       if (typeof result.correct !== "boolean" || typeof result.explanation !== "string") throw new Error("AI grading response is invalid");
-      return { correct: result.correct, explanation: result.explanation.trim(), source: result.source === "ai" ? "ai" : "local" };
+      return {
+        correct: result.correct,
+        score: Number.isFinite(Number(result.score)) ? Math.max(0, Math.min(1, Number(result.score))) : (result.correct ? 1 : 0),
+        gradingStatus: ["correct", "partial", "incorrect"].includes(result.gradingStatus) ? result.gradingStatus : (result.correct ? "correct" : "incorrect"),
+        explanation: result.explanation.trim(),
+        problemWords: Array.isArray(result.problemWords) ? result.problemWords : [],
+        wordResults: Array.isArray(result.wordResults) ? result.wordResults : [],
+        source: result.source === "ai" ? "ai" : "local"
+      };
     } finally {
       clearTimeout(timeout);
     }
@@ -3098,12 +3117,17 @@
     return task.item.chinese;
   }
 
-  function updateSchedule(task, correct) {
+  function updateSchedule(task, correct, gradingStatus = correct ? "correct" : "incorrect", score = correct ? 1 : 0) {
     const state = taskState(task.taskId);
     state.lastReviewed = localDate();
     state.reviewCount = (state.reviewCount || 0) + 1;
     state.lastResult = correct;
-    if (correct) {
+    state.lastScore = score;
+    state.gradingStatus = gradingStatus;
+    if (gradingStatus === "partial") {
+      state.level = Math.max(1, Number(state.level) || 0);
+      state.nextDue = addDays(localDate(), 1);
+    } else if (correct) {
       state.level = Math.min((state.level || 0) + 1, INTERVALS.length);
       state.nextDue = addDays(localDate(), INTERVALS[Math.max(0, state.level - 1)]);
     } else {
@@ -3119,7 +3143,14 @@
     if (!task) return;
     const answer = $("#answerInput").value.trim();
     let correct = answerMatches(task, answer);
-    let grading = { source: "local", explanation: "" };
+    let grading = { source: "local", explanation: "", score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", problemWords: [], wordResults: [] };
+    if (!correct && answer && task.direction === "en-zh") {
+      const quality = chineseAnswerQuality(answer, task.item.acceptedChinese || [task.item.chinese]);
+      if (quality.gradingStatus === "partial") {
+        correct = true;
+        grading = { ...grading, ...quality, explanation: "英语意思理解正确；中文量词不够自然，本题按部分正确记录。" };
+      }
+    }
     if (!correct && answer && API_ENABLED && task.item.type === "sentence") {
       setGradingState(true);
       try {
@@ -3131,12 +3162,19 @@
         setGradingState(false);
       }
     }
-    updateSchedule(task, correct);
+    grading = {
+      ...grading,
+      score: Number.isFinite(Number(grading.score)) ? Math.max(0, Math.min(1, Number(grading.score))) : (correct ? 1 : 0),
+      gradingStatus: ["correct", "partial", "incorrect"].includes(grading.gradingStatus) ? grading.gradingStatus : (correct ? "correct" : "incorrect"),
+      problemWords: Array.isArray(grading.problemWords) ? grading.problemWords : [],
+      wordResults: Array.isArray(grading.wordResults) ? grading.wordResults : []
+    };
+    updateSchedule(task, correct, grading.gradingStatus, grading.score);
     const today = localDate();
     model.history[today] = model.history[today] || { reviewed: 0, correct: 0 };
     model.history[today].reviewed += 1;
-    if (correct) model.history[today].correct += 1;
-    model.attempts.push({ taskId: task.taskId, date: today, answer, correct, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation });
+    model.history[today].correct = Math.round((model.history[today].correct + grading.score) * 100) / 100;
+    model.attempts.push({ taskId: task.taskId, date: today, answer, correct, score: grading.score, gradingStatus: grading.gradingStatus, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation, problemWords: grading.problemWords, wordResults: grading.wordResults });
     if (!correct) model.mistakes = [...(model.mistakes || []), { id: `attempt-${Date.now()}`, taskId: task.taskId, day: task.item.day, prompt: task.direction === "en-zh" ? task.item.english : task.item.chinese, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: grading.explanation || "本次复习未答对。" }].slice(-80);
     const session = getSession();
     session.currentTaskId = task.taskId;
@@ -3149,8 +3187,9 @@
   function showFeedback(task, correct, answer, grading = {}) {
     const feedback = $("#feedback");
     feedback.hidden = false;
-    feedback.className = `feedback ${correct ? "is-correct" : "is-wrong"}`;
-    feedback.innerHTML = `<span class="feedback-title">${correct ? "答对了" : "再看一次"}</span><span class="feedback-answer">正确答案：${escapeHtml(correctAnswer(task))}</span>${correct ? "" : `<span class="feedback-note">你的答案：${escapeHtml(answer || "（未填写）")}</span>`}`;
+    const partial = grading.gradingStatus === "partial";
+    feedback.className = `feedback ${partial ? "is-partial" : correct ? "is-correct" : "is-wrong"}`;
+    feedback.innerHTML = `<span class="feedback-title">${partial ? "基本理解正确" : correct ? "答对了" : "再看一次"}</span><span class="feedback-answer">正确答案：${escapeHtml(correctAnswer(task))}</span>${correct && !partial ? "" : `<span class="feedback-note">你的答案：${escapeHtml(answer || "（未填写）")}</span>`}${partial ? `<span class="feedback-note">本题按 ${Math.round((Number(grading.score) || 0.8) * 100)}% 记录，不会清空已有掌握等级。</span>` : ""}`;
     if (grading.explanation) feedback.insertAdjacentHTML("beforeend", `<span class="feedback-note">${escapeHtml(grading.explanation)}</span>`);
     $("#answerInput").disabled = true;
     $("#submitAnswer").disabled = true;
@@ -3589,7 +3628,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=29", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=30", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

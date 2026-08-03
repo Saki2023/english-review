@@ -1,9 +1,13 @@
 "use strict";
 
 const {
+  chineseAnswerQuality,
   chineseAnswerMatches,
   englishAnswerMatches,
+  englishFunctionWordDifferences,
   englishFunctionWordsMatch,
+  englishSourceWordResults,
+  englishWordResults,
   normalizeEnglish,
   repairReviewEvidence
 } = require("../answer-utils");
@@ -12,17 +16,48 @@ function correctedAiHistoryItem(value) {
   const item = value && typeof value === "object" ? value : {};
   const acceptedAnswers = item.correctAnswer ? [item.correctAnswer] : [];
   let correct = item.correct === true;
-  if (!correct && item.direction === "en-zh" && chineseAnswerMatches(item.userAnswer, acceptedAnswers)) correct = true;
-  if (!correct && item.direction === "zh-en" && englishAnswerMatches(item.userAnswer, acceptedAnswers)) correct = true;
-  if (correct && item.direction === "zh-en" && !englishFunctionWordsMatch(item.userAnswer, acceptedAnswers)) correct = false;
-  if (correct === (item.correct === true)) return item;
-  return {
+  let score = Number.isFinite(Number(item.score)) ? Math.max(0, Math.min(1, Number(item.score))) : (correct ? 1 : 0);
+  let gradingStatus = ["correct", "partial", "incorrect"].includes(item.gradingStatus) ? item.gradingStatus : (correct ? "correct" : "incorrect");
+  let explanation = String(item.explanation || "");
+  let problemWords = Array.isArray(item.problemWords) ? item.problemWords : [];
+  if (item.direction === "en-zh") {
+    const quality = chineseAnswerQuality(item.userAnswer, acceptedAnswers);
+    if (quality.gradingStatus === "correct" || quality.gradingStatus === "partial") {
+      correct = true;
+      score = quality.score;
+      gradingStatus = quality.gradingStatus;
+      problemWords = [];
+      explanation = quality.gradingStatus === "partial"
+        ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
+        : (explanation || "中文表达与参考答案等义，已按当前规则修正。");
+    }
+  }
+  if (!correct && item.direction === "zh-en" && englishAnswerMatches(item.userAnswer, acceptedAnswers)) {
+    correct = true;
+    score = 1;
+    gradingStatus = "correct";
+  }
+  if (correct && item.direction === "zh-en" && !englishFunctionWordsMatch(item.userAnswer, acceptedAnswers)) {
+    correct = false;
+    score = 0;
+    gradingStatus = "incorrect";
+    problemWords = englishFunctionWordDifferences(item.userAnswer, acceptedAnswers);
+    explanation = "冠词、介词或 be 动词有漏写或多写，已按当前规则修正。";
+  }
+  const english = item.direction === "zh-en" ? item.correctAnswer : item.prompt;
+  const wordResults = item.direction === "zh-en"
+    ? englishWordResults(english, item.userAnswer)
+    : englishSourceWordResults(english, correct, problemWords);
+  const repaired = {
     ...item,
     correct,
-    explanation: correct
-      ? "中文位置表达与参考答案等义，已按当前规则修正。"
-      : "冠词、介词或 be 动词有漏写或多写，已按当前规则修正。"
+    score,
+    gradingStatus,
+    explanation,
+    problemWords,
+    wordResults
   };
+  return JSON.stringify(repaired) === JSON.stringify(item) ? item : repaired;
 }
 
 function repairAiPractice(value) {
@@ -38,9 +73,19 @@ function repairAiPractice(value) {
   if (currentSet && Array.isArray(currentSet.questions)) {
     const questions = currentSet.questions.map(question => {
       const historyItem = historyById.get(`${currentSet.id}:${question.id}`);
-      if (!historyItem || (question.correct === historyItem.correct && question.explanation === historyItem.explanation)) return question;
+      if (!historyItem) return question;
+      const repaired = {
+        ...question,
+        correct: historyItem.correct,
+        score: historyItem.score,
+        gradingStatus: historyItem.gradingStatus,
+        explanation: historyItem.explanation,
+        problemWords: historyItem.problemWords,
+        wordResults: historyItem.wordResults
+      };
+      if (JSON.stringify(repaired) === JSON.stringify(question)) return question;
       changed = true;
-      return { ...question, correct: historyItem.correct, explanation: historyItem.explanation };
+      return repaired;
     });
     if (questions.some((question, index) => question !== currentSet.questions[index])) currentSet = { ...currentSet, questions };
   }

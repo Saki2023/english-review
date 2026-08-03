@@ -31,6 +31,13 @@ test("learning sync profile combines review and AI evidence without account secr
       userAnswer: "一只狗坐在垫子上",
       correctAnswer: "一只猫坐在垫子上",
       correct: false,
+      wordResults: [
+        { english: "a", correct: true, issue: "" },
+        { english: "cat", correct: false, issue: "meaning" },
+        { english: "sat", correct: true, issue: "" },
+        { english: "on", correct: true, issue: "" },
+        { english: "mat", correct: true, issue: "" }
+      ],
       explanation: "cat 需要再复习。"
     }], tutorHistory: [{
       id: "tutor-1",
@@ -56,6 +63,7 @@ test("learning sync profile combines review and AI evidence without account secr
   assert.equal(profile.summary.aiQuestions, 1);
   assert.equal(profile.summary.aiAccuracy, 0);
   assert.equal(profile.summary.tutorQuestions, 1);
+  assert.equal(profile.course.notes, 0);
   assert.equal(profile.summary.weakItems, 2);
   assert.equal(profile.summary.strongItems, 0);
   assert.equal(profile.weakPoints.aiWordSignals[0].english, "cat");
@@ -68,6 +76,37 @@ test("learning sync profile combines review and AI evidence without account secr
   assert.equal(profile.activity.tutorQuestions[0].id, "tutor-1");
   assert.equal(Object.hasOwn(profile.user, "passwordHash"), false);
   assert.equal(JSON.stringify(profile).includes("never-return-this"), false);
+});
+
+test("AI word weakness signals include only the word that was actually missing", () => {
+  const words = ["a", "big", "pig", "sat", "on", "mat"].map(english => ({ id: english, english, chinese: english }));
+  const profile = buildLearningSyncProfile({
+    currentDay: 2,
+    words,
+    sentences: [{ id: "pig-s", english: "A big pig sat on a mat.", chinese: "一只大猪坐在垫子上。" }]
+  }, {
+    aiPractice: { history: [{
+      id: "set-a:q1",
+      setId: "set-a",
+      direction: "zh-en",
+      prompt: "一只大猪坐在垫子上。",
+      userAnswer: "a big pig sat on mat",
+      correctAnswer: "A big pig sat on a mat.",
+      correct: false,
+      score: 0,
+      gradingStatus: "incorrect",
+      wordResults: [
+        { english: "a", correct: false, issue: "missing" },
+        { english: "big", correct: true, issue: "" },
+        { english: "pig", correct: true, issue: "" },
+        { english: "sat", correct: true, issue: "" },
+        { english: "on", correct: true, issue: "" },
+        { english: "mat", correct: true, issue: "" }
+      ]
+    }] }
+  }, { username: "learner", role: "member" });
+
+  assert.deepEqual(profile.weakPoints.aiWordSignals.map(item => item.english), ["a"]);
 });
 
 test("AI set summaries group question history and calculate scores", () => {

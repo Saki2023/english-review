@@ -64,3 +64,55 @@ test("ability changes report score and status transitions", () => {
   assert.equal(changes[0].before, 0);
   assert.equal(changes[0].after > 0, true);
 });
+
+test("partial translations and missing articles affect only the supported abilities", () => {
+  const report = analyzeAbilities({
+    words: ["a", "big", "pig", "sat", "on", "mat", "it", "is", "red", "pen"].map(english => ({ id: english, english, chinese: english })),
+    sentences: [
+      { id: "red-pen", english: "It is a red pen.", chinese: "它是一支红色的笔。" },
+      { id: "pig-mat", english: "A big pig sat on a mat.", chinese: "一只大猪坐在垫子上。" }
+    ]
+  }, {
+    aiPractice: { history: [
+      {
+        id: "partial-set:q1",
+        setId: "partial-set",
+        direction: "en-zh",
+        prompt: "It is a red pen.",
+        userAnswer: "它是一只红色的笔。",
+        correctAnswer: "它是一支红色的笔。",
+        correct: true,
+        score: 0.8,
+        gradingStatus: "partial",
+        answeredAt: "2026-08-03T01:00:00Z",
+        wordResults: ["it", "is", "a", "red", "pen"].map(english => ({ english, correct: true, issue: "" }))
+      },
+      {
+        id: "partial-set:q2",
+        setId: "partial-set",
+        direction: "zh-en",
+        prompt: "一只大猪坐在垫子上。",
+        userAnswer: "a big pig sat on mat",
+        correctAnswer: "A big pig sat on a mat.",
+        correct: false,
+        score: 0,
+        gradingStatus: "incorrect",
+        answeredAt: "2026-08-03T01:01:00Z",
+        wordResults: [
+          { english: "a", correct: false, issue: "missing" },
+          { english: "big", correct: true, issue: "" },
+          { english: "pig", correct: true, issue: "" },
+          { english: "sat", correct: true, issue: "" },
+          { english: "on", correct: true, issue: "" },
+          { english: "mat", correct: true, issue: "" }
+        ]
+      }
+    ] }
+  });
+
+  assert.equal(report.abilities.find(item => item.id === "reading").measuredAccuracy, 80);
+  assert.equal(report.abilities.find(item => item.id === "vocabulary").measuredAccuracy, 100);
+  assert.equal(report.abilities.find(item => item.id === "translation").measuredAccuracy, 83);
+  assert.equal(report.abilities.find(item => item.id === "grammar").measuredAccuracy, 0);
+  assert.equal(report.abilities.find(item => item.id === "spelling").measuredAccuracy, 100);
+});

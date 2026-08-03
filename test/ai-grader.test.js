@@ -77,7 +77,7 @@ test("upstream model lists accept OpenAI and common proxy response shapes", () =
 
 test("AI grade parsing requires a boolean result and a Chinese explanation", () => {
   const result = parseGradeResponse({ choices: [{ message: { content: "```json\n{\"correct\":true,\"explanation\":\"\u610f\u601d\u76f8\u540c\uff0c\u53ef\u4ee5\u8fd9\u6837\u7ffb\u8bd1\u3002\"}\n```" } }] });
-  assert.deepEqual(result, { correct: true, explanation: "\u610f\u601d\u76f8\u540c\uff0c\u53ef\u4ee5\u8fd9\u6837\u7ffb\u8bd1\u3002" });
+  assert.deepEqual(result, { correct: true, score: 1, gradingStatus: "correct", explanation: "\u610f\u601d\u76f8\u540c\uff0c\u53ef\u4ee5\u8fd9\u6837\u7ffb\u8bd1\u3002", problemWords: [] });
   assert.throws(() => parseGradeResponse({ choices: [{ message: { content: "{\"correct\":\"yes\",\"explanation\":\"ok\"}" } }] }), /invalid grade/);
 });
 
@@ -165,7 +165,7 @@ test("AI grader falls back to the Responses API when chat completions are unavai
   const grader = createAiGrader(aiConfig({ reasoningEffort: "high" }), { fetchImpl });
   const result = await grader.grade({ direction: "en-zh", sourceText: "It is big.", acceptedAnswers: ["它很大"], answer: "它很大" });
 
-  assert.deepEqual(result, { correct: true, explanation: "意思相同。" });
+  assert.deepEqual(result, { correct: true, score: 1, gradingStatus: "correct", explanation: "意思相同。", problemWords: [] });
   assert.equal(requests.length, 2);
   assert.equal(requests[0].url, "https://sub2api.example/v1/chat/completions");
   assert.equal(requests[1].url, "https://sub2api.example/v1/responses");
@@ -358,13 +358,31 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal((await localGrade.json()).source, "local");
     assert.equal(providerRequests.length, 1);
 
+    const partialGrade = await fetch(`${baseUrl}/api/ai/grade`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ taskId: "d3-s3:en-zh", answer: "它是一只红色的笔" })
+    });
+    assert.equal(partialGrade.status, 200);
+    const partialBody = await partialGrade.json();
+    assert.equal(partialBody.correct, true);
+    assert.equal(partialBody.gradingStatus, "partial");
+    assert.equal(partialBody.score, 0.8);
+    assert.deepEqual(partialBody.problemWords, []);
+    assert.equal(providerRequests.length, 1);
+
     const grade = await fetch(`${baseUrl}/api/ai/grade`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Cookie": cookie },
       body: JSON.stringify({ taskId: "d2-s4:en-zh", answer: "\u5b83\u662f\u4e00\u53ea\u5f88\u5927\u7684\u732b", model: "strong-model", reasoningEffort: "high" })
     });
     assert.equal(grade.status, 200);
-    assert.deepEqual(await grade.json(), { correct: true, explanation: "\u610f\u601d\u76f8\u540c\uff0c\u53ea\u662f\u8bf4\u6cd5\u4e0d\u540c\u3002", source: "ai" });
+    const gradeBody = await grade.json();
+    assert.equal(gradeBody.correct, true);
+    assert.equal(gradeBody.score, 1);
+    assert.equal(gradeBody.gradingStatus, "correct");
+    assert.equal(gradeBody.explanation, "\u610f\u601d\u76f8\u540c\uff0c\u53ea\u662f\u8bf4\u6cd5\u4e0d\u540c\u3002");
+    assert.equal(gradeBody.source, "ai");
     assert.equal(providerRequests.length, 2);
     assert.equal(providerRequests[1].url, "/v1/chat/completions");
     assert.equal(providerRequests[1].authorization, "Bearer private-test-key");

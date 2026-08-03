@@ -82,6 +82,17 @@ if ($WriteToken) {
   Invoke-RestMethod -Method Put -Uri $writeUri -Headers $writeHeaders -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($writeBody)) | Out-Null
   Write-Host "本地教学档案已上传到网站。"
   if ($previewDocument) { Write-Host "每日预习已同步：$($previewDocument.name)（保留近期 $($previewDocuments.Count) 份）" }
+
+  $courseContentPath = Join-Path $sharedDirectory "网站课程内容.json"
+  if (Test-Path -LiteralPath $courseContentPath) {
+    $courseContentJson = [IO.File]::ReadAllText($courseContentPath, [Text.Encoding]::UTF8)
+    $courseContent = $courseContentJson | ConvertFrom-Json
+    $courseUri = "$base/api/content/batch"
+    $courseResult = Invoke-RestMethod -Method Put -Uri $courseUri -Headers $writeHeaders -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($courseContentJson))
+    Write-Host "网站课程内容已同步：第 $($courseResult.currentDay) 天，$($courseResult.words) 个单词、$($courseResult.sentences) 个句子、$($courseResult.notes) 份笔记（词句新增 $($courseResult.added)、更新 $($courseResult.updated)；笔记新增 $($courseResult.notesAdded)、更新 $($courseResult.notesUpdated)）。"
+  } else {
+    Write-Warning "未找到 学习同步\网站课程内容.json，本次未更新词句库。"
+  }
 } else {
   Write-Warning "未配置 SYNC_WRITE_TOKEN，本次只下载网站档案，不上传本地教学计划。"
 }

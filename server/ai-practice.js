@@ -22,6 +22,24 @@ function sanitizeStringArray(value, fallback = []) {
   return source.map(item => cleanText(item)).filter(Boolean).slice(0, 8);
 }
 
+function boundedScore(value, correct) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : (correct ? 1 : 0);
+}
+
+function sanitizeWordResult(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const english = cleanText(source.english, 60).toLocaleLowerCase();
+  if (!english) return null;
+  return { english, correct: source.correct === true, issue: cleanText(source.issue, 40) };
+}
+
+function sanitizeWordResults(value) {
+  const unique = new Map();
+  (Array.isArray(value) ? value : []).map(sanitizeWordResult).filter(Boolean).forEach(item => unique.set(item.english, item));
+  return Array.from(unique.values()).slice(0, 30);
+}
+
 function sanitizeTutorMessage(value) {
   if (!value || typeof value !== "object" || !["user", "assistant"].includes(value.role)) return null;
   const content = cleanText(value.content, value.role === "assistant" ? 1200 : 500);
@@ -100,6 +118,7 @@ function sanitizeQuestion(value) {
   const english = cleanText(source.english);
   const chinese = cleanText(source.chinese);
   if (!english || !chinese) return null;
+  const correct = typeof source.correct === "boolean" ? source.correct : null;
   return {
     id: cleanText(source.id, 80) || `aiq-${crypto.randomUUID()}`,
     direction,
@@ -109,7 +128,11 @@ function sanitizeQuestion(value) {
     acceptedChinese: sanitizeStringArray(source.acceptedChinese, [chinese]),
     focus: safeQuestionFocus(english),
     userAnswer: cleanText(source.userAnswer, 500),
-    correct: typeof source.correct === "boolean" ? source.correct : null,
+    correct,
+    score: correct === null ? null : boundedScore(source.score, correct),
+    gradingStatus: ["correct", "partial", "incorrect"].includes(source.gradingStatus) ? source.gradingStatus : (correct === null ? "" : correct ? "correct" : "incorrect"),
+    problemWords: sanitizeStringArray(source.problemWords),
+    wordResults: sanitizeWordResults(source.wordResults),
     explanation: cleanText(source.explanation, 180),
     answeredAt: cleanText(source.answeredAt, 40)
   };
@@ -141,6 +164,7 @@ function sanitizeHistoryItem(value) {
   const english = direction === "zh-en" ? source.correctAnswer : source.prompt;
   const questionNumber = Math.min(Math.max(Number(source.questionNumber) || 0, 0), MAX_QUESTION_COUNT);
   const questionCount = Math.min(Math.max(Number(source.questionCount) || 0, 0), MAX_QUESTION_COUNT);
+  const correct = source.correct === true;
   return {
     id,
     setId: cleanText(source.setId, 80) || cleanText(legacySetId, 80),
@@ -157,7 +181,11 @@ function sanitizeHistoryItem(value) {
     prompt: cleanText(source.prompt),
     userAnswer: cleanText(source.userAnswer, 500),
     correctAnswer: cleanText(source.correctAnswer),
-    correct: source.correct === true,
+    correct,
+    score: boundedScore(source.score, correct),
+    gradingStatus: ["correct", "partial", "incorrect"].includes(source.gradingStatus) ? source.gradingStatus : (correct ? "correct" : "incorrect"),
+    problemWords: sanitizeStringArray(source.problemWords),
+    wordResults: sanitizeWordResults(source.wordResults),
     focus: safeQuestionFocus(english),
     explanation: cleanText(source.explanation, 180)
   };

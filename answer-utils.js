@@ -6,8 +6,10 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  const EVIDENCE_REPAIR_VERSION = 1;
+  const EVIDENCE_REPAIR_VERSION = 2;
+  const PARTIAL_TRANSLATION_SCORE = 0.8;
   const REQUIRED_ENGLISH_FUNCTION_WORDS = ["a", "an", "the", "on", "in", "am", "is", "are"];
+  const CHINESE_MEASURE_WORDS = "个|只|头|张|支|块|家|本|辆|杯|条|位|件|台|把|朵|颗|枚";
 
   function normalizeEnglish(value) {
     return String(value || "").toLowerCase().replace(/[“”‘’.,!?;:，。！？；：]/g, "").replace(/\s+/g, " ").trim();
@@ -42,9 +44,59 @@
     });
   }
 
-  function chineseAnswerMatches(answer, acceptedAnswers) {
+  function englishFunctionWordDifferences(answer, acceptedAnswers) {
+    const answerWords = englishWords(answer);
+    const references = (Array.isArray(acceptedAnswers) ? acceptedAnswers : []).filter(value => englishWords(value).length);
+    if (!references.length) return [];
+    const answerCounts = Object.fromEntries(REQUIRED_ENGLISH_FUNCTION_WORDS.map(word => [word, answerWords.filter(token => token === word).length]));
+    return references.map(reference => {
+      const referenceWords = englishWords(reference);
+      return REQUIRED_ENGLISH_FUNCTION_WORDS.filter(word => answerCounts[word] !== referenceWords.filter(token => token === word).length);
+    }).sort((left, right) => left.length - right.length)[0];
+  }
+
+  function englishWordResults(reference, answer) {
+    const expected = englishWords(reference);
+    const actual = englishWords(answer);
+    const tokens = Array.from(new Set([...expected, ...actual]));
+    return tokens.map(english => {
+      const expectedCount = expected.filter(token => token === english).length;
+      const actualCount = actual.filter(token => token === english).length;
+      return {
+        english,
+        correct: expectedCount === actualCount,
+        issue: expectedCount === actualCount ? "" : actualCount < expectedCount ? "missing" : "extra"
+      };
+    });
+  }
+
+  function englishSourceWordResults(reference, correct, problemWords = []) {
+    const tokens = englishWords(reference).filter((token, index, all) => all.indexOf(token) === index);
+    if (correct) return tokens.map(english => ({ english, correct: true, issue: "" }));
+    const problems = new Set(englishWords((Array.isArray(problemWords) ? problemWords : []).join(" ")));
+    if (!problems.size) return [];
+    return tokens.map(english => ({ english, correct: !problems.has(english), issue: problems.has(english) ? "meaning" : "" }));
+  }
+
+  function relaxedChineseMeasureWords(value) {
+    return normalizeChinese(value).replace(new RegExp(`一(?:${CHINESE_MEASURE_WORDS})(?=[\\u3400-\\u9fff])`, "g"), "一");
+  }
+
+  function chineseAnswerQuality(answer, acceptedAnswers) {
     const normalized = normalizeChinese(answer);
-    return Boolean(normalized && acceptedAnswers.some(expected => normalizeChinese(expected) === normalized));
+    const references = Array.isArray(acceptedAnswers) ? acceptedAnswers : [];
+    if (normalized && references.some(expected => normalizeChinese(expected) === normalized)) {
+      return { correct: true, gradingStatus: "correct", score: 1 };
+    }
+    const relaxed = relaxedChineseMeasureWords(answer);
+    if (relaxed && references.some(expected => relaxedChineseMeasureWords(expected) === relaxed)) {
+      return { correct: true, gradingStatus: "partial", score: PARTIAL_TRANSLATION_SCORE };
+    }
+    return { correct: false, gradingStatus: "incorrect", score: 0 };
+  }
+
+  function chineseAnswerMatches(answer, acceptedAnswers) {
+    return chineseAnswerQuality(answer, acceptedAnswers).gradingStatus === "correct";
   }
 
   function buildMistakePracticeQueue(rows, startTaskId, validTaskIds) {
@@ -123,28 +175,51 @@
       if (!task || typeof attempt.correct !== "boolean") return attempt;
       const accepted = taskAcceptedAnswers(task);
       let correct = attempt.correct;
-      if (!correct && taskAnswerMatches(task, attempt.answer)) correct = true;
-      else if (correct && task.direction === "zh-en" && !englishFunctionWordsMatch(attempt.answer, accepted)) correct = false;
-      if (correct === attempt.correct) return attempt;
+      let gradingStatus = ["correct", "partial", "incorrect"].includes(attempt.gradingStatus) ? attempt.gradingStatus : (correct ? "correct" : "incorrect");
+      let score = Number.isFinite(Number(attempt.score)) ? Math.max(0, Math.min(1, Number(attempt.score))) : (correct ? 1 : 0);
+      let explanation = String(attempt.explanation || "");
+      if (task.direction === "en-zh") {
+        const quality = chineseAnswerQuality(attempt.answer, accepted);
+        if (quality.gradingStatus === "correct" || quality.gradingStatus === "partial") {
+          correct = true;
+          gradingStatus = quality.gradingStatus;
+          score = quality.score;
+          explanation = quality.gradingStatus === "partial"
+            ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
+            : (explanation || "中文表达与参考答案等义，已按当前规则修正。");
+        }
+      } else {
+        if (!correct && taskAnswerMatches(task, attempt.answer)) {
+          correct = true;
+          gradingStatus = "correct";
+          score = 1;
+        }
+        if (correct && !englishFunctionWordsMatch(attempt.answer, accepted)) {
+          correct = false;
+          gradingStatus = "incorrect";
+          score = 0;
+          explanation = "冠词、介词或 be 动词有漏写或多写，已按当前规则修正。";
+        }
+      }
+      const wordResults = task.direction === "zh-en"
+        ? englishWordResults(task.item.english, attempt.answer)
+        : englishSourceWordResults(task.item.english, correct, attempt.problemWords);
+      const previousScore = Number.isFinite(Number(attempt.score)) ? Math.max(0, Math.min(1, Number(attempt.score))) : (attempt.correct ? 1 : 0);
+      const next = { ...attempt, correct, score, gradingStatus, explanation, wordResults };
+      const attemptChanged = JSON.stringify(next) !== JSON.stringify(attempt);
+      if (!attemptChanged) return attempt;
       changed = true;
-      affectedTaskIds.add(task.taskId);
+      if (correct !== attempt.correct || gradingStatus !== attempt.gradingStatus) affectedTaskIds.add(task.taskId);
       const date = String(attempt.date || "");
-      if (date) dateDeltas.set(date, (dateDeltas.get(date) || 0) + (correct ? 1 : -1));
-      return {
-        ...attempt,
-        correct,
-        gradingSource: `evidence-repair-v${EVIDENCE_REPAIR_VERSION}`,
-        explanation: correct
-          ? "中文位置表达与参考答案等义，已按当前规则修正。"
-          : "冠词、介词或 be 动词有漏写或多写，已按当前规则修正。"
-      };
+      if (date && score !== previousScore) dateDeltas.set(date, (dateDeltas.get(date) || 0) + score - previousScore);
+      return { ...next, gradingSource: `evidence-repair-v${EVIDENCE_REPAIR_VERSION}` };
     });
 
     dateDeltas.forEach((delta, date) => {
       const record = history[date];
       if (!record) return;
       const reviewed = Math.max(0, Number(record.reviewed) || 0);
-      record.correct = Math.max(0, Math.min(reviewed, (Number(record.correct) || 0) + delta));
+      record.correct = Math.round(Math.max(0, Math.min(reviewed, (Number(record.correct) || 0) + delta)) * 100) / 100;
     });
 
     const attemptByIdentity = new Map();
@@ -199,11 +274,16 @@
 
   return {
     EVIDENCE_REPAIR_VERSION,
+    PARTIAL_TRANSLATION_SCORE,
     REQUIRED_ENGLISH_FUNCTION_WORDS,
     buildMistakePracticeQueue,
+    chineseAnswerQuality,
     chineseAnswerMatches,
     englishAnswerMatches,
+    englishFunctionWordDifferences,
     englishFunctionWordsMatch,
+    englishSourceWordResults,
+    englishWordResults,
     normalizeChinese,
     normalizeEnglish,
     repairReviewEvidence,
