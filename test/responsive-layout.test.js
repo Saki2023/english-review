@@ -39,11 +39,13 @@ test("mobile styles keep AI, exam, ability, dictation, focused, pronunciation, n
   assert.match(mobile, /\.notes-columns\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.preview-toolbar\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(mobile, /\.preview-toolbar \.notes-day-picker,\s*\.preview-toolbar \.secondary-button\s*\{[^}]*width:\s*100%/s);
-  assert.match(tablet, /\.preview-heading,\s*\.preview-words-heading\s*\{[^}]*flex-direction:\s*column/s);
+  assert.match(tablet, /\.preview-heading,\s*\.preview-words-heading,\s*\.preview-practice-heading\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(mobile, /\.preview-words-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
-  assert.match(mobile, /\.preview-words-heading \.secondary-button\s*\{[^}]*width:\s*100%/s);
+  assert.match(mobile, /\.preview-words-heading \.secondary-button,\s*\.preview-words-actions\s*\{[^}]*width:\s*100%/s);
   assert.match(tablet, /\.ai-provider-workspace\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.ai-routing-settings\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.ai-provider-list\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(css, /\.table-wrap\s*\{[^}]*overflow-x:\s*auto/s);
+  assert.match(mobile, /\.library-pagination\s*\{[^}]*flex-direction:\s*column/s);
+  assert.match(mobile, /\.library-page-actions\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto/s);
 });

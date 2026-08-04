@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=33">
+  <link rel="stylesheet" href="styles.css?v=35">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v33">v33</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v35">v35</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -88,6 +88,9 @@
         </button>
         <button class="nav-item" type="button" data-view="preview-words" id="previewWordsNavItem">
           <i data-lucide="book-marked" aria-hidden="true"></i><span>预习单词</span>
+        </button>
+        <button class="nav-item" type="button" data-view="preview-practice" id="previewPracticeNavItem">
+          <i data-lucide="languages" aria-hidden="true"></i><span>预习练习</span>
         </button>
         <button class="nav-item" type="button" data-view="mistakes">
           <i data-lucide="triangle-alert" aria-hidden="true"></i><span>错题本</span>
@@ -557,8 +560,8 @@
             </div>
             <label class="search-field">
               <i data-lucide="search" aria-hidden="true"></i>
-              <span class="sr-only">搜索词句</span>
-              <input id="librarySearch" type="search" placeholder="搜索英文或中文">
+              <span class="sr-only">搜索英文或中文</span>
+              <input id="librarySearch" type="search" aria-label="搜索英文或中文" placeholder="搜索英文或中文">
             </label>
             <label class="select-field">
               <span class="sr-only">按学习天数筛选</span>
@@ -569,6 +572,15 @@
                 <option value="2">第 2 天</option>
               </select>
             </label>
+            <label class="select-field library-page-size-field">
+              <span class="field-label">每页</span>
+              <select id="libraryPageSize" aria-label="每页显示数量">
+                <option value="10" selected>10 条</option>
+                <option value="20">20 条</option>
+                <option value="50">50 条</option>
+                <option value="100">100 条</option>
+              </select>
+            </label>
           </div>
           <div class="table-wrap">
             <table class="data-table">
@@ -577,6 +589,14 @@
             </table>
           </div>
           <p class="empty-message" id="libraryEmpty" hidden>还没有符合条件的内容。</p>
+          <div class="library-pagination" id="libraryPagination">
+            <p id="libraryRange" aria-live="polite">共 0 条</p>
+            <div class="library-page-actions">
+              <button class="secondary-button library-page-button" type="button" id="libraryPrevPage">上一页</button>
+              <span id="libraryPageStatus" aria-live="polite">第 0 / 0 页</span>
+              <button class="secondary-button library-page-button" type="button" id="libraryNextPage">下一页</button>
+            </div>
+          </div>
         </section>
 
         <section class="view" id="view-pronunciation" aria-labelledby="pronunciationTitle" hidden>
@@ -674,9 +694,14 @@
               <h1 id="previewWordsTitle">预习单词</h1>
               <p class="heading-note" id="previewWordsStatus">正在获取下一课单词…</p>
             </div>
-            <button class="secondary-button compact-button" type="button" id="refreshPreviewWordsButton">
-              <i data-lucide="refresh-cw" aria-hidden="true"></i><span>获取最新</span>
-            </button>
+            <div class="preview-words-actions">
+              <button class="secondary-button compact-button" type="button" data-view="preview-practice" id="openPreviewPracticeButton">
+                <i data-lucide="languages" aria-hidden="true"></i><span>开始预习练习</span>
+              </button>
+              <button class="secondary-button compact-button" type="button" id="refreshPreviewWordsButton">
+                <i data-lucide="refresh-cw" aria-hidden="true"></i><span>获取最新</span>
+              </button>
+            </div>
           </div>
           <div class="preview-words-notice">
             <i data-lucide="shield-check" aria-hidden="true"></i>
@@ -684,6 +709,47 @@
           </div>
           <div class="preview-words-grid" id="previewWordsGrid"></div>
           <p class="empty-message preview-words-empty" id="previewWordsEmpty" hidden>目前没有可预习的新单词。</p>
+        </section>
+
+        <section class="view" id="view-preview-practice" aria-labelledby="previewPracticeTitle" hidden>
+          <div class="page-heading compact-heading preview-practice-heading">
+            <div>
+              <p class="eyebrow">PREVIEW PRACTICE</p>
+              <h1 id="previewPracticeTitle">预习练习</h1>
+              <p class="heading-note" id="previewPracticeStatus">正在准备下一天的预习题…</p>
+            </div>
+            <span class="practice-progress" id="previewPracticeProgress">0 / 0</span>
+          </div>
+          <div class="preview-practice-controls" id="previewPracticeModeControls" aria-label="选择预习练习范围">
+            <span class="field-label">练习内容</span>
+            <div class="segmented-control" role="group" aria-label="预习练习内容">
+              <button class="segment is-selected" type="button" data-preview-practice-mode="mixed" aria-pressed="true">单词 + 句子</button>
+              <button class="segment" type="button" data-preview-practice-mode="word" aria-pressed="false">只练单词</button>
+              <button class="segment" type="button" data-preview-practice-mode="sentence" aria-pressed="false">只练句子</button>
+            </div>
+          </div>
+          <p class="preview-practice-start-note" id="previewPracticeStartNote"></p>
+          <p class="empty-message preview-practice-empty" id="previewPracticeEmpty" hidden>目前没有可练习的下一天预习单词。</p>
+          <article class="review-panel preview-practice-panel" id="previewPracticePanel" hidden>
+            <div class="review-panel-topline"><span class="eyebrow" id="previewPracticeType">预习单词</span><span class="review-count" id="previewPracticeCount">1 / 1</span></div>
+            <div class="review-meta"><span id="previewPracticeDay">第 5 天</span><span id="previewPracticeDirection">英译中</span></div>
+            <div class="review-prompt-row"><p class="review-prompt" id="previewPracticePrompt"></p><span id="previewPracticeSpeech"></span></div>
+            <form class="answer-form" id="previewPracticeForm">
+              <label class="sr-only" for="previewPracticeInput">预习练习答案</label>
+              <input id="previewPracticeInput" type="text" autocomplete="off" placeholder="输入中文意思">
+              <button class="primary-button" type="submit" id="previewPracticeSubmit">提交答案</button>
+            </form>
+            <div class="feedback" id="previewPracticeFeedback" hidden></div>
+            <div class="feedback-actions" id="previewPracticeActions">
+              <button class="primary-button" type="button" id="previewPracticeNext" hidden>下一题</button>
+            </div>
+          </article>
+          <section class="review-complete" id="previewPracticeComplete" hidden>
+            <i data-lucide="circle-check" aria-hidden="true"></i>
+            <strong>预习练习完成</strong>
+            <p id="previewPracticeCompleteNote"></p>
+            <button class="secondary-button" type="button" data-preview-practice-mode="mixed" aria-pressed="false">再练一轮</button>
+          </section>
         </section>
 
         <section class="view" id="view-mistakes" aria-labelledby="mistakesTitle" hidden>
@@ -894,11 +960,11 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=33"></script>
-  <script src="data.js?v=33"></script>
-  <script src="pronunciation-data.js?v=33"></script>
-  <script src="review-variants.js?v=33"></script>
-  <script src="answer-utils.js?v=33"></script>
+  <script src="vendor/lucide.min.js?v=35"></script>
+  <script src="data.js?v=35"></script>
+  <script src="pronunciation-data.js?v=35"></script>
+  <script src="review-variants.js?v=35"></script>
+  <script src="answer-utils.js?v=35"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -914,7 +980,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=33";
+      appScript.src = "app.js?v=35";
       document.body.appendChild(appScript);
     })();
   </script>

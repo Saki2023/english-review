@@ -109,6 +109,11 @@ test("teaching profile write token updates only the local teaching profile", asy
     assert.equal(previewWordsResponse.status, 200);
     const previewWords = await previewWordsResponse.json();
     assert.deepEqual({ currentDay: previewWords.currentDay, nextDay: previewWords.nextDay, words: previewWords.words.map(item => item.english) }, { currentDay: 5, nextDay: 6, words: ["dog"] });
+    const unavailablePreviewSentences = await fetch(`${baseUrl}/api/preview/practice/sentences`, { method: "POST", headers: { Cookie: cookie, "Content-Type": "application/json" }, body: JSON.stringify({ wordIds: ["d6-dog"] }) });
+    assert.equal(unavailablePreviewSentences.status, 503);
+    const unavailableBody = await unavailablePreviewSentences.json();
+    assert.equal(Array.isArray(unavailableBody.sentences), false);
+    assert.equal(unavailableBody.retryAfterMs, 60 * 60 * 1000);
 
     const promotedBody = JSON.stringify({
       updatedAt: "2026-08-05",

@@ -10,7 +10,7 @@ const { once } = require("node:events");
 const { spawn } = require("node:child_process");
 const { test } = require("node:test");
 const { createUser, loadUsers, saveUsers } = require("../server/accounts");
-const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl, createAiGrader, createAiReviewVariantGenerator, createAiTutor, createRateLimiter, parseGeneratedQuestions, parseGradeResponse, parseModelList, parseReviewVariantResponse } = require("../server/ai-grader");
+const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl, createAiGrader, createAiPreviewSentenceGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter, parseGeneratedQuestions, parseGradeResponse, parseModelList, parsePreviewSentenceResponse, parseReviewVariantResponse } = require("../server/ai-grader");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -199,6 +199,25 @@ test("AI review variant parser keeps task ids and Chinese answer alternatives", 
     { taskId: "d2-s3:en-zh", english: "A pig sat on a box.", chinese: "一头猪坐在一个箱子上。", acceptedChinese: ["一只猪坐在箱子上"] }
   ] }) } }] });
   assert.deepEqual(result[0], { taskId: "d2-s3:en-zh", english: "A pig sat on a box.", chinese: "一头猪坐在一个箱子上。", acceptedChinese: ["一头猪坐在一个箱子上。", "一只猪坐在箱子上"] });
+});
+
+test("AI preview sentence parser keeps target preview words and translations", async () => {
+  const payload = { choices: [{ message: { content: JSON.stringify({ sentences: [
+    { wordId: "d5-sun", english: "I see the sun.", chinese: "我看见太阳。", acceptedChinese: ["我看到太阳"] }
+  ] }) } }] };
+  const parsed = parsePreviewSentenceResponse(payload);
+  assert.deepEqual(parsed[0], { wordId: "d5-sun", english: "I see the sun.", chinese: "我看见太阳。", acceptedChinese: ["我看见太阳。", "我看到太阳"] });
+  let requestBody;
+  const generator = createAiPreviewSentenceGenerator(aiConfig(), { fetchImpl: async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return new Response(JSON.stringify(payload), { status: 200 });
+  } });
+  const result = await generator.generate({ allowedWords: ["i", "see", "the", "sun"], learnedWords: ["i", "see", "the"], previewWords: [{ wordId: "d5-sun", english: "sun" }], targets: [{ wordId: "d5-sun", english: "sun", chinese: "太阳" }] });
+  assert.equal(result[0].wordId, "d5-sun");
+  assert.match(requestBody.messages[0].content, /Every sentence must use its target preview word/);
+  assert.match(requestBody.messages[0].content, /learnedWords/);
+  assert.deepEqual(JSON.parse(requestBody.messages[1].content).learnedWords, ["i", "see", "the"]);
+  assert.deepEqual(JSON.parse(requestBody.messages[1].content).previewWords, [{ wordId: "d5-sun", english: "sun" }]);
 });
 
 test("generated questions reject unlearned English words and duplicates", () => {

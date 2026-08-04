@@ -51,8 +51,9 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | PUT | `/api/sync/teaching-profile?username=账号名` | 上传本地教学档案，需要独立的教学写入令牌 |
 | GET | `/api/preview` | 获取当前账号最新及近期预习，需要登录 |
 | GET | `/api/preview/words` | 获取当前课程紧邻下一天的未学预习词，需要登录 |
+| POST | `/api/preview/practice/sentences` | 按当前预习词生成预习句子练习，需要登录及已配置的 AI |
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
-| POST | `/api/review/sentence-variants` | 为今日复习生成已学范围内的句子变式，需要登录；AI 失败时返回本地变式 |
+| POST | `/api/review/sentence-variants` | 为今日复习生成已学范围内的 AI 句子变式，需要登录；AI 不可用时返回待重试错误 |
 | GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
 | POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录及当前试卷接口版本头，返回 `202` |
 | PUT | `/api/ai/exams/current` | 保存当前试卷草稿答案，需要登录 |
@@ -161,6 +162,18 @@ Invoke-RestMethod -Uri 'http://localhost:8080/api/content' -Headers $headers
 ```
 
 响应只包含紧邻下一天、尚无正式学习日期且未在正式词库学过的词。预习词不会进入今日复习、听写、能力证据或同步档案中的 `learnedContent`。
+
+### 预习句子练习
+
+`POST /api/preview/practice/sentences` 用于“预习练习”页面的句子模式。请求体可传入要覆盖的预习词 ID；省略 `wordIds` 时会为当前下一天的全部预习词生成句子：
+
+```json
+{ "wordIds": ["d6-dog", "d6-run"] }
+```
+
+每个返回句子都对应一个 `wordId`，并且必须包含该预习词；句子可以组合已经正式学过的单词来帮助记忆，但服务端会拒绝未学过且不在当前预习列表中的英文词。返回的 `source` 固定为 `ai`，不会把句子写入正式词库、今日复习、错题本或能力统计。
+
+AI 未配置、上游失败、限流或返回不完整时，接口返回 `503`（限流也可能返回 `429`），并包含 `retryAfterMs: 3600000` 及 `Retry-After: 3600`。前端会保留“待生成”状态，每小时自动重试；不会用固定本地句子冒充 AI 结果。
 
 ## 调试示例
 

@@ -149,12 +149,12 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=33/);
+  assert.match(html, /pronunciation-data\.js\?v=35/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /speechButtonHtml\(item\.example/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=33/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=35/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -188,13 +188,25 @@ test("today review removes preview words from new, cached, library, and mistake 
   assert.match(app, /item\.preview \? '<span class="type-badge">预习<\/span>'/);
 });
 
-test("filtered word and sentence library rows receive continuous visible sequence numbers", () => {
+test("library paginates filtered English and Chinese results with continuous sequence numbers", () => {
   const app = read("app.js");
+  const html = read("index.html");
   const css = read("styles.css");
+  assert.match(html, /id="librarySearch"[^>]*aria-label="搜索英文或中文"/);
+  assert.match(html, /id="libraryPageSize"[\s\S]*value="10" selected[\s\S]*value="20"[\s\S]*value="50"[\s\S]*value="100"/);
+  assert.match(html, /id="libraryPrevPage"/);
+  assert.match(html, /id="libraryNextPage"/);
   assert.match(app, /class=\\"sequence-cell\\">序号/);
+  assert.match(app, /normalizeChinese\(item\.chinese\)\.includes\(searchChinese\)/);
+  assert.match(app, /normalizeEnglish\(item\.english\)\.includes\(searchEnglish\)/);
+  assert.match(app, /filteredItems\.slice\(startIndex, startIndex \+ pageSize\)/);
   assert.match(app, /items\.map\(\(item, index\) =>/);
-  assert.match(app, /class="sequence-cell">\$\{index \+ 1\}/);
+  assert.match(app, /class="sequence-cell">\$\{startIndex \+ index \+ 1\}/);
+  assert.match(app, /libraryPage = 1; renderLibrary\(\)/);
+  assert.match(app, /libraryPage = Math\.max\(1, libraryPage - 1\)/);
+  assert.match(app, /libraryPage \+= 1/);
   assert.match(css, /\.data-table \.sequence-cell\s*\{[^}]*text-align:\s*center/s);
+  assert.match(css, /\.library-pagination\s*\{[^}]*display:\s*flex/s);
 });
 
 test("preview words have a next-day-only page with speech and learned-feature isolation", () => {
@@ -213,6 +225,52 @@ test("preview words have a next-day-only page with speech and learned-feature is
   assert.match(css, /\.preview-words-grid\s*\{[^}]*grid-template-columns:/s);
   assert.match(server, /url\.pathname === "\/api\/preview\/words"/);
   assert.match(server, /content\.words\.filter\(item => !item\.preview && item\.learned/);
+});
+
+test("preview practice keeps word and sentence exercises isolated from formal review", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  const server = read("server.js");
+  assert.match(html, /data-view="preview-practice"/);
+  assert.match(html, /id="previewPracticeForm"/);
+  assert.match(html, /data-preview-practice-mode="word"/);
+  assert.match(html, /data-preview-practice-mode="sentence"/);
+  assert.match(app, /function previewPracticeWords\(\)/);
+  assert.match(app, /function previewPracticeGrade\(task, answer\)/);
+  assert.match(app, /\/api\/preview\/practice\/sentences/);
+  assert.match(app, /previewPracticeStatusMessage = .*每小时自动重试/s);
+  assert.match(app, /句子题必须包含预习词，也会组合已学词帮助记忆/);
+  assert.match(app, /model\.previewPractice/);
+  assert.match(app, /previewPracticeTasksForMode/);
+  assert.match(server, /handlePreviewPracticeSentences/);
+  assert.match(server, /const learnedWords = \[\.\.\.profile\.allowedWords\]/);
+  assert.match(server, /previewWordTokens = previewWords\.map/);
+  assert.match(server, /\[\.\.\.learnedWords, \.\.\.previewWords\.flatMap/);
+  assert.match(server, /targetTokens\.every\(token => tokens\.includes\(token\)\)/);
+  assert.match(server, /url\.pathname === "\/api\/preview\/practice\/sentences"/);
+  assert.doesNotMatch(app, /model\.attempts\.push\([^)]*previewPractice/s);
+});
+
+test("preview sentence documentation states the learned-word and retry rules", () => {
+  const api = read("API.md");
+  const usage = read("使用说明.md");
+  assert.match(api, /POST \| `\/api\/preview\/practice\/sentences`/);
+  assert.match(api, /可以组合已经正式学过的单词/);
+  assert.match(api, /retryAfterMs: 3600000/);
+  assert.match(usage, /每句都必须带上对应的预习词，同时可以把已经学过的老单词放进句子里/);
+});
+
+test("review sentence variants do not use a local fallback and schedule hourly retry", () => {
+  const app = read("app.js");
+  const server = read("server.js");
+  assert.match(app, /const REVIEW_VARIANT_RETRY_MS = 60 \* 60 \* 1000/);
+  assert.match(app, /function scheduleReviewVariantRetry\(session, key\)/);
+  assert.match(app, /AI 暂不可用，将每小时自动重试/);
+  assert.match(app, /if \(data\.source !== "ai"\)/);
+  assert.match(server, /retryAfterMs: 60 \* 60 \* 1000/);
+  assert.match(server, /AI 变式暂时不可用，将每小时自动重试/);
+  assert.doesNotMatch(server, /using local fallback/);
+  assert.doesNotMatch(app, /已使用本地自然变式/);
 });
 
 test("partial answers have distinct feedback and preserve mastery", () => {
@@ -242,7 +300,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 33", () => {
+test("PWA client assets consistently use the displayed cache version 35", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -253,6 +311,6 @@ test("PWA client assets consistently use the displayed cache version 33", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "33");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v33"/);
+  assert.equal(displayedVersion[1], "35");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v35"/);
 });

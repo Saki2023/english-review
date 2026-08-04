@@ -6,14 +6,15 @@ const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
 const { chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
-const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
+const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
 const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
 const { buildLearningSyncProfile } = require("./server/learning-sync");
 const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./server/learning-sync-token");
 const { publicTeachingProfile, sanitizeTeachingProfile } = require("./server/teaching-profile");
 const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis");
-const { chooseSentenceVariant, normalizeEnglish: normalizeVariantEnglish, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById } = require("./review-variants");
+const { sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById } = require("./review-variants");
+const { sanitizePreviewPractice } = require("./server/preview-practice");
 const { repairLearningEvidence } = require("./server/evidence-repair");
 const {
   completeDictation,
@@ -176,6 +177,7 @@ function sanitizeState(value) {
     attempts: Array.isArray(source.attempts) ? source.attempts.slice(-120) : [],
     sessions: source.sessions && typeof source.sessions === "object" ? source.sessions : {},
     mistakes: Array.isArray(source.mistakes) ? source.mistakes.slice(-80) : [],
+    previewPractice: sanitizePreviewPractice(source.previewPractice),
     aiPractice: sanitizeAiPractice(source.aiPractice),
     aiExam: sanitizeAiExamState(source.aiExam),
     dictation: sanitizeDictationState(source.dictation),
@@ -608,6 +610,96 @@ function handlePreviewWords(req, res, user) {
   return sendJson(res, 200, { currentDay, nextDay, updatedAt: content.updatedAt, words });
 }
 
+function previewEnglishTokens(value) {
+  return String(value || "").toLocaleLowerCase().match(/[a-z]+(?:'[a-z]+)?/g) || [];
+}
+
+function normalizePreviewEnglish(value) {
+  return String(value || "").toLocaleLowerCase().replace(/[.,!?;:]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function previewSentenceId(wordId, english) {
+  let hash = 2166136261;
+  for (const character of normalizePreviewEnglish(english)) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `preview-sentence-${String(wordId || "word").replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 80)}-${(hash >>> 0).toString(36)}`;
+}
+
+function sanitizePreviewSentence(contentValue, target, value, allowedWords) {
+  const source = value && typeof value === "object" ? value : {};
+  const english = String(source.english || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+  const chinese = String(source.chinese || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+  if (!english || !chinese) return null;
+  const tokens = previewEnglishTokens(english);
+  const targetTokens = previewEnglishTokens(target.english);
+  const allowed = new Set(allowedWords);
+  if (!tokens.length || tokens.some(token => !allowed.has(token)) || !targetTokens.every(token => tokens.includes(token))) return null;
+  const acceptedChinese = Array.from(new Set([chinese, ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])].map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8);
+  return {
+    id: previewSentenceId(target.id, english),
+    kind: "sentence",
+    wordId: target.id,
+    requiredPreviewWordIds: [target.id],
+    english,
+    chinese,
+    acceptedEnglish: [normalizePreviewEnglish(english)],
+    acceptedChinese,
+    source: "ai"
+  };
+}
+
+async function handlePreviewPracticeSentences(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "POST") return sendError(res, 404, "preview practice endpoint not found");
+  const unavailable = (message = "AI 预习句子暂不可用，将每小时自动重试") => sendJson(res, 503, { error: message, retryAfterMs: 60 * 60 * 1000 }, { "Retry-After": "3600" });
+  try {
+    refreshContent();
+    const currentDay = Number(content.currentDay) || 1;
+    const nextDay = currentDay + 1;
+    const learnedEnglish = new Set(content.words.filter(item => !item.preview).map(item => String(item.english || "").toLocaleLowerCase()).filter(Boolean));
+    const previewWords = content.words.filter(item => item.preview === true
+      && Number(item.day) === nextDay
+      && !String(item.learned || "").trim()
+      && !learnedEnglish.has(String(item.english || "").toLocaleLowerCase()));
+    if (!previewWords.length) return sendJson(res, 200, { currentDay, nextDay, sentences: [], source: "none" });
+    const body = await readBody(req);
+    const requestedIds = Array.from(new Set((Array.isArray(body.wordIds) ? body.wordIds : []).map(value => String(value || "").trim()).filter(Boolean))).slice(0, 20);
+    const targets = (requestedIds.length ? requestedIds.map(id => previewWords.find(item => item.id === id)).filter(Boolean) : previewWords).slice(0, 20);
+    if (!targets.length) return sendError(res, 400, "preview word targets are required");
+    if (!aiConfigured()) return unavailable("AI 尚未配置，预习句子将每小时自动重试");
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) return unavailable("AI 请求受限，预习句子将每小时自动重试");
+    const state = getUserState(user);
+    const practice = sanitizeAiPractice(state.aiPractice);
+    const availableModels = getAvailableModels(aiSettings);
+    const requestedModel = [practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
+    const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: "low" });
+    const profile = buildLearningProfile(content, state, today());
+    const learnedWords = [...profile.allowedWords];
+    const previewWordTokens = previewWords.map(item => ({ wordId: item.id, english: item.english }));
+    const allowedWords = Array.from(new Set([...learnedWords, ...previewWords.flatMap(item => previewEnglishTokens(item.english))]));
+    const generated = await runAiRoute(route, config => createAiPreviewSentenceGenerator(config).generate({
+      allowedWords,
+      learnedWords,
+      previewWords: previewWordTokens,
+      targets: targets.map(item => ({ wordId: item.id, english: item.english, chinese: item.chinese }))
+    }));
+    const targetById = new Map(targets.map(item => [item.id, item]));
+    const sentences = generated.value.map(item => {
+      const target = targetById.get(item.wordId);
+      return target ? sanitizePreviewSentence(content, target, item, allowedWords) : null;
+    }).filter(Boolean);
+    if (sentences.length !== targets.length || new Set(sentences.map(item => item.wordId)).size !== targets.length) throw new Error("AI 返回的预习句子不完整或重复");
+    const generatedAt = new Date().toISOString();
+    return sendJson(res, 200, { currentDay, nextDay, sentences: sentences.map(item => ({ ...item, generatedAt, providerId: generated.config.providerId, providerName: generated.config.providerName, model: generated.config.model, reasoningEffort: route.reasoningEffort })), source: "ai", provider: { id: generated.config.providerId, name: generated.config.providerName }, model: generated.config.model, reasoningEffort: route.reasoningEffort });
+  } catch (error) {
+    console.warn(`AI preview sentence generation failed; retry will be scheduled: ${error && error.message ? error.message : "unknown error"}`);
+    return unavailable();
+  }
+}
+
 function handleAbilities(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "GET") return sendError(res, 404, "ability endpoint not found");
@@ -647,25 +739,6 @@ function recentReviewVariants(state) {
   })).filter(item => item.taskId && (item.id || item.english));
 }
 
-function fallbackSentenceVariants(tasks, state, date) {
-  const recent = recentReviewVariants(state);
-  const selectedIds = [];
-  return tasks.map(task => {
-    const excludedIds = [...selectedIds, ...recent.filter(item => item.taskId === task.taskId).map(item => item.id).filter(Boolean)];
-    const chosen = chooseSentenceVariant(content, task.baseItem, `${date}|${task.taskId}|${recent.length}`, excludedIds);
-    const variant = chosen || {
-      id: `library-${task.baseItem.id}`,
-      family: sentenceFamily(task.baseItem),
-      english: task.baseItem.english,
-      chinese: task.baseItem.chinese,
-      acceptedEnglish: task.baseItem.acceptedEnglish || [normalizeVariantEnglish(task.baseItem.english)],
-      acceptedChinese: task.baseItem.acceptedChinese || [task.baseItem.chinese]
-    };
-    selectedIds.push(variant.id);
-    return { ...variant, taskId: task.taskId, source: "local", generatedAt: new Date().toISOString() };
-  });
-}
-
 async function handleReviewSentenceVariants(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "review variant endpoint not found");
@@ -678,10 +751,10 @@ async function handleReviewSentenceVariants(req, res, user) {
     const tasks = taskIds.map(taskId => findSentenceTask(taskId)).filter(Boolean);
     if (tasks.length !== taskIds.length) return sendError(res, 404, "sentence task not found");
     const state = getUserState(user);
-    const fallback = () => sendJson(res, 200, { variants: fallbackSentenceVariants(tasks, state, date), source: "local", notice: "AI 暂时不可用，已使用本地自然变式" });
-    if (!aiConfigured()) return fallback();
+    const unavailable = (message = "AI 变式暂时不可用，将每小时自动重试") => sendJson(res, 503, { error: message, retryAfterMs: 60 * 60 * 1000 }, { "Retry-After": "3600" });
+    if (!aiConfigured()) return unavailable("AI 尚未配置，句子变式将每小时自动重试");
     const rate = takeAiRequest(user.id);
-    if (!rate.allowed) return fallback();
+    if (!rate.allowed) return sendJson(res, 429, { error: "AI 变式请求受限，将每小时自动重试", retryAfterMs: 60 * 60 * 1000 }, { "Retry-After": "3600" });
 
     const practice = sanitizeAiPractice(state.aiPractice);
     const availableModels = getAvailableModels(aiSettings);
@@ -718,8 +791,8 @@ async function handleReviewSentenceVariants(req, res, user) {
       });
       return sendJson(res, 200, { variants, source: "ai", provider: { id: routed.config.providerId, name: routed.config.providerName }, model: routed.config.model, reasoningEffort: route.reasoningEffort });
     } catch (error) {
-      console.warn(`AI review variant generation failed, using local fallback: ${error && error.message ? error.message : "unknown error"}`);
-      return fallback();
+      console.warn(`AI review variant generation failed; retry will be scheduled: ${error && error.message ? error.message : "unknown error"}`);
+      return unavailable();
     }
   } catch (error) {
     return sendError(res, error.statusCode || 400, error.message);
@@ -1666,6 +1739,7 @@ const server = http.createServer((req, res) => {
   }
   if (url.pathname === "/api/ai/options" && req.method === "GET") return user ? sendJson(res, 200, publicAiOptions(user)) : sendError(res, 401, "login required");
   if (url.pathname === "/api/preview/words") return handlePreviewWords(req, res, user);
+  if (url.pathname === "/api/preview/practice/sentences") return handlePreviewPracticeSentences(req, res, user);
   if (url.pathname === "/api/preview") return handlePreview(req, res, user);
   if (url.pathname === "/api/abilities") return handleAbilities(req, res, user);
   if (url.pathname === "/api/review/sentence-variants") return handleReviewSentenceVariants(req, res, user);
