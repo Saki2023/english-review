@@ -2245,11 +2245,12 @@
     previewPracticeStatusMessage = "AI 正在根据预习词准备句子…";
     const promise = (async () => {
       try {
+        const settings = selectedAiSettings();
         const data = await responseJson(await fetch("/api/preview/practice/sentences", {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ wordIds: missingWords.map(word => word.id) })
+          body: JSON.stringify({ wordIds: missingWords.map(word => word.id), model: settings.model, reasoningEffort: settings.reasoningEffort })
         }));
         if (data.source !== "ai") throw Object.assign(new Error("AI 未返回可固定的预习句子"), { statusCode: 503 });
         const returned = Array.isArray(data.sentences) ? data.sentences : [];
@@ -2284,7 +2285,9 @@
         clearPreviewPracticeRetry(key);
         saveModel();
       } catch (error) {
-        previewPracticeStatusMessage = error && error.statusCode === 401 ? "登录状态已失效，请重新登录。" : "AI 暂不可用，预习句子将每小时自动重试。";
+        previewPracticeStatusMessage = error && error.statusCode === 401
+          ? "登录状态已失效，请重新登录。"
+          : (error && typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, 180) : "AI 暂不可用，预习句子将每小时自动重试。");
         if (!error || error.statusCode !== 401) schedulePreviewPracticeRetry(key);
         if (error && error.statusCode !== 401) showToast(previewPracticeStatusMessage);
       } finally {
@@ -4131,11 +4134,12 @@
     reviewVariantStatusMessage = "AI 正在根据学习进度准备新句子…";
     const promise = (async () => {
       try {
+        const settings = selectedAiSettings();
         const data = await responseJson(await fetch("/api/review/sentence-variants", {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ date: session.date, taskIds: missing.map(task => task.taskId) })
+          body: JSON.stringify({ date: session.date, taskIds: missing.map(task => task.taskId), model: settings.model, reasoningEffort: settings.reasoningEffort })
         }));
         if (data.source !== "ai") throw Object.assign(new Error("AI 未返回可固定的句子变式"), { statusCode: 503 });
         const returned = new Map((Array.isArray(data.variants) ? data.variants : []).map(item => [String(item.taskId || ""), normalizeClientReviewVariant(item)]));
@@ -4152,7 +4156,7 @@
       } catch (error) {
         reviewVariantStatusMessage = error && error.statusCode === 401
           ? "登录状态已失效，请重新登录。"
-          : "AI 暂不可用，将每小时自动重试。";
+          : (error && typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, 180) : "AI 暂不可用，将每小时自动重试。");
         if (!error || error.statusCode !== 401) scheduleReviewVariantRetry(session, key);
         if (error && error.statusCode !== 401) showToast(reviewVariantStatusMessage);
       } finally {
@@ -5061,7 +5065,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=39", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=40", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

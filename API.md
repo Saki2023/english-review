@@ -276,7 +276,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | POST | `/api/ai/questions/ask` | 已登录 | 询问当前或历史 AI 题目；请求可带独立 `model` 和 `reasoningEffort`，并按账号及题目追加长期问答记录 |
 | POST | `/api/ai/questions/tutor/clear` | 已登录 | 切断指定题目的当前 AI 会话上下文，旧问答仍保留为学习历史 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
-| POST | `/api/review/sentence-variants` | 已登录 | 按已学词句、近期变式和薄弱点生成今日复习句子变式，并进行超纲校验 |
+| POST | `/api/review/sentence-variants` | 已登录 | 按已学词句、近期变式和薄弱点生成今日复习句子变式，并进行超纲校验；可带当前账号选择的 `model` 与 `reasoningEffort` |
 | GET | `/api/ai/exams` | 已登录 | 获取脱敏后的试卷状态和历史 |
 | POST | `/api/ai/exams/generate` | 已登录 | 创建 100 分或 150 分完整试卷的后台生成任务，需发送 `X-English-Review-Exam-Version: 2`，返回 `202`；旧网页会收到明确的刷新提示 |
 | PUT | `/api/ai/exams/current` | 已登录 | 保存整卷草稿，不触发判分 |
@@ -317,7 +317,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 }
 ```
 
-`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。AI 超时配置范围为 1 至 120 秒，默认 30 秒；由于完整试卷输出较长，试卷生成任务会把本次上游等待时间提高到 120 秒。
+`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。AI 超时配置范围为 1 至 120 秒，默认 30 秒；由于完整试卷输出较长，试卷生成任务会把本次上游等待时间提高到 120 秒。今日复习句子变式会使用账号当前选择的模型和强度，不再固定降为 `low`；若请求超时，接口会返回脱敏的超时原因并继续按一小时计划重试。
 
 生成试卷请求：
 

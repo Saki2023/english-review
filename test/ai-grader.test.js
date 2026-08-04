@@ -281,7 +281,16 @@ test("admin configures AI on the web and progress-based questions use the select
       }
       const system = String(body.messages && body.messages[0] && body.messages[0].content || "");
       let content;
-      if (system.includes("Create personalized translation exercises")) {
+      if (system.includes("Create fresh sentence-review variants")) {
+        const request = JSON.parse(body.messages[1].content);
+        const target = request.targets[0];
+        content = JSON.stringify({ variants: [{
+          taskId: target.taskId,
+          english: "It is a hot box.",
+          chinese: "它是一个热箱子。",
+          acceptedChinese: ["它是一个热箱子"]
+        }] });
+      } else if (system.includes("Create personalized translation exercises")) {
         content = JSON.stringify({ questions: [
           { direction: "en-zh", english: "It is big.", chinese: "\u5b83\u5f88\u5927\u3002", acceptedEnglish: ["it is big"], acceptedChinese: ["\u5b83\u5f88\u5927"], focus: "big" },
           { direction: "zh-en", english: "A cat sat on a mat.", chinese: "\u4e00\u53ea\u732b\u5750\u5728\u4e00\u5f20\u57ab\u5b50\u4e0a\u3002", acceptedEnglish: ["a cat sat on a mat"], acceptedChinese: ["\u4e00\u53ea\u732b\u5750\u5728\u57ab\u5b50\u4e0a"], focus: "cat" },
@@ -518,6 +527,23 @@ test("admin configures AI on the web and progress-based questions use the select
     });
     assert.equal(unavailableGeneration.status, 502);
     assert.deepEqual(await unavailableGeneration.json(), { error: "AI 上游不支持该模型的生成接口，请更换模型", providerStatus: 404 });
+
+    const reviewEfforts = ["low", "medium", "high", "xhigh", "max"];
+    for (const reasoningEffort of reviewEfforts) {
+      const reviewVariants = await fetch(`${baseUrl}/api/review/sentence-variants`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Cookie": cookie },
+        body: JSON.stringify({ taskIds: ["d4-s5:en-zh"], model: "strong-model", reasoningEffort })
+      });
+      assert.equal(reviewVariants.status, 200);
+      const reviewBody = await reviewVariants.json();
+      assert.equal(reviewBody.source, "ai");
+      assert.equal(reviewBody.reasoningEffort, reasoningEffort);
+      assert.equal(reviewBody.variants[0].english, "It is a hot box.");
+      const reviewRequest = providerRequests.at(-1);
+      assert.equal(reviewRequest.body.model, "strong-model");
+      assert.equal(reviewRequest.body.reasoning_effort, reasoningEffort);
+    }
 
     const memberLogin = await fetch(`${baseUrl}/api/auth/login`, {
       method: "POST",

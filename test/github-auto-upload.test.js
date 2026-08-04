@@ -18,6 +18,16 @@ test("GitHub auto upload executable only pushes committed main-branch content", 
   assert.doesNotMatch(source, /netsh|Set-DnsClient|New-NetRoute|HTTP_PROXY|HTTPS_PROXY|ProxyEnable/i);
 });
 
+test("GitHub auto upload exposes a headless machine-readable interface", () => {
+  assert.match(source, /--headless/);
+  assert.match(source, /--json/);
+  assert.match(source, /--result-file/);
+  assert.match(source, /\\\"interfaceVersion\\\":1/);
+  assert.match(source, /Environment\.ExitCode = result\.Success \? 0 : 1/);
+  assert.match(source, /File\.WriteAllText\(fullPath, payload, new UTF8Encoding\(false\)\)/);
+  assert.match(source, /UploadForm\.RunUpload/);
+});
+
 test("GitHub auto upload window keeps the log between its header and footer", () => {
   const contentIndex = source.indexOf("Controls.Add(content);");
   const footerIndex = source.indexOf("Controls.Add(footer);");

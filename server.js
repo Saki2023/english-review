@@ -683,8 +683,9 @@ async function handlePreviewPracticeSentences(req, res, user) {
     const state = getUserState(user);
     const practice = sanitizeAiPractice(state.aiPractice);
     const availableModels = getAvailableModels(aiSettings);
-    const requestedModel = [practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
-    const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: "low" });
+    const requestedModel = [body.model, practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
+    const requestedEffort = AI_EFFORTS.includes(body.reasoningEffort) ? body.reasoningEffort : practice.settings.reasoningEffort;
+    const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: requestedEffort });
     const profile = buildLearningProfile(content, state, today());
     const learnedWords = [...profile.allowedWords];
     const previewWordTokens = previewWords.map(item => ({ wordId: item.id, english: item.english }));
@@ -705,7 +706,13 @@ async function handlePreviewPracticeSentences(req, res, user) {
     return sendJson(res, 200, { currentDay, nextDay, sentences: sentences.map(item => ({ ...item, generatedAt, providerId: generated.config.providerId, providerName: generated.config.providerName, model: generated.config.model, reasoningEffort: route.reasoningEffort })), source: "ai", provider: { id: generated.config.providerId, name: generated.config.providerName }, model: generated.config.model, reasoningEffort: route.reasoningEffort });
   } catch (error) {
     console.warn(`AI preview sentence generation failed; retry will be scheduled: ${error && error.message ? error.message : "unknown error"}`);
-    return unavailable();
+    const failure = publicAiSentenceVariantFailure(error);
+    return sendJson(res, failure.statusCode, {
+      error: failure.message,
+      retryAfterMs: 60 * 60 * 1000,
+      reasonCode: failure.reasonCode,
+      providerStatus: failure.providerStatus
+    }, { "Retry-After": "3600" });
   }
 }
 
@@ -767,8 +774,9 @@ async function handleReviewSentenceVariants(req, res, user) {
 
     const practice = sanitizeAiPractice(state.aiPractice);
     const availableModels = getAvailableModels(aiSettings);
-    const requestedModel = [practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
-    const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: "low" });
+    const requestedModel = [body.model, practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
+    const requestedEffort = AI_EFFORTS.includes(body.reasoningEffort) ? body.reasoningEffort : practice.settings.reasoningEffort;
+    const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: requestedEffort });
     const profile = buildLearningProfile(content, state, date);
     const recent = recentReviewVariants(state);
     const fixedEnglish = content.sentences.map(item => item.english);
@@ -801,7 +809,13 @@ async function handleReviewSentenceVariants(req, res, user) {
       return sendJson(res, 200, { variants, source: "ai", provider: { id: routed.config.providerId, name: routed.config.providerName }, model: routed.config.model, reasoningEffort: route.reasoningEffort });
     } catch (error) {
       console.warn(`AI review variant generation failed; retry will be scheduled: ${error && error.message ? error.message : "unknown error"}`);
-      return unavailable();
+      const failure = publicAiSentenceVariantFailure(error);
+      return sendJson(res, failure.statusCode, {
+        error: failure.message,
+        retryAfterMs: 60 * 60 * 1000,
+        reasonCode: failure.reasonCode,
+        providerStatus: failure.providerStatus
+      }, { "Retry-After": "3600" });
     }
   } catch (error) {
     return sendError(res, error.statusCode || 400, error.message);
@@ -877,6 +891,44 @@ function publicAiGenerationFailure(error) {
   else if (/response is too large/i.test(detail)) message = "AI 返回内容过长，请重试或更换模型";
 
   return { message, providerStatus, statusCode };
+}
+
+function publicAiSentenceVariantFailure(error) {
+  const providerStatus = Number(error && error.providerStatus) || null;
+  const detail = String(error && error.message || "");
+  let message = "AI 句子变式暂时不可用，将每小时自动重试";
+  let statusCode = 503;
+  let reasonCode = "unavailable";
+
+  if (providerStatus === 429) {
+    message = "AI 上游请求过多或额度不足，将每小时自动重试";
+    reasonCode = "rate-limit";
+    statusCode = 429;
+  } else if ([401, 403].includes(providerStatus)) {
+    message = "AI 上游拒绝了请求，请检查模型权限后重试";
+    reasonCode = "provider-auth";
+  } else if ([400, 422].includes(providerStatus)) {
+    message = "AI 上游拒绝当前模型或强度参数，将每小时自动重试";
+    reasonCode = "provider-parameters";
+  } else if ([404, 405, 501].includes(providerStatus)) {
+    message = "当前模型不支持所需的生成接口，将每小时自动重试";
+    reasonCode = "unsupported-endpoint";
+  } else if (providerStatus && providerStatus >= 500) {
+    message = "AI 上游服务暂时不可用，将每小时自动重试";
+    reasonCode = "provider-service";
+  } else if (/timed out/i.test(detail)) {
+    message = "AI 句子变式请求超时，将每小时自动重试；可在 AI 设置中提高超时";
+    reasonCode = "timeout";
+    statusCode = 504;
+  } else if (/too large/i.test(detail)) {
+    message = "AI 返回内容过长，将每小时自动重试";
+    reasonCode = "response-too-large";
+  } else if (/invalid|incomplete|repeated|unsupported|unlearned|超纲|重复|格式/i.test(detail)) {
+    message = "AI 返回的句子未通过格式、已学词或重复校验，将每小时自动重试";
+    reasonCode = "invalid-output";
+  }
+
+  return { message, statusCode, providerStatus, reasonCode };
 }
 
 function publicAiTutorFailure(error) {

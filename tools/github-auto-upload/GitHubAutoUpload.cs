@@ -125,21 +125,27 @@ namespace EnglishReviewGitHubUpload
 
         private UploadResult RunUpload()
         {
+            return RunUpload(AppendLog);
+        }
+
+        internal static UploadResult RunUpload(Action<string> log)
+        {
+            if (log == null) log = delegate { };
             try
             {
                 string repository = FindRepository();
                 if (String.IsNullOrEmpty(repository))
                 {
-                    return Failure("没有找到程序仓库", "请把“GitHub自动上传.exe”放在“三年英语学习计划”目录中再双击。程序需要找到“每日英语复习”仓库。");
+                    return Failure("没有找到程序仓库", "请把“GitHub自动上传.exe”放在“三年英语学习计划”目录中再运行。程序需要找到“每日英语复习”仓库。");
                 }
-                AppendLog("已找到“每日英语复习”程序仓库。\r\n");
+                log("已找到“每日英语复习”程序仓库。\r\n");
 
                 string git = FindWorkingGit(repository);
                 if (String.IsNullOrEmpty(git))
                 {
                     return Failure("没有找到可用的完整 Git", "当前找到的 Git 无法正常启动。请安装 Git for Windows，或保留 Codex 完整运行环境后再试。");
                 }
-                AppendLog("已找到可用的完整 Git。\r\n");
+                log("已找到可用的完整 Git。\r\n");
 
                 CommandResult branch = RunGit(git, repository, "symbolic-ref --quiet --short HEAD", 15, null);
                 if (branch.ExitCode != 0 || branch.Output.Trim() != "main")
@@ -157,13 +163,13 @@ namespace EnglishReviewGitHubUpload
                 int uncommittedCount = dirty.Output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Length;
                 if (uncommittedCount > 0)
                 {
-                    AppendLog("提醒：发现 " + uncommittedCount + " 项未提交修改；这些内容不会被本工具上传。\r\n");
+                    log("提醒：发现 " + uncommittedCount + " 项未提交修改；这些内容不会被本工具上传。\r\n");
                 }
 
                 Dictionary<string, string> environment = BuildGitEnvironment(git, repository, origin.Output.Trim());
                 CommandResult aheadBefore = RunGit(git, repository, "rev-list --count origin/main..HEAD", 15, environment);
                 int pendingBefore = ParseCount(aheadBefore.Output);
-                AppendLog(pendingBefore > 0
+                log(pendingBefore > 0
                     ? "发现 " + pendingBefore + " 个已提交但尚未上传的提交，正在上传……\r\n"
                     : "本地没有已知的待上传提交，正在向 GitHub 做最终确认……\r\n");
 
@@ -192,7 +198,7 @@ namespace EnglishReviewGitHubUpload
             }
             catch (Exception exception)
             {
-                return Failure("程序发生异常", "异常类型：" + exception.GetType().Name + "。请保留此窗口并把错误类型告诉开发窗口。");
+                return Failure("程序发生异常", "异常类型：" + exception.GetType().Name + "。请把错误类型告诉开发窗口。");
             }
         }
 
@@ -370,9 +376,116 @@ namespace EnglishReviewGitHubUpload
 
     internal static class Program
     {
-        [STAThread]
-        private static void Main()
+        private static bool HasArgument(string[] arguments, string expected)
         {
+            return (arguments ?? new string[0]).Any(argument => String.Equals(argument, expected, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string ArgumentValue(string[] arguments, string name)
+        {
+            string[] values = arguments ?? new string[0];
+            for (int index = 0; index < values.Length - 1; index++)
+            {
+                if (String.Equals(values[index], name, StringComparison.OrdinalIgnoreCase)) return values[index + 1] ?? "";
+            }
+            return "";
+        }
+
+        private static string JsonString(string value)
+        {
+            StringBuilder builder = new StringBuilder();
+            builder.Append('"');
+            foreach (char character in value ?? "")
+            {
+                switch (character)
+                {
+                    case '\\': builder.Append("\\\\"); break;
+                    case '"': builder.Append("\\\""); break;
+                    case '\r': builder.Append("\\r"); break;
+                    case '\n': builder.Append("\\n"); break;
+                    case '\t': builder.Append("\\t"); break;
+                    default:
+                        if (character < ' ') builder.Append("\\u").Append(((int)character).ToString("x4"));
+                        else builder.Append(character);
+                        break;
+                }
+            }
+            builder.Append('"');
+            return builder.ToString();
+        }
+
+        private static string JsonResult(UploadResult result)
+        {
+            return "{\"interfaceVersion\":1,\"success\":" + (result.Success ? "true" : "false")
+                + ",\"status\":" + JsonString(result.Status)
+                + ",\"message\":" + JsonString(result.Message) + "}";
+        }
+
+        private static void SafeConsoleWrite(string value, bool error)
+        {
+            try
+            {
+                if (error) Console.Error.Write(value);
+                else Console.Out.Write(value);
+            }
+            catch { }
+        }
+
+        private static void SafeConsoleWriteLine(string value, bool error)
+        {
+            SafeConsoleWrite((value ?? "") + Environment.NewLine, error);
+        }
+
+        private static void RunHeadless(string[] arguments)
+        {
+            bool json = HasArgument(arguments, "--json");
+            string resultFile = ArgumentValue(arguments, "--result-file");
+            UploadResult result = UploadForm.RunUpload(delegate(string value) { SafeConsoleWrite(value, true); });
+            string payload = JsonResult(result);
+            if (json) SafeConsoleWriteLine(payload, false);
+            else
+            {
+                SafeConsoleWriteLine(result.Status, false);
+                SafeConsoleWriteLine(result.Message, false);
+            }
+            if (!String.IsNullOrWhiteSpace(resultFile))
+            {
+                try
+                {
+                    string fullPath = Path.GetFullPath(resultFile);
+                    string directory = Path.GetDirectoryName(fullPath);
+                    if (!String.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+                    File.WriteAllText(fullPath, payload, new UTF8Encoding(false));
+                }
+                catch (Exception exception)
+                {
+                    SafeConsoleWriteLine("无法写入结果文件：" + exception.GetType().Name, true);
+                    Environment.ExitCode = 2;
+                    return;
+                }
+            }
+            Environment.ExitCode = result.Success ? 0 : 1;
+        }
+
+        private static void PrintHelp()
+        {
+            SafeConsoleWriteLine("GitHub自动上传.exe [--headless] [--json] [--result-file PATH]", false);
+            SafeConsoleWriteLine("不带参数时打开窗口；--headless 或 --json 供 Codex、PowerShell 和任务计划直接调用。", false);
+        }
+
+        [STAThread]
+        private static void Main(string[] arguments)
+        {
+            if (HasArgument(arguments, "--help") || HasArgument(arguments, "-h"))
+            {
+                PrintHelp();
+                return;
+            }
+            if (HasArgument(arguments, "--headless") || HasArgument(arguments, "--json") || HasArgument(arguments, "--result-file"))
+            {
+                RunHeadless(arguments);
+                return;
+            }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new UploadForm());

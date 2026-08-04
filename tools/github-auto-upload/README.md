@@ -10,6 +10,24 @@
 
 工具不会修改系统代理、DNS、路由、网卡或防火墙。它只上传已经提交到 Git 的内容，因此本地 `.env`、`.sync.env`、账号和令牌不会因为双击工具而被自动加入仓库。
 
+## 供 Codex 或 PowerShell 直接调用
+
+不打开窗口，直接执行上传并返回机器可读结果：
+
+```powershell
+& '..\GitHub自动上传.exe' --headless --json --result-file "$env:TEMP\english-review-upload-result.json"
+$LASTEXITCODE
+Get-Content -Raw -Encoding UTF8 "$env:TEMP\english-review-upload-result.json"
+```
+
+退出码 `0` 表示“上传成功”或“无需上传”，`1` 表示 Git/网络/SSH 上传失败，`2` 表示结果文件无法写入。结果 JSON 只含接口版本、成功状态和脱敏后的说明，不包含密钥、口令或令牌。Codex 后续可以直接调用这个接口；SSH 私钥仍必须预先加入并解锁到当前 Windows SSH Agent，本工具不会保存或绕过密钥口令。
+
+查看命令行帮助：
+
+```powershell
+& '..\GitHub自动上传.exe' --help
+```
+
 重新生成 EXE：
 
 ```powershell
