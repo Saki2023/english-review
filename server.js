@@ -13,7 +13,7 @@ const { buildLearningSyncProfile } = require("./server/learning-sync");
 const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./server/learning-sync-token");
 const { publicTeachingProfile, sanitizeTeachingProfile } = require("./server/teaching-profile");
 const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis");
-const { sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById } = require("./review-variants");
+const { normalizeEnglish: normalizeVariantEnglish, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById, validateGeneratedSentenceVariant } = require("./review-variants");
 const { sanitizePreviewPractice } = require("./server/preview-practice");
 const { repairLearningEvidence } = require("./server/evidence-repair");
 const { normalizeStudyTime } = require("./study-time");
@@ -75,6 +75,11 @@ const MAX_AI_ANSWER_LENGTH = 500;
 const MAX_AI_TUTOR_MESSAGE_LENGTH = 500;
 const EXAM_GENERATION_TIMEOUT_MS = 120000;
 const EXAM_GENERATION_API_VERSION = "2";
+const AI_SENTENCE_RETRY_MS = 5 * 60 * 1000;
+const AI_SENTENCE_RETRY_SECONDS = 5 * 60;
+const REVIEW_VARIANT_MAX_REPAIR_ROUNDS = 3;
+const REVIEW_VARIANT_JOB_POLL_MS = 2000;
+const REVIEW_VARIANT_JOB_CACHE_MS = 10 * 60 * 1000;
 
 ensureDataDir();
 const aiSettingsStore = createAiSettingsStore(DATA_DIR);
@@ -85,6 +90,8 @@ let users = loadUsers(DATA_DIR);
 let sessions = loadSessions();
 let userStates = loadUserStates();
 const activeExamGenerationJobs = new Map();
+const reviewVariantJobsById = new Map();
+const reviewVariantJobIdsByKey = new Map();
 const legacyState = repairLearningEvidence(content, sanitizeState(readJson(LEGACY_STATE_FILE, {}))).state;
 repairStoredUserStates();
 
@@ -662,7 +669,7 @@ function sanitizePreviewSentence(contentValue, target, value, allowedWords) {
 async function handlePreviewPracticeSentences(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "preview practice endpoint not found");
-  const unavailable = (message = "AI 预习句子暂不可用，将每小时自动重试") => sendJson(res, 503, { error: message, retryAfterMs: 60 * 60 * 1000 }, { "Retry-After": "3600" });
+  const unavailable = (message = "AI 预习句子暂不可用，将每 5 分钟自动重试") => sendJson(res, 503, { error: message, retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
   try {
     refreshContent();
     const currentDay = Number(content.currentDay) || 1;
@@ -677,9 +684,9 @@ async function handlePreviewPracticeSentences(req, res, user) {
     const requestedIds = Array.from(new Set((Array.isArray(body.wordIds) ? body.wordIds : []).map(value => String(value || "").trim()).filter(Boolean))).slice(0, 20);
     const targets = (requestedIds.length ? requestedIds.map(id => previewWords.find(item => item.id === id)).filter(Boolean) : previewWords).slice(0, 20);
     if (!targets.length) return sendError(res, 400, "preview word targets are required");
-    if (!aiConfigured()) return unavailable("AI 尚未配置，预习句子将每小时自动重试");
+    if (!aiConfigured()) return unavailable("AI 尚未配置，预习句子将每 5 分钟自动重试");
     const rate = takeAiRequest(user.id);
-    if (!rate.allowed) return unavailable("AI 请求受限，预习句子将每小时自动重试");
+    if (!rate.allowed) return unavailable("AI 请求受限，预习句子将每 5 分钟自动重试");
     const state = getUserState(user);
     const practice = sanitizeAiPractice(state.aiPractice);
     const availableModels = getAvailableModels(aiSettings);
@@ -709,10 +716,10 @@ async function handlePreviewPracticeSentences(req, res, user) {
     const failure = publicAiSentenceVariantFailure(error);
     return sendJson(res, failure.statusCode, {
       error: failure.message,
-      retryAfterMs: 60 * 60 * 1000,
+      retryAfterMs: AI_SENTENCE_RETRY_MS,
       reasonCode: failure.reasonCode,
       providerStatus: failure.providerStatus
-    }, { "Retry-After": "3600" });
+    }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
   }
 }
 
@@ -755,8 +762,210 @@ function recentReviewVariants(state) {
   })).filter(item => item.taskId && (item.id || item.english));
 }
 
+const REVIEW_VARIANT_FAILURE_MESSAGES = Object.freeze({
+  "invalid-json": "返回格式不是有效 JSON",
+  "missing-task": "缺少这道题的结果",
+  "invalid-object": "结果不是句子对象",
+  "missing-english": "缺少英文句子",
+  "missing-chinese": "缺少中文翻译",
+  "unsupported-source-family": "原句句型暂不受支持",
+  "wrong-family": "改变了原句句型",
+  "no-english-words": "没有可识别的英文单词",
+  "unlearned-word": "含有未学单词",
+  "source-duplicate": "与原句完全相同",
+  "fixed-sentence-duplicate": "与词句库固定句重复",
+  "recent-variant-duplicate": "与近期变式重复",
+  "batch-duplicate": "与本批已合格句子重复"
+});
+
+function reviewVariantFailure(task, reasonCode, details = {}) {
+  return {
+    taskId: task.taskId,
+    reasonCode,
+    message: REVIEW_VARIANT_FAILURE_MESSAGES[reasonCode] || "未通过句子校验",
+    rejectedEnglish: String(details.english || "").slice(0, 180),
+    unlearnedWords: Array.isArray(details.unlearnedWords) ? details.unlearnedWords.slice(0, 20) : []
+  };
+}
+
+function validateReviewVariantCandidate(task, raw, context) {
+  if (!raw) return { failure: reviewVariantFailure(task, "missing-task") };
+  const validation = validateGeneratedSentenceVariant(content, task.baseItem, raw);
+  if (!validation.valid) return { failure: reviewVariantFailure(task, validation.reasonCode, validation) };
+  const normalized = validation.normalizedEnglish;
+  const sourceEnglish = normalizeVariantEnglish(task.baseItem.english);
+  if (normalized === sourceEnglish) return { failure: reviewVariantFailure(task, "source-duplicate", validation) };
+  if (context.fixedEnglish.has(normalized)) return { failure: reviewVariantFailure(task, "fixed-sentence-duplicate", validation) };
+  if (context.recentEnglish.has(normalized)) return { failure: reviewVariantFailure(task, "recent-variant-duplicate", validation) };
+  if (context.selectedEnglish.has(normalized)) return { failure: reviewVariantFailure(task, "batch-duplicate", validation) };
+  context.selectedEnglish.add(normalized);
+  return { variant: validation.variant };
+}
+
+function logReviewVariantFailure(failure, round) {
+  const words = failure.unlearnedWords.length ? ` unlearned=${failure.unlearnedWords.join(",")}` : "";
+  const english = failure.rejectedEnglish ? ` english=${JSON.stringify(failure.rejectedEnglish)}` : "";
+  console.warn(`AI review variant rejected: round=${round} taskId=${failure.taskId} reason=${failure.reasonCode}${words}${english}`);
+}
+
+function reviewVariantOutputError(error) {
+  if (Number(error && error.providerStatus)) return false;
+  return /invalid review variant JSON|did not return review variants|Unexpected (end|token)|JSON/i.test(String(error && error.message || ""));
+}
+
+function repairFeedback(failures) {
+  return failures.map(item => ({
+    taskId: item.taskId,
+    reasonCode: item.reasonCode,
+    problem: item.message,
+    rejectedEnglish: item.rejectedEnglish,
+    unlearnedWords: item.unlearnedWords
+  }));
+}
+
+async function generateReviewVariantsWithRepairs(route, input) {
+  const accepted = new Map();
+  const taskById = new Map(input.tasks.map(task => [task.taskId, task]));
+  const fixedEnglish = new Set(input.fixedEnglish.map(normalizeVariantEnglish).filter(Boolean));
+  const recentEnglish = new Set(input.recentEnglish.map(normalizeVariantEnglish).filter(Boolean));
+  let pending = [...input.tasks];
+  let validationFeedback = [];
+  let failures = [];
+  let lastConfig = route.candidates[0] || {};
+  let repairRounds = 0;
+
+  for (let round = 1; round <= REVIEW_VARIANT_MAX_REPAIR_ROUNDS && pending.length; round += 1) {
+    repairRounds = round;
+    let routed;
+    try {
+      routed = await runAiRoute(route, config => createAiReviewVariantGenerator(config).generate({
+        allowedWords: input.allowedWords,
+        grammarFamilies: input.grammarFamilies,
+        targets: pending.map(task => ({ taskId: task.taskId, grammarFamily: sentenceFamily(task.baseItem), sourceEnglish: task.baseItem.english, sourceChinese: task.baseItem.chinese })),
+        excludedEnglish: Array.from(new Set([...input.excludedEnglish, ...Array.from(accepted.values()).map(item => item.english)])),
+        weakItems: input.weakItems,
+        validationFeedback
+      }));
+    } catch (error) {
+      if (!reviewVariantOutputError(error)) throw error;
+      failures = pending.map(task => reviewVariantFailure(task, "invalid-json"));
+      failures.forEach(failure => logReviewVariantFailure(failure, round));
+      validationFeedback = repairFeedback(failures);
+      continue;
+    }
+
+    lastConfig = routed.config;
+    const rawByTask = new Map(routed.value.map(item => [item.taskId, item]));
+    const selectedEnglish = new Set(Array.from(accepted.values()).map(item => normalizeVariantEnglish(item.english)));
+    const context = { fixedEnglish, recentEnglish, selectedEnglish };
+    failures = [];
+
+    pending.forEach(task => {
+      const checked = validateReviewVariantCandidate(task, rawByTask.get(task.taskId), context);
+      if (checked.failure) {
+        failures.push(checked.failure);
+        logReviewVariantFailure(checked.failure, round);
+        return;
+      }
+      const generatedAt = new Date().toISOString();
+      accepted.set(task.taskId, {
+        ...checked.variant,
+        taskId: task.taskId,
+        source: "ai",
+        providerId: routed.config.providerId,
+        providerName: routed.config.providerName,
+        model: routed.config.model,
+        reasoningEffort: route.reasoningEffort,
+        generatedAt
+      });
+    });
+
+    pending = failures.map(failure => taskById.get(failure.taskId)).filter(Boolean);
+    validationFeedback = repairFeedback(failures);
+  }
+
+  const variants = input.tasks.map(task => accepted.get(task.taskId)).filter(Boolean);
+  const remainingFailures = failures.filter(failure => !accepted.has(failure.taskId));
+  const message = remainingFailures.length
+    ? `已有 ${variants.length} 条句子生成成功；${remainingFailures.length} 条连续 ${REVIEW_VARIANT_MAX_REPAIR_ROUNDS} 轮未通过校验，已停止自动重试。请点“立即重试”或更换模型。`
+    : "";
+  return {
+    status: remainingFailures.length ? "needs-attention" : "completed",
+    variants,
+    failures: remainingFailures.map(({ rejectedEnglish, unlearnedWords, ...failure }) => ({ ...failure, unlearnedWords })),
+    message,
+    source: "ai",
+    provider: { id: lastConfig.providerId || "", name: lastConfig.providerName || "" },
+    model: lastConfig.model || route.model,
+    reasoningEffort: route.reasoningEffort,
+    repairRounds,
+    maxRepairRounds: REVIEW_VARIANT_MAX_REPAIR_ROUNDS,
+    autoRetry: false,
+    retryAfterMs: 0
+  };
+}
+
+function reviewVariantJobKey(userId, input) {
+  return crypto.createHash("sha256").update(JSON.stringify({ userId, date: input.date, taskIds: input.tasks.map(task => task.taskId), model: input.route.model, reasoningEffort: input.route.reasoningEffort, contentUpdatedAt: content.updatedAt })).digest("hex");
+}
+
+function deleteReviewVariantJob(job) {
+  if (!job) return;
+  reviewVariantJobsById.delete(job.id);
+  if (reviewVariantJobIdsByKey.get(job.key) === job.id) reviewVariantJobIdsByKey.delete(job.key);
+}
+
+function purgeReviewVariantJobs() {
+  const current = Date.now();
+  reviewVariantJobsById.forEach(job => {
+    if (job.status !== "pending" && current - Number(job.finishedAtMs || job.startedAtMs) > REVIEW_VARIANT_JOB_CACHE_MS) deleteReviewVariantJob(job);
+  });
+}
+
+function sendReviewVariantJob(res, job) {
+  if (job.status === "pending") return sendJson(res, 202, { status: "pending", jobId: job.id, pollAfterMs: REVIEW_VARIANT_JOB_POLL_MS, message: "AI 正在后台生成并校验句子，可暂时离开本页。" });
+  if (job.status === "completed") return sendJson(res, 200, job.result, job.result.retryAfterMs ? { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) } : {});
+  return sendJson(res, job.failure.statusCode, {
+    error: job.failure.message,
+    retryAfterMs: AI_SENTENCE_RETRY_MS,
+    reasonCode: job.failure.reasonCode,
+    providerStatus: job.failure.providerStatus
+  }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
+}
+
+function startReviewVariantJob(user, key, route, input) {
+  const job = {
+    id: `review-variant-${crypto.randomUUID()}`,
+    key,
+    userId: user.id,
+    status: "pending",
+    startedAtMs: Date.now(),
+    finishedAtMs: 0,
+    result: null,
+    failure: null
+  };
+  reviewVariantJobsById.set(job.id, job);
+  reviewVariantJobIdsByKey.set(key, job.id);
+  job.promise = generateReviewVariantsWithRepairs(route, input).then(result => {
+    job.status = "completed";
+    job.result = result;
+  }).catch(error => {
+    console.warn(`AI review variant generation failed; retry will be scheduled: ${error && error.message ? error.message : "unknown error"}`);
+    job.status = "failed";
+    job.failure = publicAiSentenceVariantFailure(error);
+  }).finally(() => { job.finishedAtMs = Date.now(); });
+  return job;
+}
+
 async function handleReviewSentenceVariants(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
+  purgeReviewVariantJobs();
+  const requestUrl = new URL(req.url, "http://localhost");
+  if (req.method === "GET") {
+    const job = reviewVariantJobsById.get(String(requestUrl.searchParams.get("jobId") || ""));
+    if (!job || job.userId !== user.id) return sendError(res, 404, "review variant job not found");
+    return sendReviewVariantJob(res, job);
+  }
   if (req.method !== "POST") return sendError(res, 404, "review variant endpoint not found");
   try {
     refreshContent();
@@ -766,12 +975,10 @@ async function handleReviewSentenceVariants(req, res, user) {
     if (!taskIds.length) return sendError(res, 400, "taskIds are required");
     const tasks = taskIds.map(taskId => findSentenceTask(taskId)).filter(Boolean);
     if (tasks.length !== taskIds.length) return sendError(res, 404, "sentence task not found");
-    const state = getUserState(user);
-    const unavailable = (message = "AI 变式暂时不可用，将每小时自动重试") => sendJson(res, 503, { error: message, retryAfterMs: 60 * 60 * 1000 }, { "Retry-After": "3600" });
-    if (!aiConfigured()) return unavailable("AI 尚未配置，句子变式将每小时自动重试");
-    const rate = takeAiRequest(user.id);
-    if (!rate.allowed) return sendJson(res, 429, { error: "AI 变式请求受限，将每小时自动重试", retryAfterMs: 60 * 60 * 1000 }, { "Retry-After": "3600" });
+    const unavailable = (message = "AI 变式暂时不可用，将每 5 分钟自动重试") => sendJson(res, 503, { error: message, retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
+    if (!aiConfigured()) return unavailable("AI 尚未配置，句子变式将每 5 分钟自动重试");
 
+    const state = getUserState(user);
     const practice = sanitizeAiPractice(state.aiPractice);
     const availableModels = getAvailableModels(aiSettings);
     const requestedModel = [body.model, practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
@@ -780,7 +987,8 @@ async function handleReviewSentenceVariants(req, res, user) {
     const profile = buildLearningProfile(content, state, date);
     const recent = recentReviewVariants(state);
     const fixedEnglish = content.sentences.map(item => item.english);
-    const excludedEnglish = Array.from(new Set([...fixedEnglish, ...recent.map(item => item.english).filter(Boolean)]));
+    const recentEnglish = recent.map(item => item.english).filter(Boolean);
+    const excludedEnglish = Array.from(new Set([...fixedEnglish, ...recentEnglish]));
     const grammarFamilies = {
       identity: "subject + am/is + a person or identity",
       description: "It is + an adjective, or It is a/an + adjective/noun",
@@ -788,35 +996,25 @@ async function handleReviewSentenceVariants(req, res, user) {
       inside: "subject + is in + a place or container",
       on: "subject + is on + a surface or object"
     };
+    const input = {
+      date,
+      tasks,
+      route,
+      allowedWords: profile.allowedWords,
+      grammarFamilies,
+      fixedEnglish,
+      recentEnglish,
+      excludedEnglish,
+      weakItems: profile.weakItems.slice(0, 12)
+    };
+    const key = reviewVariantJobKey(user.id, input);
+    const existing = reviewVariantJobsById.get(reviewVariantJobIdsByKey.get(key));
+    if (existing && (existing.status === "pending" || body.force !== true)) return sendReviewVariantJob(res, existing);
+    if (existing) deleteReviewVariantJob(existing);
 
-    try {
-      const routed = await runAiRoute(route, config => createAiReviewVariantGenerator(config).generate({
-        allowedWords: profile.allowedWords,
-        grammarFamilies,
-        targets: tasks.map(task => ({ taskId: task.taskId, grammarFamily: sentenceFamily(task.baseItem), sourceEnglish: task.baseItem.english, sourceChinese: task.baseItem.chinese })),
-        excludedEnglish,
-        weakItems: profile.weakItems.slice(0, 12)
-      }));
-      const rawByTask = new Map(routed.value.map(item => [item.taskId, item]));
-      const generatedAt = new Date().toISOString();
-      const selectedEnglish = [...excludedEnglish];
-      const variants = tasks.map(task => {
-        const variant = sanitizeGeneratedSentenceVariant(content, task.baseItem, rawByTask.get(task.taskId), selectedEnglish);
-        if (!variant) throw new Error("AI provider returned an invalid or repeated review variant");
-        selectedEnglish.push(variant.english);
-        return { ...variant, taskId: task.taskId, source: "ai", providerId: routed.config.providerId, providerName: routed.config.providerName, model: routed.config.model, reasoningEffort: route.reasoningEffort, generatedAt };
-      });
-      return sendJson(res, 200, { variants, source: "ai", provider: { id: routed.config.providerId, name: routed.config.providerName }, model: routed.config.model, reasoningEffort: route.reasoningEffort });
-    } catch (error) {
-      console.warn(`AI review variant generation failed; retry will be scheduled: ${error && error.message ? error.message : "unknown error"}`);
-      const failure = publicAiSentenceVariantFailure(error);
-      return sendJson(res, failure.statusCode, {
-        error: failure.message,
-        retryAfterMs: 60 * 60 * 1000,
-        reasonCode: failure.reasonCode,
-        providerStatus: failure.providerStatus
-      }, { "Retry-After": "3600" });
-    }
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) return sendJson(res, 429, { error: "AI 变式请求受限，将每 5 分钟自动重试", retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
+    return sendReviewVariantJob(res, startReviewVariantJob(user, key, route, input));
   } catch (error) {
     return sendError(res, error.statusCode || 400, error.message);
   }
@@ -896,35 +1094,35 @@ function publicAiGenerationFailure(error) {
 function publicAiSentenceVariantFailure(error) {
   const providerStatus = Number(error && error.providerStatus) || null;
   const detail = String(error && error.message || "");
-  let message = "AI 句子变式暂时不可用，将每小时自动重试";
+  let message = "AI 句子变式暂时不可用，将每 5 分钟自动重试";
   let statusCode = 503;
   let reasonCode = "unavailable";
 
   if (providerStatus === 429) {
-    message = "AI 上游请求过多或额度不足，将每小时自动重试";
+    message = "AI 上游请求过多或额度不足，将每 5 分钟自动重试";
     reasonCode = "rate-limit";
     statusCode = 429;
   } else if ([401, 403].includes(providerStatus)) {
     message = "AI 上游拒绝了请求，请检查模型权限后重试";
     reasonCode = "provider-auth";
   } else if ([400, 422].includes(providerStatus)) {
-    message = "AI 上游拒绝当前模型或强度参数，将每小时自动重试";
+    message = "AI 上游拒绝当前模型或强度参数，将每 5 分钟自动重试";
     reasonCode = "provider-parameters";
   } else if ([404, 405, 501].includes(providerStatus)) {
-    message = "当前模型不支持所需的生成接口，将每小时自动重试";
+    message = "当前模型不支持所需的生成接口，将每 5 分钟自动重试";
     reasonCode = "unsupported-endpoint";
   } else if (providerStatus && providerStatus >= 500) {
-    message = "AI 上游服务暂时不可用，将每小时自动重试";
+    message = "AI 上游服务暂时不可用，将每 5 分钟自动重试";
     reasonCode = "provider-service";
   } else if (/timed out/i.test(detail)) {
-    message = "AI 句子变式请求超时，将每小时自动重试；可在 AI 设置中提高超时";
+    message = "AI 句子变式请求被上游或网络中断，将每 5 分钟自动重试";
     reasonCode = "timeout";
     statusCode = 504;
   } else if (/too large/i.test(detail)) {
-    message = "AI 返回内容过长，将每小时自动重试";
+    message = "AI 返回内容过长，将每 5 分钟自动重试";
     reasonCode = "response-too-large";
   } else if (/invalid|incomplete|repeated|unsupported|unlearned|超纲|重复|格式/i.test(detail)) {
-    message = "AI 返回的句子未通过格式、已学词或重复校验，将每小时自动重试";
+    message = "AI 返回的句子连续 3 轮未通过校验，已停止自动重试；请立即重试或更换模型";
     reasonCode = "invalid-output";
   }
 

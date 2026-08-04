@@ -113,7 +113,7 @@ test("teaching profile write token updates only the local teaching profile", asy
     assert.equal(unavailablePreviewSentences.status, 503);
     const unavailableBody = await unavailablePreviewSentences.json();
     assert.equal(Array.isArray(unavailableBody.sentences), false);
-    assert.equal(unavailableBody.retryAfterMs, 60 * 60 * 1000);
+    assert.equal(unavailableBody.retryAfterMs, 5 * 60 * 1000);
 
     const promotedBody = JSON.stringify({
       updatedAt: "2026-08-05",

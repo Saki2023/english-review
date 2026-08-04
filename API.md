@@ -53,7 +53,8 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | GET | `/api/preview/words` | 获取当前课程紧邻下一天的未学预习词，需要登录 |
 | POST | `/api/preview/practice/sentences` | 按当前预习词生成预习句子练习，需要登录及已配置的 AI |
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
-| POST | `/api/review/sentence-variants` | 为今日复习生成已学范围内的 AI 句子变式，需要登录；AI 不可用时返回待重试错误，前端保留每小时自动重试并提供手动立即重试 |
+| POST | `/api/review/sentence-variants` | 创建或恢复今日复习的后台 AI 句子变式任务，需要登录；返回 `202` 时按 `jobId` 查询 |
+| GET | `/api/review/sentence-variants?jobId=...` | 查询当前账号的后台句子变式任务；网络/上游失败后每 5 分钟重试，内容连续 3 轮不合格后停止自动重试 |
 | GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
 | POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录及当前试卷接口版本头，返回 `202` |
 | PUT | `/api/ai/exams/current` | 保存当前试卷草稿答案，需要登录 |
@@ -173,7 +174,7 @@ Invoke-RestMethod -Uri 'http://localhost:8080/api/content' -Headers $headers
 
 每个返回句子都对应一个 `wordId`，并且必须包含该预习词；句子可以组合已经正式学过的单词来帮助记忆，但服务端会拒绝未学过且不在当前预习列表中的英文词。返回的 `source` 固定为 `ai`，不会把句子写入正式词库、今日复习、错题本或能力统计。
 
-AI 未配置、上游失败、限流或返回不完整时，接口返回 `503`（限流也可能返回 `429`），并包含 `retryAfterMs: 3600000` 及 `Retry-After: 3600`。前端会保留“待生成”状态，每小时自动重试；不会用固定本地句子冒充 AI 结果。
+AI 未配置、上游失败、限流或返回不完整时，接口返回 `503`（限流也可能返回 `429`），并包含 `retryAfterMs: 300000` 及 `Retry-After: 300`。前端会保留“待生成”状态，每 5 分钟自动重试；不会用固定本地句子冒充 AI 结果。
 
 ## 调试示例
 
@@ -276,7 +277,8 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | POST | `/api/ai/questions/ask` | 已登录 | 询问当前或历史 AI 题目；请求可带独立 `model` 和 `reasoningEffort`，并按账号及题目追加长期问答记录 |
 | POST | `/api/ai/questions/tutor/clear` | 已登录 | 切断指定题目的当前 AI 会话上下文，旧问答仍保留为学习历史 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
-| POST | `/api/review/sentence-variants` | 已登录 | 按已学词句、近期变式和薄弱点生成今日复习句子变式，并进行超纲校验；可带当前账号选择的 `model` 与 `reasoningEffort` |
+| POST | `/api/review/sentence-variants` | 已登录 | 按已学词句、近期变式和薄弱点创建或恢复后台句子变式任务；可带当前账号选择的 `model`、`reasoningEffort` 和强制新一轮的 `force` |
+| GET | `/api/review/sentence-variants?jobId=...` | 已登录 | 轮询后台句子变式任务；合格项立即保留，失败项最多修正 3 轮并返回精确原因；内容失败不会无限自动请求 |
 | GET | `/api/ai/exams` | 已登录 | 获取脱敏后的试卷状态和历史 |
 | POST | `/api/ai/exams/generate` | 已登录 | 创建 100 分或 150 分完整试卷的后台生成任务，需发送 `X-English-Review-Exam-Version: 2`，返回 `202`；旧网页会收到明确的刷新提示 |
 | PUT | `/api/ai/exams/current` | 已登录 | 保存整卷草稿，不触发判分 |
@@ -317,7 +319,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 }
 ```
 
-`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。AI 超时配置范围为 1 至 120 秒，默认 30 秒；由于完整试卷输出较长，试卷生成任务会把本次上游等待时间提高到 120 秒。今日复习句子变式会使用账号当前选择的模型和强度，不再固定降为 `low`；若请求超时，接口会返回脱敏的超时原因并继续按一小时计划重试。
+`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。一般 AI 请求的超时配置范围为 1 至 120 秒，默认 30 秒；完整试卷输出较长，试卷生成任务会把本次上游等待时间提高到 120 秒。今日复习句子变式使用账号当前选择的模型和强度，并在独立后台任务中运行，不使用账号 90/120 秒固定超时中止；网页通过 `jobId` 轮询，因此 Cloudflare 单次网页请求结束也不会取消后台生成。内容不达标时最多修正 3 轮，随后停止自动重试并提示手动重试或更换模型；只有网络、限流或上游暂时不可用才按 5 分钟自动重试。
 
 生成试卷请求：
 

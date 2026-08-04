@@ -49,7 +49,8 @@
   const DEFAULT_AI_TIMEOUT_MS = 30000;
   const AI_CLIENT_TIMEOUT_MS = 125000;
   const EXAM_GENERATION_POLL_MS = 2000;
-  const REVIEW_VARIANT_RETRY_MS = 60 * 60 * 1000;
+  const REVIEW_VARIANT_POLL_MS = 2000;
+  const REVIEW_VARIANT_RETRY_MS = 5 * 60 * 1000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
   let remoteReady = !API_ENABLED;
   let remoteSaveTimer;
@@ -2236,7 +2237,7 @@
     if (previewPracticeSentencePreparation && previewPracticeSentencePreparation.key === key) return previewPracticeSentencePreparation.promise;
     if (!API_ENABLED || !aiOptionsLoaded) return;
     if (!aiOptions.configured) {
-      previewPracticeStatusMessage = "AI 尚未配置，预习句子将每小时自动重试。";
+      previewPracticeStatusMessage = "AI 尚未配置，预习句子将每 5 分钟自动重试。";
       schedulePreviewPracticeRetry(key);
       return;
     }
@@ -2287,7 +2288,7 @@
       } catch (error) {
         previewPracticeStatusMessage = error && error.statusCode === 401
           ? "登录状态已失效，请重新登录。"
-          : (error && typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, 180) : "AI 暂不可用，预习句子将每小时自动重试。");
+          : (error && typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, 180) : "AI 暂不可用，预习句子将每 5 分钟自动重试。");
         if (!error || error.statusCode !== 401) schedulePreviewPracticeRetry(key);
         if (error && error.statusCode !== 401) showToast(previewPracticeStatusMessage);
       } finally {
@@ -2355,7 +2356,7 @@
     if (!words.length) {
       $("#previewPracticeEmpty").textContent = "目前没有可练习的下一天预习单词。学习窗口同步新预习后会自动出现。";
     } else if (!tasks.length) {
-      $("#previewPracticeEmpty").textContent = state.mode === "sentence" ? "AI 句子还在准备中；恢复后会每小时自动重试。" : "正在准备预习练习…";
+      $("#previewPracticeEmpty").textContent = state.mode === "sentence" ? "AI 句子还在准备中；恢复后会每 5 分钟自动重试。" : "正在准备预习练习…";
       $("#previewPracticeEmpty").hidden = false;
     }
     $("#previewPracticeProgress").textContent = tasks.length ? `${Math.min(state.index + (current ? 0 : 1), tasks.length)} / ${tasks.length}` : "0 / 0";
@@ -4071,7 +4072,12 @@
     button.disabled = busy;
     button.setAttribute("aria-busy", String(busy));
     label.textContent = busy ? "正在请求…" : "立即重试";
-    note.textContent = busy ? "正在请求 AI，请稍候；自动重试仍会每小时进行一次。" : "AI 暂不可用时可立即再试；自动重试仍会每小时进行一次。";
+    const validationStopped = reviewVariantStatusMessage.includes("停止自动重试");
+    note.textContent = busy
+      ? "AI 正在后台生成；网络或上游失败后会每 5 分钟自动重试。"
+      : validationStopped
+        ? "本轮内容校验已经停止；可立即重试或先更换模型。"
+        : "AI 暂不可用时可立即再试；网络或上游失败每 5 分钟自动重试。";
   }
 
   function sentenceTasksMissingVariants(session) {
@@ -4112,6 +4118,22 @@
     }, REVIEW_VARIANT_RETRY_MS);
   }
 
+  async function waitForReviewVariantJob(data, key) {
+    let current = data;
+    while (current && current.status === "pending" && current.jobId) {
+      reviewVariantStatusMessage = String(current.message || "AI 正在后台生成并校验句子，可暂时离开本页。").slice(0, 180);
+      if (activeView === "home") renderHome();
+      const delay = Math.max(500, Math.min(10000, Number(current.pollAfterMs) || REVIEW_VARIANT_POLL_MS));
+      await new Promise(resolve => setTimeout(resolve, delay));
+      if (reviewVariantBatchKey(getSession()) !== key) return null;
+      current = await responseJson(await fetch(`/api/review/sentence-variants?jobId=${encodeURIComponent(current.jobId)}`, {
+        credentials: "same-origin",
+        cache: "no-store"
+      }));
+    }
+    return current;
+  }
+
   async function prepareReviewSentenceVariants(session, force = false) {
     const missing = sentenceTasksMissingVariants(session);
     const key = reviewVariantBatchKey(session);
@@ -4125,7 +4147,7 @@
       return;
     }
     if (!aiOptions.configured) {
-      reviewVariantStatusMessage = "AI 尚未配置，句子变式将每小时自动重试。";
+      reviewVariantStatusMessage = "AI 尚未配置，句子变式将每 5 分钟自动重试。";
       scheduleReviewVariantRetry(session, key);
       return;
     }
@@ -4135,28 +4157,39 @@
     const promise = (async () => {
       try {
         const settings = selectedAiSettings();
-        const data = await responseJson(await fetch("/api/review/sentence-variants", {
+        let data = await responseJson(await fetch("/api/review/sentence-variants", {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ date: session.date, taskIds: missing.map(task => task.taskId), model: settings.model, reasoningEffort: settings.reasoningEffort })
+          body: JSON.stringify({ date: session.date, taskIds: missing.map(task => task.taskId), model: settings.model, reasoningEffort: settings.reasoningEffort, force: Boolean(force) })
         }));
+        data = await waitForReviewVariantJob(data, key);
+        if (!data) return;
         if (data.source !== "ai") throw Object.assign(new Error("AI 未返回可固定的句子变式"), { statusCode: 503 });
-        const returned = new Map((Array.isArray(data.variants) ? data.variants : []).map(item => [String(item.taskId || ""), normalizeClientReviewVariant(item)]));
-        const nextVariants = new Map();
-        missing.forEach(task => {
-          const variant = returned.get(task.taskId);
-          if (!variant || variant.source !== "ai") throw Object.assign(new Error("AI 返回的句子变式不完整"), { statusCode: 503 });
-          nextVariants.set(task.taskId, variant);
+        const missingIds = new Set(missing.map(task => task.taskId));
+        let added = 0;
+        (Array.isArray(data.variants) ? data.variants : []).forEach(item => {
+          const taskId = String(item && item.taskId || "");
+          const variant = normalizeClientReviewVariant(item);
+          if (!missingIds.has(taskId) || !variant || variant.source !== "ai") return;
+          session.variants[taskId] = variant;
+          added += 1;
         });
-        nextVariants.forEach((variant, taskId) => { session.variants[taskId] = variant; });
-        reviewVariantStatusMessage = "";
-        cancelReviewVariantRetry(key);
-        saveModel();
+        const unresolved = sentenceTasksMissingVariants(session);
+        if (added) saveModel();
+        if (unresolved.length) {
+          reviewVariantStatusMessage = String(data.message || `仍有 ${unresolved.length} 条句子连续 3 轮未通过校验，已停止自动重试。`).slice(0, 180);
+          if (data.autoRetry === false) cancelReviewVariantRetry(key);
+          else scheduleReviewVariantRetry(session, key);
+          showToast(reviewVariantStatusMessage);
+        } else {
+          reviewVariantStatusMessage = "";
+          cancelReviewVariantRetry(key);
+        }
       } catch (error) {
         reviewVariantStatusMessage = error && error.statusCode === 401
           ? "登录状态已失效，请重新登录。"
-          : (error && typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, 180) : "AI 暂不可用，将每小时自动重试。");
+          : (error && typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, 180) : "AI 暂不可用，将每 5 分钟自动重试。");
         if (!error || error.statusCode !== 401) scheduleReviewVariantRetry(session, key);
         if (error && error.statusCode !== 401) showToast(reviewVariantStatusMessage);
       } finally {
@@ -4280,11 +4313,13 @@
       $("#promptDay").textContent = `第 ${baseTask.item.day} 天 · 正在准备`;
       $("#questionCount").textContent = `${session.index + 1} / ${session.taskIds.length}`;
       $("#directionLabel").textContent = reviewVariantStatusMessage || "根据学习进度生成中";
-      $("#promptText").textContent = reviewVariantStatusMessage.includes("重试") || reviewVariantStatusMessage.includes("不可用")
-        ? "这道句子变式暂时待生成，AI 恢复后会自动重试。"
-        : "AI 正在根据你已经学过的单词和句型准备新句子…";
+      $("#promptText").textContent = reviewVariantStatusMessage.includes("停止自动重试")
+        ? "这道句子连续 3 轮未达标，请立即重试或先更换模型。"
+        : reviewVariantStatusMessage.includes("重试") || reviewVariantStatusMessage.includes("不可用")
+          ? "这道句子变式暂时待生成，AI 恢复后会自动重试。"
+          : "AI 正在根据你已经学过的单词和句型准备新句子…";
       $("#promptSpeech").innerHTML = "";
-      $("#phoneticLine").textContent = "不会加入未学单词；AI 暂不可用时每小时自动重试，不使用本地备用句。";
+      $("#phoneticLine").textContent = "不会加入未学单词；AI 暂不可用时每 5 分钟自动重试，不使用本地备用句。";
       $("#exampleLine").textContent = "";
       $("#answerInput").value = "";
       $("#answerInput").disabled = true;
@@ -5065,7 +5100,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=40", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=41", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

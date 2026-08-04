@@ -149,12 +149,12 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=40/);
+  assert.match(html, /pronunciation-data\.js\?v=41/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /speechButtonHtml\(item\.example/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=40/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=41/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -256,7 +256,7 @@ test("preview practice keeps word and sentence exercises isolated from formal re
   assert.match(html, /id="previewPracticeInput"[^>]*aria-describedby="previewPracticeFeedback"/);
   assert.match(html, /id="previewPracticeFeedback"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.match(app, /\/api\/preview\/practice\/sentences/);
-  assert.match(app, /previewPracticeStatusMessage = .*每小时自动重试/s);
+  assert.match(app, /previewPracticeStatusMessage = .*每 5 分钟自动重试/s);
   assert.match(app, /句子题必须包含预习词，也会组合已学词帮助记忆/);
   assert.match(app, /model\.previewPractice/);
   assert.match(app, /previewPracticeTasksForMode/);
@@ -274,31 +274,43 @@ test("preview sentence documentation states the learned-word and retry rules", (
   const usage = read("使用说明.md");
   assert.match(api, /POST \| `\/api\/preview\/practice\/sentences`/);
   assert.match(api, /可以组合已经正式学过的单词/);
-  assert.match(api, /retryAfterMs: 3600000/);
+  assert.match(api, /retryAfterMs: 300000/);
   assert.match(usage, /每句都必须带上对应的预习词，同时可以把已经学过的老单词放进句子里/);
 });
 
-test("review sentence variants do not use a local fallback and schedule hourly retry", () => {
+test("review sentence variants run in the background, repair partial failures, and retry after five minutes", () => {
   const app = read("app.js");
   const html = read("index.html");
   const css = read("styles.css");
   const server = read("server.js");
-  assert.match(app, /const REVIEW_VARIANT_RETRY_MS = 60 \* 60 \* 1000/);
+  const aiGrader = read("server/ai-grader.js");
+  assert.match(app, /const REVIEW_VARIANT_RETRY_MS = 5 \* 60 \* 1000/);
+  assert.match(app, /const REVIEW_VARIANT_POLL_MS = 2000/);
   assert.match(app, /function scheduleReviewVariantRetry\(session, key\)/);
+  assert.match(app, /async function waitForReviewVariantJob\(data, key\)/);
+  assert.match(app, /sentence-variants\?jobId=/);
   assert.match(html, /id="reviewVariantRetryButton"/);
   assert.match(app, /async function retryReviewSentenceVariants\(\)/);
   assert.match(app, /prepareReviewSentenceVariants\(session, true\)/);
   assert.match(app, /reviewVariantRetryButton.*retryReviewSentenceVariants/s);
-  assert.match(app, /model: settings\.model, reasoningEffort: settings\.reasoningEffort/);
+  assert.match(app, /model: settings\.model, reasoningEffort: settings\.reasoningEffort, force: Boolean\(force\)/);
   assert.match(css, /\.review-variant-retry\s*\{/);
-  assert.match(app, /AI 暂不可用，将每小时自动重试/);
+  assert.match(app, /AI 暂不可用，将每 5 分钟自动重试/);
   assert.match(app, /if \(data\.source !== "ai"\)/);
-  assert.match(server, /retryAfterMs: 60 \* 60 \* 1000/);
-  assert.match(server, /AI 变式暂时不可用，将每小时自动重试/);
+  assert.match(server, /const AI_SENTENCE_RETRY_MS = 5 \* 60 \* 1000/);
+  assert.match(server, /const REVIEW_VARIANT_MAX_REPAIR_ROUNDS = 3/);
+  assert.match(server, /generateReviewVariantsWithRepairs/);
+  assert.match(server, /validateReviewVariantCandidate/);
+  assert.match(server, /pending = failures\.map/);
+  assert.match(server, /status: remainingFailures\.length \? "needs-attention" : "completed"/);
+  assert.match(app, /if \(data\.autoRetry === false\) cancelReviewVariantRetry\(key\)/);
+  assert.match(server, /status: "pending", jobId: job\.id/);
+  assert.match(server, /AI 变式暂时不可用，将每 5 分钟自动重试/);
   assert.match(server, /const requestedEffort = AI_EFFORTS\.includes\(body\.reasoningEffort\)/);
   assert.doesNotMatch(server, /const route = selectAiCandidates\(aiSettings, \{ model: requestedModel, reasoningEffort: "low" \}\)/);
-  assert.match(server, /AI 句子变式请求超时，将每小时自动重试/);
+  assert.match(server, /连续 3 轮未通过校验/);
   assert.match(server, /reasonCode: failure\.reasonCode/);
+  assert.match(aiGrader, /disableTimeout: true/);
   assert.doesNotMatch(server, /using local fallback/);
   assert.doesNotMatch(app, /已使用本地自然变式/);
 });
@@ -330,7 +342,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 40", () => {
+test("PWA client assets consistently use the displayed cache version 41", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -341,8 +353,8 @@ test("PWA client assets consistently use the displayed cache version 40", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "40");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v40"/);
+  assert.equal(displayedVersion[1], "41");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v41"/);
 });
 
 test("daily study plan explains six guided stages and records sixty minutes across web and learning-window work", () => {
@@ -368,6 +380,6 @@ test("daily study plan explains six guided stages and records sixty minutes acro
   assert.match(app, /STUDY_TIME_IDLE_TIMEOUT_MS = 5 \* 60 \* 1000/);
   assert.match(app, /document\.hidden/);
   assert.match(app, /model\.studyTime/);
-  assert.match(html, /study-time\.js\?v=40/);
-  assert.match(serviceWorker, /study-time\.js\?v=40/);
+  assert.match(html, /study-time\.js\?v=41/);
+  assert.match(serviceWorker, /study-time\.js\?v=41/);
 });

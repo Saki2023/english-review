@@ -30,6 +30,13 @@ test("AI variant validation rejects an unlearned word or a changed sentence fami
   const base = data.sentences.find(item => item.id === "d2-s3");
   assert.equal(variants.sanitizeGeneratedSentenceVariant(content, base, { english: "A dog sat on a mat.", chinese: "一只狗坐在垫子上。" }), null);
   assert.equal(variants.sanitizeGeneratedSentenceVariant(content, base, { english: "It is a cat.", chinese: "它是一只猫。" }), null);
+  const unlearned = variants.validateGeneratedSentenceVariant(content, base, { english: "A dog sat on a mat.", chinese: "一只狗坐在垫子上。" });
+  assert.equal(unlearned.valid, false);
+  assert.equal(unlearned.reasonCode, "unlearned-word");
+  assert.deepEqual(unlearned.unlearnedWords, ["dog"]);
+  const wrongFamily = variants.validateGeneratedSentenceVariant(content, base, { english: "It is a cat.", chinese: "它是一只猫。" });
+  assert.equal(wrongFamily.valid, false);
+  assert.equal(wrongFamily.reasonCode, "wrong-family");
   const accepted = variants.sanitizeGeneratedSentenceVariant(content, base, { english: "A pig sat on a box.", chinese: "一头猪坐在一个箱子上。", acceptedChinese: ["一只猪坐在箱子上"] });
   assert.ok(accepted);
   assert.equal(accepted.acceptedEnglish[0], "a pig sat on a box");

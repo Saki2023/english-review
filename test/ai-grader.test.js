@@ -55,6 +55,25 @@ async function waitForHealth(url, child) {
   throw new Error("server did not become healthy");
 }
 
+async function requestReviewVariants(baseUrl, cookie, input) {
+  let response = await fetch(`${baseUrl}/api/review/sentence-variants`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Cookie": cookie },
+    body: JSON.stringify(input)
+  });
+  const startStatus = response.status;
+  let body = await response.json();
+  for (let attempt = 0; response.status === 202 && attempt < 100; attempt += 1) {
+    assert.equal(body.status, "pending");
+    assert.ok(body.jobId);
+    await new Promise(resolve => setTimeout(resolve, 25));
+    response = await fetch(`${baseUrl}/api/review/sentence-variants?jobId=${encodeURIComponent(body.jobId)}`, { headers: { "Cookie": cookie } });
+    body = await response.json();
+  }
+  if (response.status === 202) throw new Error("review variant background job did not finish");
+  return { response, body, startStatus };
+}
+
 test("AI configuration builds OpenAI-compatible chat, responses, and model endpoints", () => {
   assert.equal(buildChatCompletionsUrl("https://sub2api.example/v1"), "https://sub2api.example/v1/chat/completions");
   assert.equal(buildChatCompletionsUrl("https://sub2api.example"), "https://sub2api.example/v1/chat/completions");
@@ -201,6 +220,30 @@ test("AI review variant parser keeps task ids and Chinese answer alternatives", 
   assert.deepEqual(result[0], { taskId: "d2-s3:en-zh", english: "A pig sat on a box.", chinese: "一头猪坐在一个箱子上。", acceptedChinese: ["一头猪坐在一个箱子上。", "一只猪坐在箱子上"] });
 });
 
+test("AI review variant repair requests include validation feedback and do not use the fixed provider timeout", async () => {
+  let requestOptions;
+  const generator = createAiReviewVariantGenerator(aiConfig({ timeoutMs: 1 }), { fetchImpl: async (_url, options) => {
+    requestOptions = options;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ variants: [
+      { taskId: "d2-s3:en-zh", english: "A red pig sat on a box.", chinese: "一头红色的猪坐在一个箱子上。" }
+    ] }) } }] }), { status: 200 });
+  } });
+  const result = await generator.generate({
+    allowedWords: ["a", "red", "pig", "sat", "on", "box"],
+    grammarFamilies: { "sat-on": "subject + sat on + an object" },
+    targets: [{ taskId: "d2-s3:en-zh", grammarFamily: "sat-on", sourceEnglish: "A pig sat on a mat.", sourceChinese: "一头猪坐在一张垫子上。" }],
+    excludedEnglish: ["A pig sat on a mat."],
+    weakItems: [],
+    validationFeedback: [{ taskId: "d2-s3:en-zh", reasonCode: "unlearned-word", problem: "含有未学单词", unlearnedWords: ["dog"] }]
+  });
+  assert.equal(result[0].english, "A red pig sat on a box.");
+  assert.equal(Object.hasOwn(requestOptions, "signal"), false, "review generation must continue without the provider timeout abort signal");
+  const requestBody = JSON.parse(requestOptions.body);
+  const input = JSON.parse(requestBody.messages[1].content);
+  assert.equal(input.validationFeedback[0].reasonCode, "unlearned-word");
+  assert.match(requestBody.messages[0].content, /correct every listed failure/);
+});
+
 test("AI preview sentence parser keeps target preview words and translations", async () => {
   const payload = { choices: [{ message: { content: JSON.stringify({ sentences: [
     { wordId: "d5-sun", english: "I see the sun.", chinese: "我看见太阳。", acceptedChinese: ["我看到太阳"] }
@@ -283,13 +326,17 @@ test("admin configures AI on the web and progress-based questions use the select
       let content;
       if (system.includes("Create fresh sentence-review variants")) {
         const request = JSON.parse(body.messages[1].content);
-        const target = request.targets[0];
-        content = JSON.stringify({ variants: [{
-          taskId: target.taskId,
-          english: "It is a hot box.",
-          chinese: "它是一个热箱子。",
-          acceptedChinese: ["它是一个热箱子"]
-        }] });
+        const repairing = new Set((request.validationFeedback || []).map(item => item.taskId));
+        content = JSON.stringify({ variants: request.targets.map(target => target.taskId === "d2-s3:en-zh"
+          ? repairing.has(target.taskId)
+            ? { taskId: target.taskId, english: "A red pig sat on a box.", chinese: "一头红色的猪坐在一个箱子上。" }
+            : { taskId: target.taskId, english: "A dog sat on a mat.", chinese: "一只狗坐在一张垫子上。" }
+          : {
+              taskId: target.taskId,
+              english: "It is a hot box.",
+              chinese: "它是一个热箱子。",
+              acceptedChinese: ["它是一个热箱子"]
+            }) });
       } else if (system.includes("Create personalized translation exercises")) {
         content = JSON.stringify({ questions: [
           { direction: "en-zh", english: "It is big.", chinese: "\u5b83\u5f88\u5927\u3002", acceptedEnglish: ["it is big"], acceptedChinese: ["\u5b83\u5f88\u5927"], focus: "big" },
@@ -530,13 +577,9 @@ test("admin configures AI on the web and progress-based questions use the select
 
     const reviewEfforts = ["low", "medium", "high", "xhigh", "max"];
     for (const reasoningEffort of reviewEfforts) {
-      const reviewVariants = await fetch(`${baseUrl}/api/review/sentence-variants`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Cookie": cookie },
-        body: JSON.stringify({ taskIds: ["d4-s5:en-zh"], model: "strong-model", reasoningEffort })
-      });
+      const { response: reviewVariants, body: reviewBody, startStatus } = await requestReviewVariants(baseUrl, cookie, { taskIds: ["d4-s5:en-zh"], model: "strong-model", reasoningEffort });
+      assert.equal(startStatus, 202);
       assert.equal(reviewVariants.status, 200);
-      const reviewBody = await reviewVariants.json();
       assert.equal(reviewBody.source, "ai");
       assert.equal(reviewBody.reasoningEffort, reasoningEffort);
       assert.equal(reviewBody.variants[0].english, "It is a hot box.");
@@ -544,6 +587,39 @@ test("admin configures AI on the web and progress-based questions use the select
       assert.equal(reviewRequest.body.model, "strong-model");
       assert.equal(reviewRequest.body.reasoning_effort, reasoningEffort);
     }
+
+    const repairStart = providerRequests.length;
+    const repairedReview = await requestReviewVariants(baseUrl, cookie, {
+      taskIds: ["d4-s5:en-zh", "d2-s3:en-zh"],
+      model: "strong-model",
+      reasoningEffort: "max"
+    });
+    assert.equal(repairedReview.startStatus, 202);
+    assert.equal(repairedReview.response.status, 200);
+    assert.equal(repairedReview.body.status, "completed");
+    assert.equal(repairedReview.body.repairRounds, 2);
+    assert.deepEqual(repairedReview.body.variants.map(item => item.taskId), ["d4-s5:en-zh", "d2-s3:en-zh"]);
+    const repairRequests = providerRequests.slice(repairStart).map(item => JSON.parse(item.body.messages[1].content));
+    assert.deepEqual(repairRequests.map(item => item.targets.map(target => target.taskId)), [
+      ["d4-s5:en-zh", "d2-s3:en-zh"],
+      ["d2-s3:en-zh"]
+    ]);
+    assert.equal(repairRequests[1].validationFeedback[0].reasonCode, "unlearned-word");
+
+    const rejectedStart = providerRequests.length;
+    const rejectedReview = await requestReviewVariants(baseUrl, cookie, {
+      taskIds: ["d2-s2:en-zh"],
+      model: "strong-model",
+      reasoningEffort: "max"
+    });
+    assert.equal(rejectedReview.response.status, 200);
+    assert.equal(rejectedReview.body.status, "needs-attention");
+    assert.equal(rejectedReview.body.repairRounds, 3);
+    assert.equal(rejectedReview.body.autoRetry, false);
+    assert.equal(rejectedReview.body.retryAfterMs, 0);
+    assert.equal(rejectedReview.body.variants.length, 0);
+    assert.equal(rejectedReview.body.failures[0].reasonCode, "wrong-family");
+    assert.equal(providerRequests.slice(rejectedStart).length, 3, "content repair must stop after three rounds");
 
     const memberLogin = await fetch(`${baseUrl}/api/auth/login`, {
       method: "POST",

@@ -144,24 +144,32 @@
     return Array.from(String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()).slice(0, maximum).join("");
   }
 
-  function sanitizeGeneratedSentenceVariant(content, baseItem, value, excludedEnglish = []) {
-    if (!value || typeof value !== "object") return null;
+  function invalidGeneratedVariant(reasonCode, details = {}) {
+    return { valid: false, reasonCode, variant: null, ...details };
+  }
+
+  function validateGeneratedSentenceVariant(content, baseItem, value) {
+    if (!value || typeof value !== "object") return invalidGeneratedVariant("invalid-object");
     const english = cleanText(value.english, 180);
     const chinese = cleanText(value.chinese, 180);
     const family = sentenceFamily(baseItem);
-    if (!english || !chinese || !family || sentenceFamily({ english }) !== family) return null;
+    if (!english) return invalidGeneratedVariant("missing-english");
+    if (!chinese) return invalidGeneratedVariant("missing-chinese", { english });
+    if (!family) return invalidGeneratedVariant("unsupported-source-family", { english });
+    const generatedFamily = sentenceFamily({ english });
+    if (generatedFamily !== family) return invalidGeneratedVariant("wrong-family", { english, expectedFamily: family, actualFamily: generatedFamily });
     const known = knownWordSet(content);
     const tokens = englishTokens(english);
-    if (!tokens.length || tokens.some(token => !known.has(token))) return null;
+    if (!tokens.length) return invalidGeneratedVariant("no-english-words", { english });
+    const unlearnedWords = Array.from(new Set(tokens.filter(token => !known.has(token))));
+    if (unlearnedWords.length) return invalidGeneratedVariant("unlearned-word", { english, unlearnedWords });
     const normalized = normalizeEnglish(english);
-    const excluded = new Set([normalizeEnglish(baseItem && baseItem.english), ...(Array.isArray(excludedEnglish) ? excludedEnglish : []).map(normalizeEnglish)].filter(Boolean));
-    if (excluded.has(normalized)) return null;
     const acceptedChinese = [];
     [chinese, ...(Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [])].forEach(answer => {
       const text = cleanText(answer, 180);
       if (text && !acceptedChinese.includes(text) && acceptedChinese.length < 8) acceptedChinese.push(text);
     });
-    return {
+    return { valid: true, reasonCode: "ok", english, normalizedEnglish: normalized, unlearnedWords: [], variant: {
       id: generatedVariantId(family, english),
       family,
       english,
@@ -169,7 +177,15 @@
       acceptedEnglish: [normalized],
       acceptedChinese,
       requiredWords: Array.from(new Set(tokens))
-    };
+    } };
+  }
+
+  function sanitizeGeneratedSentenceVariant(content, baseItem, value, excludedEnglish = []) {
+    const validation = validateGeneratedSentenceVariant(content, baseItem, value);
+    if (!validation.valid) return null;
+    const excluded = new Set([normalizeEnglish(baseItem && baseItem.english), ...(Array.isArray(excludedEnglish) ? excludedEnglish : []).map(normalizeEnglish)].filter(Boolean));
+    if (excluded.has(validation.normalizedEnglish)) return null;
+    return validation.variant;
   }
 
   function chooseSentenceVariant(content, baseItem, seed, excludedIds = []) {
@@ -198,6 +214,7 @@
     normalizeEnglish,
     sanitizeGeneratedSentenceVariant,
     sentenceFamily,
-    sentenceVariantById
+    sentenceVariantById,
+    validateGeneratedSentenceVariant
   };
 });
