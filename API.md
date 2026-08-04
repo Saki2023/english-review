@@ -53,7 +53,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | GET | `/api/preview/words` | 获取当前课程紧邻下一天的未学预习词，需要登录 |
 | POST | `/api/preview/practice/sentences` | 按当前预习词生成预习句子练习，需要登录及已配置的 AI |
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
-| POST | `/api/review/sentence-variants` | 为今日复习生成已学范围内的 AI 句子变式，需要登录；AI 不可用时返回待重试错误 |
+| POST | `/api/review/sentence-variants` | 为今日复习生成已学范围内的 AI 句子变式，需要登录；AI 不可用时返回待重试错误，前端保留每小时自动重试并提供手动立即重试 |
 | GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
 | POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录及当前试卷接口版本头，返回 `202` |
 | PUT | `/api/ai/exams/current` | 保存当前试卷草稿答案，需要登录 |

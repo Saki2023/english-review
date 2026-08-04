@@ -4055,6 +4055,22 @@
     return reviewVariantForTask(currentBaseTask());
   }
 
+  function reviewVariantRetryUi(session, visible) {
+    const actions = $("#reviewVariantRetryActions");
+    const button = $("#reviewVariantRetryButton");
+    const label = $("#reviewVariantRetryLabel");
+    const note = $("#reviewVariantRetryNote");
+    if (!actions || !button || !label || !note) return;
+    actions.hidden = !visible;
+    if (!visible) return;
+    const key = session ? reviewVariantBatchKey(session) : "";
+    const busy = Boolean(key && reviewVariantPreparation && reviewVariantPreparation.key === key);
+    button.disabled = busy;
+    button.setAttribute("aria-busy", String(busy));
+    label.textContent = busy ? "正在请求…" : "立即重试";
+    note.textContent = busy ? "正在请求 AI，请稍候；自动重试仍会每小时进行一次。" : "AI 暂不可用时可立即再试；自动重试仍会每小时进行一次。";
+  }
+
   function sentenceTasksMissingVariants(session) {
     return session.taskIds.map(taskId => taskById.get(taskId)).filter(task => task && task.item.type === "sentence" && !session.variants[task.taskId]);
   }
@@ -4084,9 +4100,12 @@
         ensureBatch();
         return;
       }
-      reviewVariantStatusMessage = "AI 正在重试句子变式…";
+      const promise = prepareReviewSentenceVariants(current, true);
+      if (reviewVariantPreparation && reviewVariantPreparation.key === key) {
+        reviewVariantStatusMessage = "AI 正在自动重试句子变式…";
+      }
       if (activeView === "home") renderHome();
-      await prepareReviewSentenceVariants(current, true);
+      await promise;
     }, REVIEW_VARIANT_RETRY_MS);
   }
 
@@ -4144,6 +4163,20 @@
     })();
     reviewVariantPreparation = { key, promise };
     return promise;
+  }
+
+  async function retryReviewSentenceVariants() {
+    const session = getSession();
+    const task = currentBaseTask();
+    if (!session || !task || task.item.type !== "sentence" || session.variants[task.taskId]) return;
+    const key = reviewVariantBatchKey(session);
+    if (reviewVariantPreparation && reviewVariantPreparation.key === key) return;
+    const promise = prepareReviewSentenceVariants(session, true);
+    if (reviewVariantPreparation && reviewVariantPreparation.key === key) {
+      reviewVariantStatusMessage = "AI 正在手动重试句子变式…";
+    }
+    renderHome();
+    if (promise && typeof promise.then === "function") await promise;
   }
 
   function ensureBatch() {
@@ -4223,6 +4256,7 @@
     const panel = $("#reviewPanel"); const complete = $("#reviewComplete");
     if (!task) {
       panel.hidden = true; complete.hidden = false;
+      reviewVariantRetryUi(session, false);
       const remaining = taskCandidates(reviewMode, new Set(session.doneTaskIds)).length;
       const currentPlanStage = currentStudyPlan().currentStage;
       const guidedStageActive = Boolean(currentPlanStage && ["review", "correction"].includes(currentPlanStage.id));
@@ -4237,6 +4271,7 @@
     }
     panel.hidden = false; complete.hidden = true;
     if (baseTask.item.type === "sentence" && !session.variants[baseTask.taskId]) {
+      reviewVariantRetryUi(session, true);
       $("#promptType").textContent = "句子变式";
       $("#promptDay").textContent = `第 ${baseTask.item.day} 天 · 正在准备`;
       $("#questionCount").textContent = `${session.index + 1} / ${session.taskIds.length}`;
@@ -4254,6 +4289,7 @@
       $("#feedbackActions").hidden = true;
       return;
     }
+    reviewVariantRetryUi(session, false);
     $("#promptType").textContent = task.item.type === "word" ? "单词" : "句子变式";
     $("#promptDay").textContent = `第 ${task.item.day} 天`;
     $("#questionCount").textContent = `${session.index + 1} / ${session.taskIds.length}`;
@@ -5008,6 +5044,7 @@
     });
     $("#testAiConfigButton").addEventListener("click", testAiConfiguration);
     $("#answerForm").addEventListener("submit", submitAnswer);
+    $("#reviewVariantRetryButton").addEventListener("click", retryReviewSentenceVariants);
     $("#nextButton").addEventListener("click", () => advance(false));
     $("#retryButton").addEventListener("click", () => advance(true));
     $("#moreReviewButton").addEventListener("click", () => {
@@ -5024,7 +5061,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=38", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=39", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
