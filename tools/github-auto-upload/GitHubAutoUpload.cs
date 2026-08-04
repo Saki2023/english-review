@@ -45,7 +45,6 @@ namespace EnglishReviewGitHubUpload
             header.Height = 104;
             header.Padding = new Padding(24, 18, 24, 12);
             header.BackColor = Color.FromArgb(236, 247, 244);
-            Controls.Add(header);
 
             Label title = new Label();
             title.Text = "GitHub 自动上传";
@@ -65,7 +64,6 @@ namespace EnglishReviewGitHubUpload
             footer.Dock = DockStyle.Bottom;
             footer.Height = 58;
             footer.Padding = new Padding(20, 10, 20, 10);
-            Controls.Add(footer);
 
             closeButton = new Button();
             closeButton.Text = "关闭";
@@ -86,7 +84,6 @@ namespace EnglishReviewGitHubUpload
             Panel content = new Panel();
             content.Dock = DockStyle.Fill;
             content.Padding = new Padding(20, 18, 20, 12);
-            Controls.Add(content);
 
             logBox = new TextBox();
             logBox.Dock = DockStyle.Fill;
@@ -97,6 +94,12 @@ namespace EnglishReviewGitHubUpload
             logBox.BorderStyle = BorderStyle.FixedSingle;
             logBox.Font = new Font("Consolas", 10F, FontStyle.Regular, GraphicsUnit.Point);
             content.Controls.Add(logBox);
+
+            // WinForms applies Dock in reverse Z order. Add Fill first so the
+            // header and footer reserve their rows before content fills the rest.
+            Controls.Add(content);
+            Controls.Add(footer);
+            Controls.Add(header);
 
             Shown += async delegate
             {

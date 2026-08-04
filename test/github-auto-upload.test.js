@@ -18,6 +18,14 @@ test("GitHub auto upload executable only pushes committed main-branch content", 
   assert.doesNotMatch(source, /netsh|Set-DnsClient|New-NetRoute|HTTP_PROXY|HTTPS_PROXY|ProxyEnable/i);
 });
 
+test("GitHub auto upload window keeps the log between its header and footer", () => {
+  const contentIndex = source.indexOf("Controls.Add(content);");
+  const footerIndex = source.indexOf("Controls.Add(footer);");
+  const headerIndex = source.indexOf("Controls.Add(header);");
+  assert.ok(contentIndex >= 0 && footerIndex >= 0 && headerIndex >= 0);
+  assert.ok(contentIndex < footerIndex && footerIndex < headerIndex, "DockStyle.Fill must be added before the edge-docked panels");
+});
+
 test("GitHub auto upload build emits a WinForms executable outside the repository", () => {
   assert.match(build, /target:winexe/);
   assert.match(build, /0x81EA[\s\S]*0x52A8[\s\S]*0x4E0A[\s\S]*0x4F20/);
