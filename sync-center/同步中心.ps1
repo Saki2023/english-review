@@ -135,6 +135,7 @@ function Read-WebsiteSummary {
     return [ordered]@{
       courseDay = Get-NumberValue $course "currentDay"
       courseWords = Get-NumberValue $course "words"
+      coursePreviewWords = Get-NumberValue $course "previewWords"
       courseSentences = Get-NumberValue $course "sentences"
       courseNotes = Get-NumberValue $course "notes"
       aiQuestions = Get-NumberValue $summary "aiQuestions"
@@ -193,9 +194,17 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly) {
   $snapshot = Get-InputSnapshot
   if ($PreviewOnly) {
     $report = [ordered]@{
-      schemaVersion = 1
+      schemaVersion = 2
       mode = "dry-run"
       success = $true
+      partialSuccess = $false
+      uploadAttempted = $false
+      uploadSuccess = $null
+      downloadAttempted = $false
+      downloadSuccess = $false
+      compatibilityTransportUsed = $false
+      errorCategory = ""
+      errors = @()
       startedAt = $started.ToString("o")
       finishedAt = (Get-Date).ToString("o")
       preparedFiles = @($snapshot.documents | Where-Object { $_.exists } | ForEach-Object { $_.path })
@@ -210,51 +219,92 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly) {
     return $report
   }
 
-  $stdoutPath = Join-Path $env:TEMP ("english-review-sync-" + [guid]::NewGuid().ToString("N") + ".out")
-  $stderrPath = Join-Path $env:TEMP ("english-review-sync-" + [guid]::NewGuid().ToString("N") + ".err")
+  $statusPath = Join-Path $env:TEMP ("english-review-sync-" + [guid]::NewGuid().ToString("N") + ".status.json")
   $stdoutLines = @()
   $stderrLines = @()
+  $syncStatus = $null
   $exitCode = 1
   try {
-    $powerShell = Resolve-PowerShellExecutable
-    $process = Start-Process -FilePath $powerShell -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $syncScript) -WorkingDirectory $workspaceRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru -Wait
-    $exitCode = $process.ExitCode
-    if (Test-Path -LiteralPath $stdoutPath) { $stdoutLines = @(Get-Content -LiteralPath $stdoutPath -Encoding UTF8) }
-    if (Test-Path -LiteralPath $stderrPath) { $stderrLines = @(Get-Content -LiteralPath $stderrPath -Encoding UTF8) }
+    $records = @(& $syncScript -StatusPath $statusPath -NoExitOnFailure *>&1)
+    foreach ($record in $records) {
+      $line = Redact-SensitiveText ([string]$record)
+      if (-not $line) { continue }
+      if ($record -is [System.Management.Automation.ErrorRecord]) { $stderrLines += $line }
+      else { $stdoutLines += $line }
+    }
+    if (Test-Path -LiteralPath $statusPath) {
+      try { $syncStatus = Get-Content -Raw -Encoding UTF8 -LiteralPath $statusPath | ConvertFrom-Json } catch { $syncStatus = $null }
+    }
+    $exitCode = if ($syncStatus -and [bool](Get-ObjectValue $syncStatus "success" $false)) { 0 } else { 1 }
   } catch {
     $stderrLines = @((Redact-SensitiveText $_.Exception.Message))
   } finally {
-    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $statusPath -Force -ErrorAction SilentlyContinue
   }
 
   $configState = Get-ConfigState
   $profilePath = Join-Path $sharedDirectory "网站学习档案.json"
   $profileAvailable = Test-Path -LiteralPath $profilePath
-  $uploaded = ($exitCode -eq 0 -and $configState.hasWriteToken)
+  $uploadAttempted = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "uploadAttempted" $configState.hasWriteToken) } else { [bool]$configState.hasWriteToken }
+  $uploadSucceeded = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "uploadSuccess" $false) } else { ($exitCode -eq 0 -and $configState.hasWriteToken) }
+  $teachingUploadSucceeded = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "teachingUploadSuccess" $false) } else { $uploadSucceeded }
+  $courseUploadSucceeded = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "courseUploadSuccess" $false) } else { $uploadSucceeded }
+  $downloadAttempted = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "downloadAttempted" $false) } else { $true }
+  $downloadSucceeded = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "downloadSuccess" $false) } else { ($exitCode -eq 0 -and $profileAvailable) }
+  $compatibilityTransportUsed = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "compatibilityTransportUsed" $false) } else { $false }
   $preparedFiles = @($snapshot.documents | Where-Object { $_.exists } | ForEach-Object { $_.path })
   $uploadedFiles = @()
-  if ($uploaded) { $uploadedFiles = $preparedFiles }
+  if ($teachingUploadSucceeded) {
+    $uploadedFiles += @($snapshot.documents | Where-Object { $_.exists -and $_.kind -ne "网站课程内容" } | ForEach-Object { $_.path })
+  }
+  if ($courseUploadSucceeded) {
+    $uploadedFiles += @($snapshot.documents | Where-Object { $_.exists -and $_.kind -eq "网站课程内容" } | ForEach-Object { $_.path })
+  }
+  $uploadedFiles = @($uploadedFiles | Select-Object -Unique)
   $previewFiles = @()
-  if ($uploaded) { $previewFiles = @($snapshot.documents | Where-Object { $_.exists -and $_.kind -eq "每日预习" } | ForEach-Object { $_.path }) }
+  if ($teachingUploadSucceeded) { $previewFiles = @($snapshot.documents | Where-Object { $_.exists -and $_.kind -eq "每日预习" } | ForEach-Object { $_.path }) }
   $downloadedFiles = @()
-  if ($exitCode -eq 0 -and $profileAvailable) { $downloadedFiles = @("学习同步\网站学习档案.json") }
+  if ($downloadSucceeded -and $profileAvailable) { $downloadedFiles = @("学习同步\网站学习档案.json") }
+  $errors = @()
+  if ($syncStatus) { $errors = @((Get-ObjectValue $syncStatus "errors" @())) }
+  $errorCategories = @($errors | ForEach-Object { Redact-SensitiveText ([string](Get-ObjectValue $_ "category" "unknown")) } | Where-Object { $_ } | Select-Object -Unique)
   $errorText = ""
-  if ($exitCode -ne 0) {
+  if ($errors.Count -gt 0) {
+    $errorText = @($errors | ForEach-Object {
+      $phase = Redact-SensitiveText ([string](Get-ObjectValue $_ "phase" "sync"))
+      $message = Redact-SensitiveText ([string](Get-ObjectValue $_ "message" "同步阶段失败。"))
+      "$phase：$message"
+    } | Select-Object -Unique) -join "；"
+  } elseif ($exitCode -ne 0) {
     $errorText = Redact-SensitiveText (($stderrLines + $stdoutLines | Where-Object { $_ } | Select-Object -Last 1) -join "")
     if (-not $errorText) { $errorText = "同步脚本返回错误代码 $exitCode。" }
   }
   $messages = @(Get-OutputMessages ($stdoutLines + $stderrLines))
   $websiteSummary = Read-WebsiteSummary
-  if ($uploaded) { $messages += "本地教学档案已上传到网站。" }
+  if ($uploadSucceeded) { $messages += "本地教学档案和课程内容已上传到网站。" }
   if ($previewFiles.Count -gt 0) { $messages += "每日预习已同步：$($previewFiles[-1])（共 $($previewFiles.Count) 份）" }
-  if ($uploaded -and $websiteSummary -and ($preparedFiles -contains "学习同步\网站课程内容.json")) {
-    $messages += "网站课程已同步：第 $($websiteSummary.courseDay) 天，$($websiteSummary.courseWords) 个单词、$($websiteSummary.courseSentences) 个句子、$($websiteSummary.courseNotes) 份笔记。"
+  if ($courseUploadSucceeded -and $websiteSummary -and ($preparedFiles -contains "学习同步\网站课程内容.json")) {
+    $messages += "网站课程已同步：第 $($websiteSummary.courseDay) 天，$($websiteSummary.courseWords) 个正式单词、$($websiteSummary.coursePreviewWords) 个预习单词、$($websiteSummary.courseSentences) 个句子、$($websiteSummary.courseNotes) 份笔记。"
   }
   if ($downloadedFiles.Count -gt 0) { $messages += "网站学习档案已下载到本地。" }
+  if ($compatibilityTransportUsed) { $messages += "Windows PowerShell 网络通道异常，本次已自动使用兼容 HTTPS 通道。" }
+  if (-not $uploadSucceeded -and $downloadSucceeded -and $uploadAttempted) { $messages += "上传失败，但网站学习档案已成功下载并刷新。" }
+  $overallSuccess = ($downloadSucceeded -and (-not $uploadAttempted -or $uploadSucceeded))
+  $partialSuccess = (($downloadSucceeded -and $uploadAttempted -and -not $uploadSucceeded) -or ($uploadSucceeded -and -not $downloadSucceeded))
   $report = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     mode = "sync"
-    success = ($exitCode -eq 0 -and $profileAvailable)
+    success = $overallSuccess
+    partialSuccess = $partialSuccess
+    uploadAttempted = $uploadAttempted
+    uploadSuccess = if ($uploadAttempted) { $uploadSucceeded } else { $null }
+    teachingUploadSuccess = if ($uploadAttempted) { $teachingUploadSucceeded } else { $null }
+    courseUploadSuccess = if ($uploadAttempted) { $courseUploadSucceeded } else { $null }
+    downloadAttempted = $downloadAttempted
+    downloadSuccess = $downloadSucceeded
+    compatibilityTransportUsed = $compatibilityTransportUsed
+    errorCategory = ($errorCategories -join ",")
+    errors = $errors
     startedAt = $started.ToString("o")
     finishedAt = (Get-Date).ToString("o")
     preparedFiles = $preparedFiles
@@ -309,8 +359,19 @@ function Get-ReportText($Report) {
   if ($null -eq $Report) { return "还没有同步记录。点击立即同步开始。" }
   $lines = @()
   $status = if ([bool]$Report.success) { "成功" } else { "失败" }
+  if ([bool](Get-ObjectValue $Report "partialSuccess" $false)) { $status = "部分成功" }
   if ($Report.mode -eq "dry-run") { $status = "预览" }
   $lines += "状态：$status"
+  if ($Report.mode -ne "dry-run") {
+    $uploadAttempted = [bool](Get-ObjectValue $Report "uploadAttempted" $false)
+    $uploadState = if (-not $uploadAttempted) { "未配置写入令牌，本次跳过" } elseif ([bool](Get-ObjectValue $Report "uploadSuccess" $false)) { "成功" } else { "失败" }
+    $downloadState = if ([bool](Get-ObjectValue $Report "downloadSuccess" $false)) { "成功，已刷新本地网站学习档案" } else { "失败，本地旧快照已保留" }
+    $lines += "上传阶段：$uploadState"
+    $lines += "下载阶段：$downloadState"
+    if ([bool](Get-ObjectValue $Report "compatibilityTransportUsed" $false)) { $lines += "网络通道：已自动使用兼容 HTTPS 通道" }
+    $category = Redact-SensitiveText ([string](Get-ObjectValue $Report "errorCategory" ""))
+    if ($category) { $lines += "错误类别：$category" }
+  }
   $lines += "开始：$($Report.startedAt)"
   $lines += "完成：$($Report.finishedAt)"
   $lines += ""
@@ -326,11 +387,12 @@ function Get-ReportText($Report) {
   if (@($Report.downloadedFiles).Count -eq 0) { $lines += "  （没有生成网站学习档案）" }
   else { foreach ($item in @($Report.downloadedFiles)) { $lines += "  · $item" } }
   $lines += ""
-  $lines += "网站学习统计："
+  $downloadIsFresh = [bool](Get-ObjectValue $Report "downloadSuccess" $false)
+  $lines += if ($downloadIsFresh) { "本次下载的网站学习统计：" } else { "本地旧快照统计（本次未刷新）：" }
   $summary = $Report.summary
   if ($null -eq $summary) { $lines += "  （暂无可读取的学习档案统计）" }
   else {
-    $lines += "  · 课程：第 $($summary.courseDay) 天，$($summary.courseWords) 个单词、$($summary.courseSentences) 个句子、$($summary.courseNotes) 份笔记"
+    $lines += "  · 课程：第 $($summary.courseDay) 天，$($summary.courseWords) 个正式单词、$($summary.coursePreviewWords) 个预习单词、$($summary.courseSentences) 个句子、$($summary.courseNotes) 份笔记"
     $lines += "  · AI 做题：$($summary.aiQuestions) 题，正确 $($summary.aiCorrect) 题，正确率 $($summary.aiAccuracy)%"
     $lines += "  · AI 问答：$($summary.tutorQuestions) 次"
     $lines += "  · 试卷：$($summary.exams) 份"
@@ -484,6 +546,7 @@ function Show-SyncCenter {
     $script:historyList.Items.Clear()
     foreach ($report in $script:historyReports) {
       $state = if ([bool]$report.success) { "成功" } else { "失败" }
+      if ([bool](Get-ObjectValue $report "partialSuccess" $false)) { $state = "部分成功" }
       if ($report.mode -eq "dry-run") { $state = "预览" }
       $stamp = try { ([DateTime]$report.finishedAt).ToString("MM-dd HH:mm") } catch { "未知时间" }
       [void]$script:historyList.Items.Add("$stamp · $state · 上传 $(@($report.uploadedFiles).Count) 项")
@@ -511,7 +574,9 @@ function Show-SyncCenter {
     } else {
       Refresh-HistoryList
       $latest = if ($script:historyReports.Count -gt 0) { $script:historyReports[0] } else { $null }
-      if ($latest -and -not $latest.success) {
+      if ($latest -and [bool](Get-ObjectValue $latest "partialSuccess" $false)) {
+        [System.Windows.Forms.MessageBox]::Show("同步部分成功：网站学习档案已经刷新，但另一个阶段失败。请查看右侧详情。", "同步部分成功", "OK", "Warning") | Out-Null
+      } elseif ($latest -and -not $latest.success) {
         [System.Windows.Forms.MessageBox]::Show("同步失败，请查看右侧同步详情。", "同步失败", "OK", "Warning") | Out-Null
       }
     }

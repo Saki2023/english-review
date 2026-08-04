@@ -21,6 +21,15 @@ test("daily study plan is a sequential sixty-minute curriculum", () => {
   assert.equal(DAILY_STUDY_PLAN.length, 6);
   assert.equal(DAILY_STUDY_PLAN.reduce((sum, stage) => sum + stage.minutes * 60, 0), STUDY_TIME_TARGET_SECONDS);
   assert.deepEqual(DAILY_STUDY_PLAN.filter(stage => stage.allowBackground).map(stage => stage.id), ["phonics", "pattern", "reading"]);
+  assert.deepEqual(DAILY_STUDY_PLAN.map(stage => stage.actionLabel), [
+    "直接开始做题",
+    "开始发音教学",
+    "开始句型教学",
+    "生成并开始 5 题",
+    "直接订正错题",
+    "直接开始预习题"
+  ]);
+  assert.deepEqual(DAILY_STUDY_PLAN.map(stage => stage.view), ["home", "pronunciation", "notes", "ai", "home", "preview-practice"]);
   const first = studyPlanProgress(0);
   assert.equal(first.currentStage.id, "review");
   assert.equal(first.currentStage.targetSeconds, 600);

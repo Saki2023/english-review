@@ -99,6 +99,11 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .study-plan-step-action { min-width: 104px; min-height: 36px; padding: 0 11px; }
 .study-plan-step.is-locked .study-plan-step-action { cursor: not-allowed; }
 .study-plan-rule { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; line-height: 1.55; }
+.is-study-stage-target { animation: study-stage-target 2.2s ease; outline: 3px solid transparent; outline-offset: 4px; }
+@keyframes study-stage-target {
+  0%, 35% { outline-color: rgba(31, 126, 91, .48); box-shadow: 0 0 0 7px rgba(31, 126, 91, .10); }
+  100% { outline-color: transparent; box-shadow: none; }
+}
 .study-plan-dock { display: flex; align-items: center; gap: 14px; margin: -20px 0 24px; padding: 10px 12px; border: 1px solid #b8d9ce; border-radius: 7px; background: var(--primary-soft); box-shadow: 0 7px 18px rgba(25, 53, 43, .06); }
 .study-plan-dock-home { min-width: 0; display: flex; align-items: center; gap: 9px; padding: 0; margin-right: auto; border: 0; color: var(--primary-deep); background: transparent; text-align: left; }
 .study-plan-dock-home svg { width: 18px; height: 18px; flex: 0 0 auto; }
@@ -129,6 +134,7 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .answer-form { display: flex; justify-content: center; gap: 10px; max-width: 510px; margin: 28px auto 0; }
 .answer-input { flex: 1; min-width: 0; height: 44px; padding: 0 13px; border: 1px solid var(--border); border-radius: 6px; color: var(--ink); background: #fbfdfc; text-align: left; }
 .answer-input::placeholder { color: #9aa69f; }
+.answer-input.is-invalid { border-color: var(--danger); outline: 3px solid rgba(178, 72, 72, .14); }
 .primary-button, .secondary-button, .danger-button, .text-button { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 15px; border-radius: 6px; font-size: 13px; font-weight: 500; }
 .primary-button { border: 1px solid var(--primary); color: var(--surface); background: var(--primary); }
 .primary-button:hover { border-color: var(--primary-deep); background: var(--primary-deep); }

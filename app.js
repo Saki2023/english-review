@@ -7,12 +7,12 @@
   const STUDY_TIME = window.ENGLISH_REVIEW_STUDY_TIME || {};
   const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const FALLBACK_DAILY_STUDY_PLAN = [
-    { id: "review", label: "旧知识复习", minutes: 10, view: "home", actionLabel: "开始复习" },
-    { id: "phonics", label: "拼读与词汇", minutes: 15, view: "pronunciation", actionLabel: "打开发音课", allowBackground: true },
-    { id: "pattern", label: "句子结构", minutes: 10, view: "notes", actionLabel: "打开学习笔记", allowBackground: true },
-    { id: "reading", label: "阅读与翻译", minutes: 15, view: "ai", actionLabel: "开始阅读练习", allowBackground: true },
-    { id: "correction", label: "测验与订正", minutes: 5, view: "mistakes", actionLabel: "打开错题本" },
-    { id: "preview", label: "总结与预习", minutes: 5, view: "preview-words", actionLabel: "打开预习" }
+    { id: "review", label: "旧知识复习", minutes: 10, view: "home", actionLabel: "直接开始做题" },
+    { id: "phonics", label: "拼读与词汇", minutes: 15, view: "pronunciation", actionLabel: "开始发音教学", allowBackground: true },
+    { id: "pattern", label: "句子结构", minutes: 10, view: "notes", actionLabel: "开始句型教学", allowBackground: true },
+    { id: "reading", label: "阅读与翻译", minutes: 15, view: "ai", actionLabel: "生成并开始 5 题", allowBackground: true },
+    { id: "correction", label: "测验与订正", minutes: 5, view: "home", actionLabel: "直接订正错题" },
+    { id: "preview", label: "总结与预习", minutes: 5, view: "preview-practice", actionLabel: "直接开始预习题" }
   ];
   const {
     DAILY_STUDY_PLAN = FALLBACK_DAILY_STUDY_PLAN,
@@ -2190,8 +2190,14 @@
   function ensurePreviewPracticeState() {
     const words = previewPracticeWords();
     const key = previewPracticeKey(words);
-    const current = normalizeClientPreviewPractice(model.previewPractice);
+    const stored = model.previewPractice;
+    const current = normalizeClientPreviewPractice(stored);
     if (current.key === key && current.currentDay === Number(previewWordsState.currentDay) && current.nextDay === Number(previewWordsState.nextDay)) {
+      if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+        Object.assign(stored, current);
+        model.previewPractice = stored;
+        return stored;
+      }
       model.previewPractice = current;
       return current;
     }
@@ -2265,13 +2271,15 @@
             acceptedChinese: Array.from(new Set([String(sentence.chinese).trim(), ...(Array.isArray(sentence.acceptedChinese) ? sentence.acceptedChinese : [])].map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8)
           };
         });
-        const existingIds = new Set(state.tasks.map(task => task.id));
+        const targetState = ensurePreviewPracticeState();
+        if (targetState.key !== key) return;
+        const existingIds = new Set(targetState.tasks.map(task => task.id));
         nextSentences.forEach(sentence => {
           if (existingIds.has(sentence.id)) return;
-          state.tasks.push(sentence, { ...sentence, id: `${sentence.id}-zh-en`, direction: "zh-en" });
+          targetState.tasks.push(sentence, { ...sentence, id: `${sentence.id}-zh-en`, direction: "zh-en" });
         });
-        state.generatedAt = new Date().toISOString();
-        state.updatedAt = state.generatedAt;
+        targetState.generatedAt = new Date().toISOString();
+        targetState.updatedAt = targetState.generatedAt;
         previewPracticeStatusMessage = "";
         clearPreviewPracticeRetry(key);
         saveModel();
@@ -2280,7 +2288,7 @@
         if (!error || error.statusCode !== 401) schedulePreviewPracticeRetry(key);
         if (error && error.statusCode !== 401) showToast(previewPracticeStatusMessage);
       } finally {
-        previewPracticeSentencePreparation = null;
+        if (previewPracticeSentencePreparation?.promise === promise) previewPracticeSentencePreparation = null;
         renderPreviewPractice();
       }
     })();
@@ -2288,8 +2296,7 @@
     return promise;
   }
 
-  function currentPreviewPracticeTask() {
-    const state = ensurePreviewPracticeState();
+  function currentPreviewPracticeTask(state = ensurePreviewPracticeState()) {
     const tasks = previewPracticeTasksForMode(state);
     return tasks[state.index] || null;
   }
@@ -2301,6 +2308,30 @@
     }
     const correct = englishAnswerMatches(answer, task.acceptedEnglish || [task.english]);
     return { correct, score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", explanation: correct ? "英文拼写和句子结构正确。" : "请检查单词拼写、冠词和 be 动词。" };
+  }
+
+  function showPreviewPracticeFormError(message) {
+    const input = $("#previewPracticeInput");
+    const feedback = $("#previewPracticeFeedback");
+    input?.classList.add("is-invalid");
+    input?.setAttribute("aria-invalid", "true");
+    if (!feedback) return;
+    feedback.dataset.previewPracticeFormError = "true";
+    feedback.className = "feedback is-wrong";
+    feedback.innerHTML = `<span class="feedback-title">${escapeHtml(message)}</span>`;
+    feedback.hidden = false;
+  }
+
+  function clearPreviewPracticeFormError() {
+    const input = $("#previewPracticeInput");
+    const feedback = $("#previewPracticeFeedback");
+    input?.classList.remove("is-invalid");
+    input?.removeAttribute("aria-invalid");
+    if (!feedback || feedback.dataset.previewPracticeFormError !== "true") return;
+    delete feedback.dataset.previewPracticeFormError;
+    feedback.className = "feedback";
+    feedback.innerHTML = "";
+    feedback.hidden = true;
   }
 
   function renderPreviewPractice() {
@@ -2338,18 +2369,24 @@
     $("#previewPracticeDirection").textContent = current.direction === "en-zh" ? "英译中" : "中译英";
     $("#previewPracticePrompt").textContent = current.direction === "en-zh" ? current.english : current.chinese;
     $("#previewPracticeSpeech").innerHTML = current.direction === "en-zh" ? speechButtonHtml(current.english, "播放预习题目发音") : "";
-    $("#previewPracticeInput").value = result ? (state.answers[current.id] || "") : "";
-    $("#previewPracticeInput").placeholder = current.direction === "en-zh" ? "输入中文意思" : "输入英文翻译";
-    $("#previewPracticeInput").disabled = Boolean(result);
+    const input = $("#previewPracticeInput");
+    input.value = result ? (state.answers[current.id] || "") : "";
+    input.placeholder = current.direction === "en-zh" ? "输入中文意思" : "输入英文翻译";
+    input.disabled = Boolean(result);
+    input.classList.remove("is-invalid");
+    input.removeAttribute("aria-invalid");
     $("#previewPracticeSubmit").disabled = Boolean(result);
-    $("#previewPracticeFeedback").hidden = !result;
+    const feedback = $("#previewPracticeFeedback");
+    delete feedback.dataset.previewPracticeFormError;
+    feedback.hidden = !result;
     $("#previewPracticeNext").hidden = !result;
     if (result) {
       const expected = current.direction === "en-zh" ? current.chinese : current.english;
-      $("#previewPracticeFeedback").className = `feedback ${result.gradingStatus === "partial" ? "is-partial" : result.correct ? "is-correct" : "is-wrong"}`;
-      $("#previewPracticeFeedback").innerHTML = `<span class="feedback-title">${result.gradingStatus === "partial" ? "基本理解正确" : result.correct ? "答对了" : "再看一次"}</span><span class="feedback-answer">参考答案：${escapeHtml(expected)}</span><span class="feedback-note">${escapeHtml(result.explanation || "")}</span>`;
+      feedback.className = `feedback ${result.gradingStatus === "partial" ? "is-partial" : result.correct ? "is-correct" : "is-wrong"}`;
+      feedback.innerHTML = `<span class="feedback-title">${result.gradingStatus === "partial" ? "基本理解正确" : result.correct ? "答对了" : "再看一次"}</span><span class="feedback-answer">参考答案：${escapeHtml(expected)}</span><span class="feedback-note">${escapeHtml(result.explanation || "")}</span>`;
     } else {
-      $("#previewPracticeFeedback").innerHTML = "";
+      feedback.className = "feedback";
+      feedback.innerHTML = "";
     }
     requestAnimationFrame(() => { if (!result && activeView === "preview-practice") $("#previewPracticeInput")?.focus(); });
     refreshIcons();
@@ -2368,18 +2405,36 @@
 
   function submitPreviewPractice(event) {
     event.preventDefault();
-    const state = ensurePreviewPracticeState();
-    const task = currentPreviewPracticeTask();
-    if (!task || state.results[task.id]) return;
     const input = $("#previewPracticeInput");
-    const answer = String(input.value || "").trim();
-    if (!answer) { showToast("请先填写答案"); input.focus(); return; }
-    const grading = previewPracticeGrade(task, answer);
-    state.answers[task.id] = answer;
-    state.results[task.id] = { ...grading, answeredAt: new Date().toISOString() };
-    state.updatedAt = new Date().toISOString();
-    saveModel();
-    renderPreviewPractice();
+    try {
+      const state = ensurePreviewPracticeState();
+      const task = currentPreviewPracticeTask(state);
+      if (!task) {
+        showPreviewPracticeFormError("当前题目尚未准备好，请刷新预习内容后重试。");
+        return;
+      }
+      if (state.results[task.id]) {
+        renderPreviewPractice();
+        return;
+      }
+      const answer = String(input?.value || "").trim();
+      if (!answer) {
+        showPreviewPracticeFormError("请先输入答案");
+        input?.focus();
+        return;
+      }
+      clearPreviewPracticeFormError();
+      const grading = previewPracticeGrade(task, answer);
+      state.answers[task.id] = answer;
+      state.results[task.id] = { ...grading, answeredAt: new Date().toISOString() };
+      state.updatedAt = new Date().toISOString();
+      saveModel();
+      renderPreviewPractice();
+    } catch (error) {
+      console.error("Preview practice submission failed", error);
+      showPreviewPracticeFormError("提交失败，请刷新页面后重试。");
+      showToast("预习答案提交失败");
+    }
   }
 
   function advancePreviewPractice() {
@@ -3716,16 +3771,89 @@
     renderStudyTimer();
   }
 
-  function openStudyStage(stage, startCurrent = false) {
+  function focusStudyStageContent(containerSelector, focusSelectors = []) {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const container = $(containerSelector);
+      if (!container || container.hidden) return;
+      container.classList.remove("is-study-stage-target");
+      void container.offsetWidth;
+      container.classList.add("is-study-stage-target");
+      container.scrollIntoView({ behavior: "smooth", block: "center" });
+      const focusTarget = focusSelectors
+        .map(selector => $(selector))
+        .find(element => element && !element.hidden && !element.disabled && element.offsetParent !== null);
+      if (focusTarget) focusTarget.focus({ preventScroll: true });
+      else {
+        container.setAttribute("tabindex", "-1");
+        container.focus({ preventScroll: true });
+      }
+      setTimeout(() => container.classList.remove("is-study-stage-target"), 2200);
+    }));
+  }
+
+  async function launchStudyStageContent(stage, activeStage = false) {
+    if (stage.id === "review") {
+      ensureGuidedReviewSession(DAILY_TARGET);
+      setView("home");
+      focusStudyStageContent("#reviewPanel", ["#answerInput", "#nextButton"]);
+      return;
+    }
+    if (stage.id === "phonics") {
+      pronunciationFilter = "learned";
+      setView("pronunciation");
+      focusStudyStageContent("#pronunciationGrid .pronunciation-card.is-learned, #pronunciationConcepts .pronunciation-concept", ["#pronunciationGrid .pronunciation-card.is-learned .speak-button"]);
+      return;
+    }
+    if (stage.id === "pattern") {
+      notesDay = Math.max(1, Number(DATA.currentDay) || 1, ...learnedItems.map(item => Number(item.day) || 0));
+      setView("notes");
+      focusStudyStageContent("#notesBody .notes-pattern, #notesBody .notes-overview", ["#notesBody .notes-pattern .speak-button"]);
+      return;
+    }
+    if (stage.id === "reading") {
+      setView("ai");
+      const practice = normalizeClientAiPractice(model.aiPractice);
+      const currentSet = practice.currentSet;
+      if (activeStage && (!currentSet || currentSet.completed || Number(currentSet.index) >= currentSet.questions.length)) {
+        $("#aiQuestionCount").value = "5";
+        await generateAiQuestions();
+      }
+      focusStudyStageContent("#aiPracticePanel:not([hidden]), #aiEmptyState:not([hidden]), #aiPracticeComplete:not([hidden])", ["#aiAnswerInput", "#nextAiQuestion", "#generateAiQuestions"]);
+      return;
+    }
+    if (stage.id === "correction") {
+      const mistakes = mistakeRows();
+      if (mistakes.length) practiceMistakeQueue(mistakes[0].taskId);
+      else replaceReviewSession(buildGuidedReviewBatch(5), "all");
+      setView("home");
+      focusStudyStageContent("#reviewPanel", ["#answerInput", "#nextButton"]);
+      return;
+    }
+    setView("preview-practice");
+    if (!previewWordsState.loaded && !previewWordsState.loading) await loadPreviewWords();
+    const previewPractice = ensurePreviewPracticeState();
+    if (activeStage && previewPractice.completed) {
+      previewPractice.index = 0;
+      previewPractice.completed = false;
+      previewPractice.answers = {};
+      previewPractice.results = {};
+      previewPractice.updatedAt = new Date().toISOString();
+      saveModel();
+    }
+    renderPreviewPractice();
+    focusStudyStageContent("#previewPracticePanel:not([hidden]), #previewPracticeEmpty:not([hidden])", ["#previewPracticeInput", "#previewPracticeNext"]);
+  }
+
+  async function openStudyStage(stage, startCurrent = false) {
     if (!stage || (!stage.current && !stage.complete)) return;
     if (startCurrent && stage.current && !studyClockRunning) startStudyClock();
-    setView(stage.view);
-    showToast(`${stage.label}：${studyStageDescription(stage)}`);
+    await launchStudyStageContent(stage, startCurrent && stage.current);
+    showToast(`已进入第 ${stage.index + 1} 阶段：${stage.label}`);
   }
 
   function openCurrentStudyStage() {
     const stage = currentStudyPlan().currentStage;
-    if (stage) openStudyStage(stage, true);
+    if (stage) void openStudyStage(stage, true);
   }
 
   function markStudyActivity() {
@@ -3829,6 +3957,85 @@
       turn = turn === "word" ? "sentence" : "word";
     }
     return selected.map(task => task.taskId);
+  }
+
+  function guidedReviewCandidates(mode = "all", excluded = new Set()) {
+    const tasks = Array.from(taskById.values()).filter(task => {
+      if (!reviewTaskIsEligible(task) || excluded.has(task.taskId)) return false;
+      return reviewTaskMatchesMode(task, mode);
+    });
+    tasks.sort((left, right) => {
+      const leftState = taskState(left.taskId);
+      const rightState = taskState(right.taskId);
+      const leftDue = isDue(left) ? 0 : 1;
+      const rightDue = isDue(right) ? 0 : 1;
+      const leftWrong = leftState.lastResult === false ? 0 : 1;
+      const rightWrong = rightState.lastResult === false ? 0 : 1;
+      const leftReviewed = String(leftState.lastReviewed || "");
+      const rightReviewed = String(rightState.lastReviewed || "");
+      return leftDue - rightDue
+        || leftWrong - rightWrong
+        || (Number(leftState.level) || 0) - (Number(rightState.level) || 0)
+        || leftReviewed.localeCompare(rightReviewed)
+        || left.item.day - right.item.day
+        || left.taskId.localeCompare(right.taskId);
+    });
+    return tasks;
+  }
+
+  function buildGuidedReviewBatch(limit = DAILY_TARGET) {
+    const session = getSession();
+    const completedToday = new Set(session.doneTaskIds || []);
+    let candidates = guidedReviewCandidates("all", completedToday);
+    if (!candidates.length) candidates = guidedReviewCandidates("all", new Set());
+    const pools = {
+      word: candidates.filter(task => task.item.type === "word"),
+      sentence: candidates.filter(task => task.item.type === "sentence")
+    };
+    const selected = [];
+    let nextType = "word";
+    while (selected.length < limit && (pools.word.length || pools.sentence.length)) {
+      const preferred = pools[nextType];
+      const alternateType = nextType === "word" ? "sentence" : "word";
+      const bucket = preferred.length ? preferred : pools[alternateType];
+      if (!bucket.length) break;
+      selected.push(bucket.shift());
+      nextType = alternateType;
+    }
+    return selected.map(task => task.taskId);
+  }
+
+  function replaceReviewSession(taskIds, mode = "all") {
+    reviewMode = mode;
+    const today = localDate();
+    const normalizedTaskIds = Array.from(new Set(taskIds)).filter(taskId => reviewTaskIsEligible(taskById.get(taskId)));
+    model.sessions[today] = {
+      date: today,
+      mode,
+      taskIds: normalizedTaskIds,
+      index: 0,
+      doneTaskIds: [],
+      currentTaskId: normalizedTaskIds[0] || null,
+      batchComplete: normalizedTaskIds.length === 0,
+      variants: {}
+    };
+    $$('[data-mode]').forEach(button => {
+      const active = button.dataset.mode === mode;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    saveModel();
+    return model.sessions[today];
+  }
+
+  function ensureGuidedReviewSession(limit = DAILY_TARGET) {
+    reviewMode = "all";
+    let session = getSession();
+    pruneReviewSession(session);
+    if (session.taskIds[session.index]) return session;
+    const taskIds = buildGuidedReviewBatch(limit);
+    session = replaceReviewSession(taskIds, "all");
+    return session;
   }
 
   function currentBaseTask() {
@@ -4017,8 +4224,15 @@
     if (!task) {
       panel.hidden = true; complete.hidden = false;
       const remaining = taskCandidates(reviewMode, new Set(session.doneTaskIds)).length;
-      $("#completeNote").textContent = remaining ? `这一轮完成，还有 ${remaining} 道到期题。` : "今天这一组已经完成。";
-      $("#moreReviewButton").hidden = !remaining;
+      const currentPlanStage = currentStudyPlan().currentStage;
+      const guidedStageActive = Boolean(currentPlanStage && ["review", "correction"].includes(currentPlanStage.id));
+      const guidedRemaining = guidedStageActive ? guidedReviewCandidates("all", new Set(session.doneTaskIds || [])).length : 0;
+      $("#completeNote").textContent = remaining
+        ? `这一轮完成，还有 ${remaining} 道到期题。`
+        : guidedStageActive && guidedRemaining
+          ? "到期题已完成；当前学习阶段还没结束，可以继续练已学内容。"
+          : "今天这一组已经完成。";
+      $("#moreReviewButton").hidden = !remaining && !guidedRemaining;
       return;
     }
     panel.hidden = false; complete.hidden = true;
@@ -4604,7 +4818,7 @@
       const button = event.target.closest("[data-study-stage]");
       if (!button) return;
       const stage = currentStudyPlan().stages.find(item => item.id === button.dataset.studyStage);
-      if (stage) openStudyStage(stage, stage.current);
+      if (stage) void openStudyStage(stage, stage.current);
     });
     ["pointerdown", "keydown", "touchstart", "input", "scroll"].forEach(type => document.addEventListener(type, markStudyActivity, { passive: true }));
     document.addEventListener("visibilitychange", handleStudyVisibility);
@@ -4633,6 +4847,7 @@
     $("#refreshPreviewWordsButton").addEventListener("click", loadPreviewWords);
     $$('[data-preview-practice-mode]').forEach(button => button.addEventListener("click", () => setPreviewPracticeMode(button.dataset.previewPracticeMode)));
     $("#previewPracticeForm").addEventListener("submit", submitPreviewPractice);
+    $("#previewPracticeInput").addEventListener("input", clearPreviewPracticeFormError);
     $("#previewPracticeNext").addEventListener("click", advancePreviewPractice);
     $("#aiModelSelect").addEventListener("change", event => {
       aiStatusMessage = "";
@@ -4795,14 +5010,21 @@
     $("#answerForm").addEventListener("submit", submitAnswer);
     $("#nextButton").addEventListener("click", () => advance(false));
     $("#retryButton").addEventListener("click", () => advance(true));
-    $("#moreReviewButton").addEventListener("click", () => { const session = getSession(); session.batchComplete = false; session.taskIds = buildBatch(); session.index = 0; session.currentTaskId = session.taskIds[0] || null; saveModel(); renderHome(); });
+    $("#moreReviewButton").addEventListener("click", () => {
+      const currentPlanStage = currentStudyPlan().currentStage;
+      const guidedStageActive = Boolean(currentPlanStage && ["review", "correction"].includes(currentPlanStage.id));
+      const taskIds = guidedStageActive ? buildGuidedReviewBatch(DAILY_TARGET) : buildBatch();
+      replaceReviewSession(taskIds, guidedStageActive ? "all" : reviewMode);
+      renderHome();
+      focusStudyStageContent("#reviewPanel", ["#answerInput"]);
+    });
     $("#resetButton").addEventListener("click", () => $("#resetDialog").showModal());
     $("#openResetButton").addEventListener("click", () => $("#resetDialog").showModal());
     $("#confirmReset").addEventListener("click", event => { event.preventDefault(); $("#resetDialog").close(); resetModel(); });
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=37", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=38", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

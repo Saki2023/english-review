@@ -9,12 +9,12 @@
   const MAX_SECONDS_PER_DAY = 24 * 60 * 60;
   const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
   const DAILY_STUDY_PLAN = Object.freeze([
-    Object.freeze({ id: "review", label: "旧知识复习", minutes: 10, view: "home", actionLabel: "开始复习" }),
-    Object.freeze({ id: "phonics", label: "拼读与词汇", minutes: 15, view: "pronunciation", actionLabel: "打开发音课", allowBackground: true }),
-    Object.freeze({ id: "pattern", label: "句子结构", minutes: 10, view: "notes", actionLabel: "打开学习笔记", allowBackground: true }),
-    Object.freeze({ id: "reading", label: "阅读与翻译", minutes: 15, view: "ai", actionLabel: "开始阅读练习", allowBackground: true }),
-    Object.freeze({ id: "correction", label: "测验与订正", minutes: 5, view: "mistakes", actionLabel: "打开错题本" }),
-    Object.freeze({ id: "preview", label: "总结与预习", minutes: 5, view: "preview-words", actionLabel: "打开预习" })
+    Object.freeze({ id: "review", label: "旧知识复习", minutes: 10, view: "home", actionLabel: "直接开始做题" }),
+    Object.freeze({ id: "phonics", label: "拼读与词汇", minutes: 15, view: "pronunciation", actionLabel: "开始发音教学", allowBackground: true }),
+    Object.freeze({ id: "pattern", label: "句子结构", minutes: 10, view: "notes", actionLabel: "开始句型教学", allowBackground: true }),
+    Object.freeze({ id: "reading", label: "阅读与翻译", minutes: 15, view: "ai", actionLabel: "生成并开始 5 题", allowBackground: true }),
+    Object.freeze({ id: "correction", label: "测验与订正", minutes: 5, view: "home", actionLabel: "直接订正错题" }),
+    Object.freeze({ id: "preview", label: "总结与预习", minutes: 5, view: "preview-practice", actionLabel: "直接开始预习题" })
   ]);
 
   function clampStudySeconds(value) {

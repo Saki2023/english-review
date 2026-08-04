@@ -149,12 +149,12 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=37/);
+  assert.match(html, /pronunciation-data\.js\?v=38/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /speechButtonHtml\(item\.example/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=37/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=38/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -176,6 +176,15 @@ test("daily preview loads the latest synced document and renders bounded Markdow
   assert.match(sync, /网站课程内容\.json/);
   assert.match(sync, /\/api\/content\/batch/);
   assert.match(sync, /notesAdded/);
+  assert.match(sync, /\[string\]\$StatusPath/);
+  assert.match(sync, /function Invoke-SyncRequest/);
+  assert.match(sync, /MaximumAttempts = 3/);
+  assert.match(sync, /downloadSuccess/);
+  assert.match(sync, /下载网站档案仍会继续/);
+  assert.match(sync, /function Invoke-NodeSyncRequest/);
+  assert.match(sync, /sync-http-request\.js/);
+  assert.match(sync, /compatibilityTransportUsed/);
+  assert.doesNotMatch(sync, /-ArgumentList[^\n]*(SyncToken|WriteToken)/);
 });
 
 test("today review removes preview words from new, cached, library, and mistake entry paths", () => {
@@ -237,6 +246,15 @@ test("preview practice keeps word and sentence exercises isolated from formal re
   assert.match(html, /data-preview-practice-mode="sentence"/);
   assert.match(app, /function previewPracticeWords\(\)/);
   assert.match(app, /function previewPracticeGrade\(task, answer\)/);
+  assert.match(app, /function currentPreviewPracticeTask\(state = ensurePreviewPracticeState\(\)\)/);
+  assert.match(app, /const state = ensurePreviewPracticeState\(\);\s*const task = currentPreviewPracticeTask\(state\);/s);
+  assert.match(app, /Object\.assign\(stored, current\);\s*model\.previewPractice = stored;\s*return stored;/s);
+  assert.match(app, /const targetState = ensurePreviewPracticeState\(\);\s*if \(targetState\.key !== key\) return;/s);
+  assert.match(app, /previewPracticeSentencePreparation\?\.promise === promise/);
+  assert.match(app, /showPreviewPracticeFormError\("请先输入答案"\)/);
+  assert.match(app, /previewPracticeInput"\)\.addEventListener\("input", clearPreviewPracticeFormError\)/);
+  assert.match(html, /id="previewPracticeInput"[^>]*aria-describedby="previewPracticeFeedback"/);
+  assert.match(html, /id="previewPracticeFeedback"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.match(app, /\/api\/preview\/practice\/sentences/);
   assert.match(app, /previewPracticeStatusMessage = .*每小时自动重试/s);
   assert.match(app, /句子题必须包含预习词，也会组合已学词帮助记忆/);
@@ -300,7 +318,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 37", () => {
+test("PWA client assets consistently use the displayed cache version 38", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -311,8 +329,8 @@ test("PWA client assets consistently use the displayed cache version 37", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "37");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v37"/);
+  assert.equal(displayedVersion[1], "38");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v38"/);
 });
 
 test("daily study plan explains six guided stages and records sixty minutes across web and learning-window work", () => {
@@ -327,10 +345,17 @@ test("daily study plan explains six guided stages and records sixty minutes acro
   assert.match(app, /DAILY_STUDY_PLAN/);
   assert.match(app, /function studyStageDescription\(stage\)/);
   assert.match(app, /openCurrentStudyStage/);
+  assert.match(app, /async function launchStudyStageContent\(stage, activeStage = false\)/);
+  assert.match(app, /ensureGuidedReviewSession\(DAILY_TARGET\)/);
+  assert.match(app, /await generateAiQuestions\(\)/);
+  assert.match(app, /setView\("preview-practice"\)/);
+  assert.match(app, /focusStudyStageContent/);
+  assert.match(app, /guidedStageActive \? buildGuidedReviewBatch\(DAILY_TARGET\) : buildBatch\(\)/);
+  assert.match(read("styles.css"), /\.is-study-stage-target/);
   assert.match(app, /allowBackground/);
   assert.match(app, /STUDY_TIME_IDLE_TIMEOUT_MS = 5 \* 60 \* 1000/);
   assert.match(app, /document\.hidden/);
   assert.match(app, /model\.studyTime/);
-  assert.match(html, /study-time\.js\?v=37/);
-  assert.match(serviceWorker, /study-time\.js\?v=37/);
+  assert.match(html, /study-time\.js\?v=38/);
+  assert.match(serviceWorker, /study-time\.js\?v=38/);
 });
