@@ -199,7 +199,7 @@ API_TOKEN=一段足够长的随机字符串
 
 ## 同步到本地学习窗口
 
-`GET /api/sync/profile` 使用只读同步令牌鉴权，并按账号名返回学习档案。响应包含课程内容、复习状态、AI 做题历史、按题目保存的 `tutorHistory` 问答记录、试卷成绩与逐题证据、听写和专项历史、七维能力、错题、薄弱点统计及网站保存的本地教学档案，不包含密码、Cookie、会话令牌或 AI Key。问答记录是疑惑线索，不会自动计入错题。
+`GET /api/sync/profile` 使用只读同步令牌鉴权，并按账号名返回学习档案。响应包含课程内容、复习状态、AI 做题历史、按题目保存的 `tutorHistory` 问答记录、试卷成绩与逐题证据、听写和专项历史、七维能力、错题、薄弱点统计及网站保存的本地教学档案，不包含密码、Cookie、会话令牌或 AI Key。问答记录是疑惑线索，不会自动计入错题。`summary.studyGoalSeconds` 为每日 60 分钟目标，`summary.studyGoalDaysMet` 为已达标天数；`activity.dailyStudyTime` 保存各日期的有效秒数，`activity.studyPlan` 给出六个阶段、目标分钟数以及该阶段能否切换到英语学习窗口继续。
 
 在 VPS 生成只读令牌：
 

@@ -7,6 +7,7 @@ const { analyzeAbilities } = require("./ability-analysis");
 const { sanitizeDictationState } = require("./dictation");
 const { sanitizeFocusedState, skillSummaries } = require("./focused-practice");
 const { publicTeachingProfile } = require("./teaching-profile");
+const { DAILY_STUDY_PLAN, normalizeStudyTime, STUDY_TIME_TARGET_SECONDS } = require("../study-time");
 
 function accuracy(correct, total) {
   return total ? Math.round((correct / total) * 100) : null;
@@ -285,9 +286,10 @@ function buildLearningSyncProfile(content, state, user) {
   const dictationScores = dictation.sessions.map(session => session.percentage).filter(value => Number.isFinite(value));
   const dictationWrong = dictation.sessions.flatMap(session => session.items).filter(item => item.correct === false).length;
   const focusedWeakPoints = focused.sessions.flatMap(session => session.weakPoints);
+  const studyTime = normalizeStudyTime(state.studyTime);
 
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     generatedAt: new Date().toISOString(),
     user: { username: user.username, role: user.role },
     course: {
@@ -315,6 +317,9 @@ function buildLearningSyncProfile(content, state, user) {
       dictations: dictation.sessions.length,
       dictationAveragePercentage: dictationScores.length ? Math.round(dictationScores.reduce((sum, value) => sum + value, 0) / dictationScores.length) : null,
       focusedSessions: focused.sessions.length,
+      studyDays: Object.keys(studyTime.daily).length,
+      studyGoalSeconds: STUDY_TIME_TARGET_SECONDS,
+      studyGoalDaysMet: Object.values(studyTime.daily).filter(seconds => Number(seconds) >= STUDY_TIME_TARGET_SECONDS).length,
       itemsNeedingReview: itemProgress.filter(item => item.needsReview).length,
       weakItems: itemProgress.filter(item => item.status === "weak").length,
       developingItems: itemProgress.filter(item => item.status === "developing").length,
@@ -335,6 +340,9 @@ function buildLearningSyncProfile(content, state, user) {
     },
     activity: {
       dailyReview: state.history && typeof state.history === "object" ? state.history : {},
+      dailyStudyTime: studyTime.daily,
+      studyGoalSeconds: STUDY_TIME_TARGET_SECONDS,
+      studyPlan: DAILY_STUDY_PLAN.map(stage => ({ id: stage.id, label: stage.label, minutes: stage.minutes, targetSeconds: stage.minutes * 60, canContinueInLearningWindow: stage.allowBackground === true })),
       aiSets,
       tutorQuestions: tutorHistory.map(item => ({ id: item.id, setId: item.setId, questionId: item.questionId, askedAt: item.askedAt })),
       exams: examHistory.map(exam => ({ id: exam.id, title: exam.title, submittedAt: exam.submittedAt, score: exam.score, possible: exam.possible, percentage: exam.percentage })),

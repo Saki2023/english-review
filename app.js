@@ -4,10 +4,41 @@
   const DATA = window.ENGLISH_REVIEW_DATA;
   const PRONUNCIATION = window.ENGLISH_PRONUNCIATION_DATA || { concepts: [], phonemes: [] };
   const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, sanitizeGeneratedSentenceVariant: () => null };
+  const STUDY_TIME = window.ENGLISH_REVIEW_STUDY_TIME || {};
   const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
+  const FALLBACK_DAILY_STUDY_PLAN = [
+    { id: "review", label: "旧知识复习", minutes: 10, view: "home", actionLabel: "开始复习" },
+    { id: "phonics", label: "拼读与词汇", minutes: 15, view: "pronunciation", actionLabel: "打开发音课", allowBackground: true },
+    { id: "pattern", label: "句子结构", minutes: 10, view: "notes", actionLabel: "打开学习笔记", allowBackground: true },
+    { id: "reading", label: "阅读与翻译", minutes: 15, view: "ai", actionLabel: "开始阅读练习", allowBackground: true },
+    { id: "correction", label: "测验与订正", minutes: 5, view: "mistakes", actionLabel: "打开错题本" },
+    { id: "preview", label: "总结与预习", minutes: 5, view: "preview-words", actionLabel: "打开预习" }
+  ];
+  const {
+    DAILY_STUDY_PLAN = FALLBACK_DAILY_STUDY_PLAN,
+    STUDY_TIME_TARGET_SECONDS = 3600,
+    formatStudyDuration = value => String(Math.max(0, Math.floor(Number(value) || 0))),
+    mergeStudyTime = value => value || { daily: {}, updatedAt: "" },
+    normalizeStudyTime = value => value || { daily: {}, updatedAt: "" },
+    studyPlanProgress = value => {
+      let boundary = 0;
+      const seconds = Math.max(0, Math.min(STUDY_TIME_TARGET_SECONDS, Math.floor(Number(value) || 0)));
+      const stages = DAILY_STUDY_PLAN.map((stage, index) => {
+        const targetSeconds = stage.minutes * 60;
+        const startSeconds = boundary;
+        const endSeconds = startSeconds + targetSeconds;
+        boundary = endSeconds;
+        return { ...stage, index, targetSeconds, startSeconds, endSeconds, elapsedSeconds: Math.max(0, Math.min(targetSeconds, seconds - startSeconds)), complete: seconds >= endSeconds, current: seconds >= startSeconds && seconds < endSeconds };
+      });
+      return { seconds, complete: seconds >= STUDY_TIME_TARGET_SECONDS, stages, currentStage: stages.find(stage => stage.current) || null };
+    },
+    studySecondsForDate = (value, date) => Number(value?.daily?.[date]) || 0
+  } = STUDY_TIME;
   const STORAGE_KEY = "daily-english-review-v1";
   const EXAM_GENERATION_API_VERSION = "2";
   const DAILY_TARGET = 10;
+  const STUDY_TIME_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+  const STUDY_TIME_TICK_MS = 1000;
   const LIBRARY_PAGE_SIZES = [10, 20, 50, 100];
   const INTERVALS = [1, 3, 7, 14, 30, 60];
   const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -46,6 +77,13 @@
   let reviewVariantRetryTimer = null;
   let reviewVariantRetryKey = "";
   let reviewVariantStatusMessage = "";
+  let studyClockTimer = null;
+  let studyClockRunning = false;
+  let studyClockLastTickAt = 0;
+  let studyClockLastActivityAt = 0;
+  let studyClockRemainderMs = 0;
+  let studyClockPauseReason = "";
+  let studyClockPersistTimer = null;
   let aiTutorDrag = null;
   let aiTutorLaunchDrag = null;
   let aiTutorLaunchSuppressClickUntil = 0;
@@ -1043,6 +1081,7 @@
     const next = saved && typeof saved === "object" ? saved : {};
     next.taskStates = next.taskStates || {};
     next.history = next.history || {};
+    next.studyTime = normalizeStudyTime(next.studyTime);
     next.attempts = Array.isArray(next.attempts) ? next.attempts : [];
     next.sessions = Object.fromEntries(Object.entries(next.sessions && typeof next.sessions === "object" ? next.sessions : {}).map(([date, session]) => [date, normalizeClientReviewSession(session)]));
     next.previewPractice = normalizeClientPreviewPractice(next.previewPractice);
@@ -1078,6 +1117,7 @@
       ...remote,
       taskStates: { ...local.taskStates },
       history: { ...local.history },
+      studyTime: mergeStudyTime(local.studyTime, remote && remote.studyTime),
       sessions: { ...local.sessions },
       attempts: [...(local.attempts || [])],
       mistakes: [...(local.mistakes || [])],
@@ -1181,6 +1221,7 @@
       const response = await fetch("/api/auth/login", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) return setAuthFeedback(data.error || "操作失败，请稍后重试");
+      stopStudyClock("切换账号", false);
       currentUser = data.user;
       model = loadModel();
       previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
@@ -1199,6 +1240,7 @@
   }
 
   async function logout() {
+    stopStudyClock("退出账号", false);
     if (API_ENABLED) { try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch (_) {} }
     currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
     previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
@@ -2078,6 +2120,7 @@
     if (!API_ENABLED) {
       previewWordsState = { ...previewWordsState, loaded: true, loading: false, words: [], error: "预习单词需要登录网站后读取。" };
       renderPreviewWords();
+      renderStudyTimer();
       return;
     }
     previewWordsState = { ...previewWordsState, loading: true, error: "" };
@@ -2092,6 +2135,7 @@
     preparePreviewPracticeSentences();
     renderPreviewWords();
     renderPreviewPractice();
+    renderStudyTimer();
   }
 
   function previewPracticeWords() {
@@ -3486,6 +3530,215 @@
     return history;
   }
 
+  function studyTimeState() {
+    model.studyTime = normalizeStudyTime(model.studyTime);
+    return model.studyTime;
+  }
+
+  function todayStudySeconds() {
+    return studySecondsForDate(studyTimeState(), localDate());
+  }
+
+  function studyTimeComplete() {
+    return todayStudySeconds() >= STUDY_TIME_TARGET_SECONDS;
+  }
+
+  function currentStudyPlan() {
+    return studyPlanProgress(todayStudySeconds());
+  }
+
+  function studyStageDescription(stage) {
+    const previewWords = (Array.isArray(previewWordsState.words) ? previewWordsState.words : []).map(item => item.english).filter(Boolean).slice(0, 6);
+    if (stage.id === "review") {
+      const due = taskCandidates("all", new Set()).length;
+      return due ? `完成今日到期题，优先复习错题；当前还有 ${due} 道可练。每题先自己回答，再看讲解。` : "到期题已完成；从词句库挑不熟的内容再练，英译中和中译英都要做。";
+    }
+    if (stage.id === "phonics") {
+      const words = previewWords.length ? `，新词包括 ${previewWords.join("、")}` : "";
+      return `在英语学习窗口学习下一课的发音重点和新词${words}；网页发音课用来听示范并跟读。`;
+    }
+    if (stage.id === "pattern") return "在英语学习窗口只学一个句子结构：先找“谁”，再找“做什么或是什么”，最后看地点等补充信息；用学习笔记回看例句。";
+    if (stage.id === "reading") return "先读当天短文并说出大意，再做一组 5 题阅读或翻译练习；先独立作答，有疑问再打开“问 AI”。";
+    if (stage.id === "correction") {
+      const mistakes = mistakeRows().length;
+      return mistakes ? `打开错题本，订正当前 ${mistakes} 个薄弱项；说明自己上次为什么错，再完成一次正确作答。` : "错题本目前已清空；回看今天最不确定的一题，并用自己的话说明正确理由。";
+    }
+    return "总结今天新学的音、词和句型，再查看下一课预习；只要求熟悉，不提前当作已学内容。";
+  }
+
+  function studyStageButtonLabel(stage, running) {
+    if (stage.complete) return "回看";
+    if (!stage.current) return "按顺序完成";
+    if (running) return "正在学习";
+    return stage.elapsedSeconds > 0 ? "继续本阶段" : stage.actionLabel;
+  }
+
+  function renderStudyPlanSteps(plan) {
+    const list = $("#studyPlanSteps");
+    if (!list) return;
+    list.innerHTML = plan.stages.map(stage => {
+      const statusClass = stage.complete ? "is-complete" : stage.current ? "is-current" : "is-locked";
+      const icon = stage.complete ? '<i data-lucide="check" aria-hidden="true"></i>' : String(stage.index + 1);
+      const timing = `${formatStudyDuration(stage.elapsedSeconds)} / ${formatStudyDuration(stage.targetSeconds)}`;
+      return `
+        <li class="study-plan-step ${statusClass}">
+          <span class="study-plan-step-number">${icon}</span>
+          <div class="study-plan-step-copy">
+            <div class="study-plan-step-title"><strong>${escapeHtml(stage.label)}</strong><span>${stage.minutes} 分钟 · ${timing}</span></div>
+            <p>${escapeHtml(studyStageDescription(stage))}</p>
+          </div>
+          <button class="secondary-button study-plan-step-action" type="button" data-study-stage="${escapeHtml(stage.id)}" ${stage.current || stage.complete ? "" : "disabled"}>${escapeHtml(studyStageButtonLabel(stage, studyClockRunning))}</button>
+        </li>`;
+    }).join("");
+  }
+
+  function renderStudyTimer() {
+    const readout = $("#studyTimeReadout");
+    const progress = $("#studyTimeProgress");
+    const button = $("#studyTimerButton");
+    const status = $("#studyTimeStatus");
+    if (!readout || !progress || !button || !status) return;
+    const plan = currentStudyPlan();
+    const seconds = plan.seconds;
+    const complete = plan.complete;
+    const current = plan.currentStage;
+    readout.textContent = `${formatStudyDuration(seconds)} / ${formatStudyDuration(STUDY_TIME_TARGET_SECONDS)}`;
+    progress.style.width = `${Math.min(100, Math.round((seconds / STUDY_TIME_TARGET_SECONDS) * 100))}%`;
+    progress.setAttribute("aria-valuenow", String(seconds));
+    progress.setAttribute("aria-valuetext", `${formatStudyDuration(seconds)} / ${formatStudyDuration(STUDY_TIME_TARGET_SECONDS)}`);
+    button.disabled = complete;
+    button.textContent = complete ? "今日已完成" : studyClockRunning ? "暂停当前阶段" : `开始第 ${current.index + 1} 阶段`;
+    button.setAttribute("aria-label", complete ? "今日学习计划已完成" : studyClockRunning ? `暂停${current.label}` : `开始${current.label}`);
+    if (complete) status.textContent = "六个学习阶段和 60 分钟有效学习时间都已完成，今日达标。";
+    else if (studyClockRunning) status.textContent = `正在进行第 ${current.index + 1} 阶段“${current.label}”：${studyStageDescription(current)}${current.allowBackground ? "这一阶段可以切换到英语学习窗口，回来后会继续显示进度。" : "请保持网页可见并有操作，离开页面会自动暂停。"}`;
+    else if (studyClockPauseReason) status.textContent = `已暂停：${studyClockPauseReason}。下一步是第 ${current.index + 1} 阶段“${current.label}”。`;
+    else status.textContent = `现在先做第 ${current.index + 1} 阶段“${current.label}”：${studyStageDescription(current)}`;
+    renderStudyPlanSteps(plan);
+
+    const dock = $("#studyPlanDock");
+    const dockLabel = $("#studyPlanDockLabel");
+    const dockTime = $("#studyPlanDockTime");
+    const dockToggle = $("#studyPlanDockToggle");
+    if (dock && dockLabel && dockTime && dockToggle) {
+      dock.hidden = activeView === "home" || complete;
+      if (current) {
+        dockLabel.textContent = `第 ${current.index + 1} 阶段 · ${current.label}`;
+        dockTime.textContent = `${formatStudyDuration(current.elapsedSeconds)} / ${formatStudyDuration(current.targetSeconds)}`;
+        dockToggle.textContent = studyClockRunning ? "暂停" : current.elapsedSeconds > 0 ? "继续" : "开始";
+        dockToggle.setAttribute("aria-label", studyClockRunning ? `暂停${current.label}` : `继续${current.label}`);
+      }
+    }
+    refreshIcons();
+  }
+
+  function persistStudyTime(force = false) {
+    const state = studyTimeState();
+    state.updatedAt = new Date().toISOString();
+    if (force) {
+      clearTimeout(studyClockPersistTimer);
+      studyClockPersistTimer = null;
+      saveModel();
+      return;
+    }
+    if (studyClockPersistTimer) return;
+    studyClockPersistTimer = setTimeout(() => {
+      studyClockPersistTimer = null;
+      persistStudyTime(true);
+    }, 10000);
+  }
+
+  function addStudySeconds(seconds) {
+    const increment = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (!increment) return;
+    const state = studyTimeState();
+    const date = localDate();
+    const previous = studySecondsForDate(state, date);
+    const previousPlan = studyPlanProgress(previous);
+    const activeStage = previousPlan.currentStage;
+    const stageBoundary = activeStage ? activeStage.endSeconds : STUDY_TIME_TARGET_SECONDS;
+    const next = Math.min(stageBoundary, previous + increment);
+    if (next === previous) return;
+    state.daily[date] = next;
+    persistStudyTime(false);
+    renderStudyTimer();
+    if (next >= stageBoundary) {
+      const finalStage = next >= STUDY_TIME_TARGET_SECONDS;
+      stopStudyClock(finalStage ? "今日六个阶段均已完成" : `“${activeStage.label}”已完成`, false);
+      showToast(finalStage ? "今日 60 分钟学习计划完成" : `“${activeStage.label}”完成，请开始下一阶段`);
+    }
+  }
+
+  function tickStudyClock(force = false) {
+    if (!studyClockRunning) return;
+    const now = Date.now();
+    const current = currentStudyPlan().currentStage;
+    const allowBackground = Boolean(current && current.allowBackground);
+    if (!force && ((!allowBackground && document.hidden) || (!allowBackground && now - studyClockLastActivityAt > STUDY_TIME_IDLE_TIMEOUT_MS))) {
+      studyClockLastTickAt = now;
+      studyClockRemainderMs = 0;
+      stopStudyClock(document.hidden ? "页面不可见" : "连续 5 分钟无操作", false);
+      return;
+    }
+    const effectiveNow = force
+      ? (allowBackground ? now : Math.min(now, studyClockLastActivityAt + STUDY_TIME_IDLE_TIMEOUT_MS))
+      : now;
+    const elapsed = force
+      ? Math.max(0, effectiveNow - studyClockLastTickAt)
+      : Math.max(0, allowBackground ? now - studyClockLastTickAt : Math.min(now - studyClockLastTickAt, STUDY_TIME_TICK_MS * 2));
+    studyClockLastTickAt = now;
+    studyClockRemainderMs += elapsed;
+    const seconds = Math.floor(studyClockRemainderMs / 1000);
+    studyClockRemainderMs %= 1000;
+    addStudySeconds(seconds);
+    renderStudyTimer();
+  }
+
+  function stopStudyClock(reason = "手动暂停", countElapsed = true) {
+    if (studyClockRunning && countElapsed) tickStudyClock(true);
+    studyClockRunning = false;
+    clearInterval(studyClockTimer);
+    studyClockTimer = null;
+    studyClockRemainderMs = 0;
+    studyClockPauseReason = reason;
+    persistStudyTime(true);
+    renderStudyTimer();
+  }
+
+  function startStudyClock() {
+    if (studyTimeComplete() || document.hidden) return;
+    studyClockRunning = true;
+    studyClockPauseReason = "";
+    studyClockLastTickAt = Date.now();
+    studyClockLastActivityAt = studyClockLastTickAt;
+    studyClockRemainderMs = 0;
+    clearInterval(studyClockTimer);
+    studyClockTimer = setInterval(() => tickStudyClock(false), STUDY_TIME_TICK_MS);
+    renderStudyTimer();
+  }
+
+  function openStudyStage(stage, startCurrent = false) {
+    if (!stage || (!stage.current && !stage.complete)) return;
+    if (startCurrent && stage.current && !studyClockRunning) startStudyClock();
+    setView(stage.view);
+    showToast(`${stage.label}：${studyStageDescription(stage)}`);
+  }
+
+  function openCurrentStudyStage() {
+    const stage = currentStudyPlan().currentStage;
+    if (stage) openStudyStage(stage, true);
+  }
+
+  function markStudyActivity() {
+    if (studyClockRunning) studyClockLastActivityAt = Date.now();
+  }
+
+  function handleStudyVisibility() {
+    const current = currentStudyPlan().currentStage;
+    if (document.hidden && studyClockRunning && !current?.allowBackground) stopStudyClock("页面不可见", false);
+    else if (!document.hidden && studyClockRunning && current?.allowBackground) tickStudyClock(true);
+    else renderStudyTimer();
+  }
+
   function getSession() {
     const today = localDate();
     const existing = model.sessions[today];
@@ -3728,6 +3981,7 @@
     if (view === "preview-practice") { renderPreviewPractice(); loadPreviewWords(); }
     if (view === "mistakes") renderMistakes();
     if (view === "progress") renderProgress();
+    renderStudyTimer();
     renderAiTutorWindow();
     refreshIcons();
   }
@@ -3755,6 +4009,7 @@
     $("#reviewedCount").textContent = String(stats.reviewed);
     $("#accuracyCount").textContent = stats.reviewed ? `${Math.round((stats.correct / stats.reviewed) * 100)}%` : "—";
     $("#goalReadout").textContent = `${Math.min(done, DAILY_TARGET)} / ${DAILY_TARGET}`;
+    renderStudyTimer();
     $("#queueNote").textContent = due ? "先复习错题，再练新词和句子。" : "今天的到期题已完成，可以回到词句库自由练习。";
     const baseTask = currentBaseTask();
     const task = currentTask();
@@ -4316,6 +4571,7 @@
   }
 
   function resetModel() {
+    stopStudyClock("复习记录已重置", false);
     localStorage.removeItem(storageKey());
     model = loadModel();
     saveModel();
@@ -4336,6 +4592,23 @@
   function bindAppEvents() {
     if (appEventsBound) return;
     appEventsBound = true;
+    $("#studyTimerButton").addEventListener("click", () => {
+      if (studyClockRunning) stopStudyClock("手动暂停");
+      else openCurrentStudyStage();
+    });
+    $("#studyPlanDockToggle").addEventListener("click", () => {
+      if (studyClockRunning) stopStudyClock("手动暂停");
+      else openCurrentStudyStage();
+    });
+    $("#studyPlanSteps").addEventListener("click", event => {
+      const button = event.target.closest("[data-study-stage]");
+      if (!button) return;
+      const stage = currentStudyPlan().stages.find(item => item.id === button.dataset.studyStage);
+      if (stage) openStudyStage(stage, stage.current);
+    });
+    ["pointerdown", "keydown", "touchstart", "input", "scroll"].forEach(type => document.addEventListener(type, markStudyActivity, { passive: true }));
+    document.addEventListener("visibilitychange", handleStudyVisibility);
+    window.addEventListener("pagehide", () => stopStudyClock("页面关闭", true));
     $$("[data-view]").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
     $$("[data-mode]").forEach(button => button.addEventListener("click", () => setReviewMode(button.dataset.mode)));
     $$("[data-library-type]").forEach(button => button.addEventListener("click", () => { libraryType = button.dataset.libraryType; libraryPage = 1; renderLibrary(); }));
@@ -4529,7 +4802,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=35", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=37", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

@@ -16,6 +16,7 @@ const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis"
 const { sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById } = require("./review-variants");
 const { sanitizePreviewPractice } = require("./server/preview-practice");
 const { repairLearningEvidence } = require("./server/evidence-repair");
+const { normalizeStudyTime } = require("./study-time");
 const {
   completeDictation,
   createAiDictationAnalyzer,
@@ -177,6 +178,7 @@ function sanitizeState(value) {
     attempts: Array.isArray(source.attempts) ? source.attempts.slice(-120) : [],
     sessions: source.sessions && typeof source.sessions === "object" ? source.sessions : {},
     mistakes: Array.isArray(source.mistakes) ? source.mistakes.slice(-80) : [],
+    studyTime: normalizeStudyTime(source.studyTime),
     previewPractice: sanitizePreviewPractice(source.previewPractice),
     aiPractice: sanitizeAiPractice(source.aiPractice),
     aiExam: sanitizeAiExamState(source.aiExam),
@@ -192,7 +194,14 @@ function publicReviewState(value) {
 }
 
 function defaultState() { return repairLearningEvidence(content, sanitizeState({})).state; }
-function isEmptyState(value) { return !value || (!Object.keys(value.taskStates || {}).length && !Object.keys(value.history || {}).length && !value.attempts?.length && !value.mistakes?.length); }
+function isEmptyState(value) {
+  const studyTime = normalizeStudyTime(value && value.studyTime);
+  return !value || (!Object.keys(value.taskStates || {}).length
+    && !Object.keys(value.history || {}).length
+    && !value.attempts?.length
+    && !value.mistakes?.length
+    && !Object.keys(studyTime.daily).length);
+}
 
 function loadSessions() {
   const saved = readJson(SESSIONS_FILE, {});

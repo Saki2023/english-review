@@ -138,8 +138,18 @@ test("teaching profile write token updates only the local teaching profile", asy
     assert.equal(preview.preview.name, "第004天预习.md");
     assert.equal(preview.previews.length, 2);
     assert.equal(JSON.stringify(preview).includes("must-not-be-stored"), false);
+    const studyTimePut = await fetch(`${baseUrl}/api/state`, {
+      method: "PUT",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ studyTime: { daily: { "2026-08-05": 3600, invalid: 999999 } } })
+    });
+    assert.equal(studyTimePut.status, 200);
+    const savedStudyTime = await studyTimePut.json();
+    assert.equal(savedStudyTime.studyTime.daily["2026-08-05"], 3600);
+    assert.equal(Object.hasOwn(savedStudyTime.studyTime.daily, "invalid"), false);
     const state = await (await fetch(`${baseUrl}/api/state`, { headers: { Cookie: cookie } })).json();
     assert.equal(Object.hasOwn(state, "teachingProfile"), false);
+    assert.equal(state.studyTime.daily["2026-08-05"], 3600);
     const abilities = await fetch(`${baseUrl}/api/abilities`, { headers: { Cookie: cookie } });
     assert.equal(abilities.status, 200);
     assert.equal((await abilities.json()).unpracticedAbilities, 7);

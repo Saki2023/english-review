@@ -17,6 +17,7 @@ test("learning sync profile combines review and AI evidence without account secr
   const state = {
     taskStates: { "cat:en-zh": { level: 1, lastResult: false, reviewCount: 2 } },
     history: { "2026-08-01": { reviewed: 2, correct: 1 } },
+    studyTime: { daily: { "2026-08-01": 3600 } },
     attempts: [{ taskId: "cat:en-zh", correct: false }, { taskId: "cat:zh-en", correct: true }],
     mistakes: [{ id: "m1", taskId: "cat:en-zh", prompt: "cat", userAnswer: "狗", correctAnswer: "猫" }],
     aiPractice: { history: [{
@@ -66,6 +67,12 @@ test("learning sync profile combines review and AI evidence without account secr
   assert.equal(profile.summary.aiQuestions, 1);
   assert.equal(profile.summary.aiAccuracy, 0);
   assert.equal(profile.summary.tutorQuestions, 1);
+  assert.equal(profile.summary.studyDays, 1);
+  assert.equal(profile.summary.studyGoalDaysMet, 1);
+  assert.equal(profile.activity.dailyStudyTime["2026-08-01"], 3600);
+  assert.equal(profile.activity.studyPlan.length, 6);
+  assert.equal(profile.activity.studyPlan.reduce((sum, stage) => sum + stage.targetSeconds, 0), 3600);
+  assert.deepEqual(profile.activity.studyPlan.filter(stage => stage.canContinueInLearningWindow).map(stage => stage.id), ["phonics", "pattern", "reading"]);
   assert.equal(profile.course.notes, 0);
   assert.equal(profile.course.words, 1);
   assert.equal(profile.course.previewWords, 1);
@@ -155,7 +162,7 @@ test("learning sync includes normalized exam scores and weakness evidence withou
   };
   const profile = buildLearningSyncProfile({ currentDay: 2, words: [], sentences: [] }, state, { username: "learner", role: "member" });
 
-  assert.equal(profile.schemaVersion, 4);
+  assert.equal(profile.schemaVersion, 5);
   assert.equal(profile.summary.exams, 1);
   assert.equal(profile.summary.latestExamScore, 0);
   assert.equal(profile.summary.latestExamPossible, 150);

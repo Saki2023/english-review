@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=35">
+  <link rel="stylesheet" href="styles.css?v=37">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v35">v35</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v37">v37</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -104,6 +104,15 @@
       </nav>
 
       <main class="main-content">
+        <section class="study-plan-dock" id="studyPlanDock" aria-label="当前学习阶段" hidden>
+          <button class="study-plan-dock-home" type="button" data-view="home">
+            <i data-lucide="route" aria-hidden="true"></i>
+            <span><small>当前学习阶段</small><strong id="studyPlanDockLabel">旧知识复习</strong></span>
+          </button>
+          <span class="study-plan-dock-time" id="studyPlanDockTime">00:00 / 10:00</span>
+          <button class="secondary-button compact-button" type="button" id="studyPlanDockToggle">开始</button>
+        </section>
+
         <section class="view is-visible" id="view-home" aria-labelledby="homeTitle">
           <div class="page-heading">
             <div>
@@ -134,6 +143,23 @@
               <span class="stat-context">以提交记录计算</span>
             </article>
           </div>
+
+          <section class="study-time-card study-plan-card" aria-labelledby="studyTimeTitle">
+            <div class="study-time-heading">
+              <div>
+                <span class="stat-label">今日 60 分钟学习计划</span>
+                <strong class="study-time-readout" id="studyTimeReadout">00:00 / 60:00</strong>
+              </div>
+              <button class="primary-button study-time-button" type="button" id="studyTimerButton">开始第 1 阶段</button>
+            </div>
+            <h2 id="studyTimeTitle" class="sr-only">今日 60 分钟学习计划</h2>
+            <div class="study-time-track" role="progressbar" aria-label="每日有效学习时长" aria-valuemin="0" aria-valuemax="3600" aria-valuenow="0" aria-valuetext="00:00 / 60:00">
+              <div class="study-time-progress" id="studyTimeProgress"></div>
+            </div>
+            <p class="study-time-status" id="studyTimeStatus">先做 10 分钟旧知识复习。每一阶段都会告诉你学什么，完成后再进入下一阶段。</p>
+            <ol class="study-plan-steps" id="studyPlanSteps" aria-label="今日学习步骤"></ol>
+            <p class="study-plan-rule">按顺序学习；网页练习阶段需保持页面可见且有操作，新课阶段可以切换到英语学习窗口。完成六个阶段和 60 分钟后才算今日达标。</p>
+          </section>
 
           <div class="review-toolbar">
             <div class="segmented-control" role="group" aria-label="复习范围">
@@ -960,11 +986,12 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=35"></script>
-  <script src="data.js?v=35"></script>
-  <script src="pronunciation-data.js?v=35"></script>
-  <script src="review-variants.js?v=35"></script>
-  <script src="answer-utils.js?v=35"></script>
+  <script src="vendor/lucide.min.js?v=37"></script>
+  <script src="data.js?v=37"></script>
+  <script src="pronunciation-data.js?v=37"></script>
+  <script src="review-variants.js?v=37"></script>
+  <script src="answer-utils.js?v=37"></script>
+  <script src="study-time.js?v=37"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -980,7 +1007,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=35";
+      appScript.src = "app.js?v=37";
       document.body.appendChild(appScript);
     })();
   </script>

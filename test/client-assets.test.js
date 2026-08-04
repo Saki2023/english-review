@@ -149,12 +149,12 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=35/);
+  assert.match(html, /pronunciation-data\.js\?v=37/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /speechButtonHtml\(item\.example/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=35/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=37/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -300,7 +300,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 35", () => {
+test("PWA client assets consistently use the displayed cache version 37", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -311,6 +311,26 @@ test("PWA client assets consistently use the displayed cache version 35", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "35");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v35"/);
+  assert.equal(displayedVersion[1], "37");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v37"/);
+});
+
+test("daily study plan explains six guided stages and records sixty minutes across web and learning-window work", () => {
+  const html = read("index.html");
+  const app = read("app.js");
+  const serviceWorker = read("sw.js");
+  assert.match(html, /id="studyTimerButton"/);
+  assert.match(html, /id="studyTimeProgress"/);
+  assert.match(html, /id="studyPlanSteps"/);
+  assert.match(html, /今日 60 分钟学习计划/);
+  assert.match(html, /完成六个阶段和 60 分钟后才算今日达标/);
+  assert.match(app, /DAILY_STUDY_PLAN/);
+  assert.match(app, /function studyStageDescription\(stage\)/);
+  assert.match(app, /openCurrentStudyStage/);
+  assert.match(app, /allowBackground/);
+  assert.match(app, /STUDY_TIME_IDLE_TIMEOUT_MS = 5 \* 60 \* 1000/);
+  assert.match(app, /document\.hidden/);
+  assert.match(app, /model\.studyTime/);
+  assert.match(html, /study-time\.js\?v=37/);
+  assert.match(serviceWorker, /study-time\.js\?v=37/);
 });
