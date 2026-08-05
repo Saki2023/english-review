@@ -200,8 +200,10 @@ function createAiModelFetcher(config, options = {}) {
 }
 
 async function postChatCompletion(config, messages, fetchImpl, options = {}) {
-  const controller = options.disableTimeout === true ? null : new AbortController();
-  const timeout = controller ? setTimeout(() => controller.abort(), config.timeoutMs) : null;
+  const explicitTimeoutMs = Number(options.timeoutMs);
+  const timeoutMs = Number.isFinite(explicitTimeoutMs) && explicitTimeoutMs > 0 ? explicitTimeoutMs : Number(config.timeoutMs);
+  const controller = options.disableTimeout === true && !(Number.isFinite(explicitTimeoutMs) && explicitTimeoutMs > 0) ? null : new AbortController();
+  const timeout = controller && timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
   const body = { model: config.model, messages, stream: false };
   const reasoningEffort = Object.hasOwn(config, "upstreamReasoningEffort") ? config.upstreamReasoningEffort : config.reasoningEffort;
   if (options.useJsonMode) body.response_format = { type: "json_object" };
@@ -231,8 +233,10 @@ async function postChatCompletion(config, messages, fetchImpl, options = {}) {
 }
 
 async function postResponsesCompletion(config, messages, fetchImpl, options = {}) {
-  const controller = options.disableTimeout === true ? null : new AbortController();
-  const timeout = controller ? setTimeout(() => controller.abort(), config.timeoutMs) : null;
+  const explicitTimeoutMs = Number(options.timeoutMs);
+  const timeoutMs = Number.isFinite(explicitTimeoutMs) && explicitTimeoutMs > 0 ? explicitTimeoutMs : Number(config.timeoutMs);
+  const controller = options.disableTimeout === true && !(Number.isFinite(explicitTimeoutMs) && explicitTimeoutMs > 0) ? null : new AbortController();
+  const timeout = controller && timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
   const instructions = messages
     .filter(message => ["system", "developer"].includes(message.role))
     .map(message => String(message.content || ""))
@@ -296,7 +300,7 @@ async function requestChatCompletion(config, messages, fetchImpl, requestOptions
       : [{ useJsonMode: false, useReasoningEffort: false }];
   let lastError;
   for (const attempt of attempts) {
-    try { return await postChatCompletion(config, messages, fetchImpl, { ...attempt, disableTimeout: requestOptions.disableTimeout === true }); }
+    try { return await postChatCompletion(config, messages, fetchImpl, { ...attempt, disableTimeout: requestOptions.disableTimeout === true, timeoutMs: requestOptions.timeoutMs }); }
     catch (error) {
       lastError = error;
       if (![400, 422].includes(error.providerStatus)) throw error;
@@ -310,7 +314,7 @@ async function requestResponsesCompletion(config, messages, fetchImpl, requestOp
   const attempts = reasoningEffort ? [{ useReasoningEffort: true }, { useReasoningEffort: false }] : [{ useReasoningEffort: false }];
   let lastError;
   for (const attempt of attempts) {
-    try { return await postResponsesCompletion(config, messages, fetchImpl, { ...attempt, disableTimeout: requestOptions.disableTimeout === true }); }
+    try { return await postResponsesCompletion(config, messages, fetchImpl, { ...attempt, disableTimeout: requestOptions.disableTimeout === true, timeoutMs: requestOptions.timeoutMs }); }
     catch (error) {
       lastError = error;
       if (![400, 422].includes(error.providerStatus)) throw error;
@@ -530,7 +534,9 @@ function createAiReviewVariantGenerator(config, options = {}) {
   return {
     async generate(input) {
       if (!config.configured) throw new Error("AI review variant generation is not configured");
-      return parseReviewVariantResponse(await requestCompletion(config, buildReviewVariantMessages(input), fetchImpl, { disableTimeout: true }));
+      const timeoutMs = Number(input && input.timeoutMs);
+      const requestOptions = Number.isFinite(timeoutMs) && timeoutMs > 0 ? { timeoutMs } : { disableTimeout: true };
+      return parseReviewVariantResponse(await requestCompletion(config, buildReviewVariantMessages(input), fetchImpl, requestOptions));
     }
   };
 }

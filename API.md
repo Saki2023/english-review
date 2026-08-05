@@ -54,7 +54,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | POST | `/api/preview/practice/sentences` | 按当前预习词生成预习句子练习，需要登录及已配置的 AI |
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
 | POST | `/api/review/sentence-variants` | 创建或恢复今日复习的后台 AI 句子变式任务，需要登录；返回 `202` 时按 `jobId` 查询 |
-| GET | `/api/review/sentence-variants?jobId=...` | 查询当前账号的后台句子变式任务；网络/上游失败后每 5 分钟重试，内容连续 3 轮不合格后停止自动重试 |
+| GET | `/api/review/sentence-variants?jobId=...` | 查询当前账号的后台句子变式任务；单次上游等待最多 10 分钟，网络/上游失败后每 5 分钟重试，内容连续 3 轮不合格后停止自动重试 |
 | GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
 | POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录及当前试卷接口版本头，返回 `202` |
 | PUT | `/api/ai/exams/current` | 保存当前试卷草稿答案，需要登录 |
@@ -278,7 +278,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | POST | `/api/ai/questions/tutor/clear` | 已登录 | 切断指定题目的当前 AI 会话上下文，旧问答仍保留为学习历史 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
 | POST | `/api/review/sentence-variants` | 已登录 | 按已学词句、近期变式和薄弱点创建或恢复后台句子变式任务；可带当前账号选择的 `model`、`reasoningEffort` 和强制新一轮的 `force` |
-| GET | `/api/review/sentence-variants?jobId=...` | 已登录 | 轮询后台句子变式任务；合格项立即保留，失败项最多修正 3 轮并返回精确原因；内容失败不会无限自动请求 |
+| GET | `/api/review/sentence-variants?jobId=...` | 已登录 | 轮询后台句子变式任务；单次上游等待最多 10 分钟，合格项立即保留，失败项最多修正 3 轮并返回精确原因；网络/上游失败会在 5 分钟后继续尝试，内容失败不会无限自动请求 |
 | GET | `/api/ai/exams` | 已登录 | 获取脱敏后的试卷状态和历史 |
 | POST | `/api/ai/exams/generate` | 已登录 | 创建 100 分或 150 分完整试卷的后台生成任务，需发送 `X-English-Review-Exam-Version: 2`，返回 `202`；旧网页会收到明确的刷新提示 |
 | PUT | `/api/ai/exams/current` | 已登录 | 保存整卷草稿，不触发判分 |
@@ -319,7 +319,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 }
 ```
 
-`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。一般 AI 请求的超时配置范围为 1 至 120 秒，默认 30 秒；完整试卷输出较长，试卷生成任务会把本次上游等待时间提高到 120 秒。今日复习句子变式使用账号当前选择的模型和强度，并在独立后台任务中运行，不使用账号 90/120 秒固定超时中止；网页通过 `jobId` 轮询，因此 Cloudflare 单次网页请求结束也不会取消后台生成。内容不达标时最多修正 3 轮，随后停止自动重试并提示手动重试或更换模型；只有网络、限流或上游暂时不可用才按 5 分钟自动重试。
+`reasoningEffort` 允许 `low`、`medium`、`high`、`xhigh`、`max`。模型必须位于管理员网页配置的允许列表中。一般 AI 请求的超时配置范围为 1 至 120 秒，默认 30 秒；完整试卷输出较长，试卷生成任务会把本次上游等待时间提高到 120 秒。今日复习句子变式使用账号当前选择的模型和强度，并在独立后台任务中运行；每次后台任务最多运行 10 分钟，单次上游请求会被安全中止，避免连接卡住后永久 `pending`。网页通过 `jobId` 轮询，因此 Cloudflare 单次网页请求结束也不会取消后台生成。内容不达标时最多修正 3 轮，随后停止自动重试并提示手动重试或更换模型；只有网络、限流或上游暂时不可用才按 5 分钟自动重试，重试没有总次数上限。
 
 生成试卷请求：
 

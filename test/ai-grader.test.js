@@ -220,7 +220,7 @@ test("AI review variant parser keeps task ids and Chinese answer alternatives", 
   assert.deepEqual(result[0], { taskId: "d2-s3:en-zh", english: "A pig sat on a box.", chinese: "一头猪坐在一个箱子上。", acceptedChinese: ["一头猪坐在一个箱子上。", "一只猪坐在箱子上"] });
 });
 
-test("AI review variant repair requests include validation feedback and do not use the fixed provider timeout", async () => {
+test("AI review variant repair requests include validation feedback and honor an explicit timeout", async () => {
   let requestOptions;
   const generator = createAiReviewVariantGenerator(aiConfig({ timeoutMs: 1 }), { fetchImpl: async (_url, options) => {
     requestOptions = options;
@@ -234,14 +234,39 @@ test("AI review variant repair requests include validation feedback and do not u
     targets: [{ taskId: "d2-s3:en-zh", grammarFamily: "sat-on", sourceEnglish: "A pig sat on a mat.", sourceChinese: "一头猪坐在一张垫子上。" }],
     excludedEnglish: ["A pig sat on a mat."],
     weakItems: [],
+    timeoutMs: 5000,
     validationFeedback: [{ taskId: "d2-s3:en-zh", reasonCode: "unlearned-word", problem: "含有未学单词", unlearnedWords: ["dog"] }]
   });
   assert.equal(result[0].english, "A red pig sat on a box.");
-  assert.equal(Object.hasOwn(requestOptions, "signal"), false, "review generation must continue without the provider timeout abort signal");
+  assert.ok(requestOptions.signal instanceof AbortSignal, "review generation must use the explicit provider timeout abort signal");
   const requestBody = JSON.parse(requestOptions.body);
   const input = JSON.parse(requestBody.messages[1].content);
   assert.equal(input.validationFeedback[0].reasonCode, "unlearned-word");
   assert.match(requestBody.messages[0].content, /correct every listed failure/);
+});
+
+test("AI review variant generation aborts a hung upstream at the explicit timeout", async () => {
+  let aborted = false;
+  const generator = createAiReviewVariantGenerator(aiConfig({ timeoutMs: 10000 }), {
+    fetchImpl: async (_url, options) => new Promise((resolve, reject) => {
+      assert.ok(options.signal instanceof AbortSignal);
+      options.signal.addEventListener("abort", () => {
+        aborted = true;
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+    })
+  });
+  await assert.rejects(() => generator.generate({
+    allowedWords: ["a", "pig", "sat", "on", "a", "mat"],
+    grammarFamilies: { "sat-on": "subject + sat on + an object" },
+    targets: [{ taskId: "d2-s3:en-zh", grammarFamily: "sat-on", sourceEnglish: "A pig sat on a mat.", sourceChinese: "一头猪坐在一张垫子上。" }],
+    excludedEnglish: ["A pig sat on a mat."],
+    weakItems: [],
+    timeoutMs: 25
+  }), /timed out/);
+  assert.equal(aborted, true);
 });
 
 test("AI preview sentence parser keeps target preview words and translations", async () => {

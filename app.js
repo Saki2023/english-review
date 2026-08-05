@@ -51,6 +51,8 @@
   const EXAM_GENERATION_POLL_MS = 2000;
   const REVIEW_VARIANT_POLL_MS = 2000;
   const REVIEW_VARIANT_RETRY_MS = 5 * 60 * 1000;
+  const REVIEW_VARIANT_WAIT_TIMEOUT_MS = 12 * 60 * 1000;
+  const REVIEW_VARIANT_POLL_REQUEST_TIMEOUT_MS = 15000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
   let remoteReady = !API_ENABLED;
   let remoteSaveTimer;
@@ -4074,10 +4076,10 @@
     label.textContent = busy ? "正在请求…" : "立即重试";
     const validationStopped = reviewVariantStatusMessage.includes("停止自动重试");
     note.textContent = busy
-      ? "AI 正在后台生成；网络或上游失败后会每 5 分钟自动重试。"
+      ? "AI 正在后台生成，单次最多等待 10 分钟；网络或上游失败后会每 5 分钟自动重试。"
       : validationStopped
         ? "本轮内容校验已经停止；可立即重试或先更换模型。"
-        : "AI 暂不可用时可立即再试；网络或上游失败每 5 分钟自动重试。";
+      : "AI 暂不可用时可立即再试；网络或上游失败每 5 分钟自动重试。单次任务最多等待 10 分钟。";
   }
 
   function sentenceTasksMissingVariants(session) {
@@ -4120,16 +4122,49 @@
 
   async function waitForReviewVariantJob(data, key) {
     let current = data;
+    const waitStartedAt = Date.now();
     while (current && current.status === "pending" && current.jobId) {
-      reviewVariantStatusMessage = String(current.message || "AI 正在后台生成并校验句子，可暂时离开本页。").slice(0, 180);
+      const elapsed = Date.now() - waitStartedAt;
+      if (elapsed >= REVIEW_VARIANT_WAIT_TIMEOUT_MS) {
+        const timeoutError = new Error("AI 句子变式本次等待超过 12 分钟，已停止页面轮询；后台任务会每 5 分钟自动重试。");
+        timeoutError.statusCode = 504;
+        throw timeoutError;
+      }
+      reviewVariantStatusMessage = String(current.message || "AI 正在后台生成并校验句子，单次最多等待 10 分钟；失败后每 5 分钟自动重试。").slice(0, 180);
       if (activeView === "home") renderHome();
-      const delay = Math.max(500, Math.min(10000, Number(current.pollAfterMs) || REVIEW_VARIANT_POLL_MS));
+      const remaining = REVIEW_VARIANT_WAIT_TIMEOUT_MS - elapsed;
+      const requestedDelay = Math.max(500, Number(current.pollAfterMs) || REVIEW_VARIANT_POLL_MS);
+      const delay = Math.min(10000, requestedDelay, remaining);
+      if (delay <= 0) {
+        const timeoutError = new Error("AI 句子变式本次等待超过 12 分钟，已停止页面轮询；后台任务会每 5 分钟自动重试。");
+        timeoutError.statusCode = 504;
+        throw timeoutError;
+      }
       await new Promise(resolve => setTimeout(resolve, delay));
       if (reviewVariantBatchKey(getSession()) !== key) return null;
-      current = await responseJson(await fetch(`/api/review/sentence-variants?jobId=${encodeURIComponent(current.jobId)}`, {
-        credentials: "same-origin",
-        cache: "no-store"
-      }));
+      if (Date.now() - waitStartedAt >= REVIEW_VARIANT_WAIT_TIMEOUT_MS) {
+        const timeoutError = new Error("AI 句子变式本次等待超过 12 分钟，已停止页面轮询；后台任务会每 5 分钟自动重试。");
+        timeoutError.statusCode = 504;
+        throw timeoutError;
+      }
+      const controller = new AbortController();
+      const pollTimeout = setTimeout(() => controller.abort(), REVIEW_VARIANT_POLL_REQUEST_TIMEOUT_MS);
+      try {
+        current = await responseJson(await fetch(`/api/review/sentence-variants?jobId=${encodeURIComponent(current.jobId)}`, {
+          credentials: "same-origin",
+          cache: "no-store",
+          signal: controller.signal
+        }));
+      } catch (error) {
+        if (error && error.name === "AbortError") {
+          const timeoutError = new Error("查询句子变式后台任务超时，将每 5 分钟自动重试。");
+          timeoutError.statusCode = 504;
+          throw timeoutError;
+        }
+        throw error;
+      } finally {
+        clearTimeout(pollTimeout);
+      }
     }
     return current;
   }
@@ -4319,7 +4354,7 @@
           ? "这道句子变式暂时待生成，AI 恢复后会自动重试。"
           : "AI 正在根据你已经学过的单词和句型准备新句子…";
       $("#promptSpeech").innerHTML = "";
-      $("#phoneticLine").textContent = "不会加入未学单词；AI 暂不可用时每 5 分钟自动重试，不使用本地备用句。";
+      $("#phoneticLine").textContent = "不会加入未学单词；单次生成最多等待 10 分钟，AI 暂不可用时每 5 分钟自动重试，不使用本地备用句。";
       $("#exampleLine").textContent = "";
       $("#answerInput").value = "";
       $("#answerInput").disabled = true;
@@ -5100,7 +5135,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=41", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=42", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

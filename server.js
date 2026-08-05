@@ -80,6 +80,7 @@ const AI_SENTENCE_RETRY_SECONDS = 5 * 60;
 const REVIEW_VARIANT_MAX_REPAIR_ROUNDS = 3;
 const REVIEW_VARIANT_JOB_POLL_MS = 2000;
 const REVIEW_VARIANT_JOB_CACHE_MS = 10 * 60 * 1000;
+const REVIEW_VARIANT_UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000;
 
 ensureDataDir();
 const aiSettingsStore = createAiSettingsStore(DATA_DIR);
@@ -824,6 +825,7 @@ function repairFeedback(failures) {
 }
 
 async function generateReviewVariantsWithRepairs(route, input) {
+  const deadlineMs = Date.now() + REVIEW_VARIANT_UPSTREAM_TIMEOUT_MS;
   const accepted = new Map();
   const taskById = new Map(input.tasks.map(task => [task.taskId, task]));
   const fixedEnglish = new Set(input.fixedEnglish.map(normalizeVariantEnglish).filter(Boolean));
@@ -836,6 +838,9 @@ async function generateReviewVariantsWithRepairs(route, input) {
 
   for (let round = 1; round <= REVIEW_VARIANT_MAX_REPAIR_ROUNDS && pending.length; round += 1) {
     repairRounds = round;
+    if (deadlineMs - Date.now() <= 0) {
+      throw Object.assign(new Error("AI review variant generation timed out"), { code: "REVIEW_VARIANT_TIMEOUT" });
+    }
     let routed;
     try {
       routed = await runAiRoute(route, config => createAiReviewVariantGenerator(config).generate({
@@ -844,7 +849,8 @@ async function generateReviewVariantsWithRepairs(route, input) {
         targets: pending.map(task => ({ taskId: task.taskId, grammarFamily: sentenceFamily(task.baseItem), sourceEnglish: task.baseItem.english, sourceChinese: task.baseItem.chinese })),
         excludedEnglish: Array.from(new Set([...input.excludedEnglish, ...Array.from(accepted.values()).map(item => item.english)])),
         weakItems: input.weakItems,
-        validationFeedback
+        validationFeedback,
+        timeoutMs: Math.max(1, deadlineMs - Date.now())
       }));
     } catch (error) {
       if (!reviewVariantOutputError(error)) throw error;
@@ -918,12 +924,15 @@ function deleteReviewVariantJob(job) {
 function purgeReviewVariantJobs() {
   const current = Date.now();
   reviewVariantJobsById.forEach(job => {
+    if (job.status === "pending" && current - Number(job.startedAtMs || current) >= REVIEW_VARIANT_UPSTREAM_TIMEOUT_MS) {
+      failReviewVariantJob(job, Object.assign(new Error("AI review variant generation timed out"), { code: "REVIEW_VARIANT_TIMEOUT" }));
+    }
     if (job.status !== "pending" && current - Number(job.finishedAtMs || job.startedAtMs) > REVIEW_VARIANT_JOB_CACHE_MS) deleteReviewVariantJob(job);
   });
 }
 
 function sendReviewVariantJob(res, job) {
-  if (job.status === "pending") return sendJson(res, 202, { status: "pending", jobId: job.id, pollAfterMs: REVIEW_VARIANT_JOB_POLL_MS, message: "AI 正在后台生成并校验句子，可暂时离开本页。" });
+  if (job.status === "pending") return sendJson(res, 202, { status: "pending", jobId: job.id, pollAfterMs: REVIEW_VARIANT_JOB_POLL_MS, message: "AI 正在后台生成并校验句子，单次最多等待 10 分钟；失败后每 5 分钟自动重试。" });
   if (job.status === "completed") return sendJson(res, 200, job.result, job.result.retryAfterMs ? { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) } : {});
   return sendJson(res, job.failure.statusCode, {
     error: job.failure.message,
@@ -931,6 +940,14 @@ function sendReviewVariantJob(res, job) {
     reasonCode: job.failure.reasonCode,
     providerStatus: job.failure.providerStatus
   }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
+}
+
+function failReviewVariantJob(job, error) {
+  if (!job || job.status !== "pending") return;
+  job.status = "failed";
+  job.failure = publicAiSentenceVariantFailure(error);
+  job.finishedAtMs = Date.now();
+  if (reviewVariantJobIdsByKey.get(job.key) === job.id) reviewVariantJobIdsByKey.delete(job.key);
 }
 
 function startReviewVariantJob(user, key, route, input) {
@@ -942,18 +959,29 @@ function startReviewVariantJob(user, key, route, input) {
     startedAtMs: Date.now(),
     finishedAtMs: 0,
     result: null,
-    failure: null
+    failure: null,
+    timeoutTimer: null
   };
   reviewVariantJobsById.set(job.id, job);
   reviewVariantJobIdsByKey.set(key, job.id);
+  job.timeoutTimer = setTimeout(() => {
+    if (job.status !== "pending") return;
+    console.warn(`AI review variant job timed out after ${Math.round(REVIEW_VARIANT_UPSTREAM_TIMEOUT_MS / 60000)} minutes; retry will be scheduled`);
+    failReviewVariantJob(job, Object.assign(new Error("AI review variant generation timed out"), { code: "REVIEW_VARIANT_TIMEOUT" }));
+  }, REVIEW_VARIANT_UPSTREAM_TIMEOUT_MS);
+  if (job.timeoutTimer && typeof job.timeoutTimer.unref === "function") job.timeoutTimer.unref();
   job.promise = generateReviewVariantsWithRepairs(route, input).then(result => {
+    if (job.status !== "pending") return;
     job.status = "completed";
     job.result = result;
   }).catch(error => {
+    if (job.status !== "pending") return;
     console.warn(`AI review variant generation failed; retry will be scheduled: ${error && error.message ? error.message : "unknown error"}`);
-    job.status = "failed";
-    job.failure = publicAiSentenceVariantFailure(error);
-  }).finally(() => { job.finishedAtMs = Date.now(); });
+    failReviewVariantJob(job, error);
+  }).finally(() => {
+    if (job.timeoutTimer) clearTimeout(job.timeoutTimer);
+    if (job.status === "pending") job.finishedAtMs = Date.now();
+  });
   return job;
 }
 
@@ -1115,7 +1143,7 @@ function publicAiSentenceVariantFailure(error) {
     message = "AI 上游服务暂时不可用，将每 5 分钟自动重试";
     reasonCode = "provider-service";
   } else if (/timed out/i.test(detail)) {
-    message = "AI 句子变式请求被上游或网络中断，将每 5 分钟自动重试";
+    message = "AI 句子变式单次生成超过 10 分钟，已停止本次任务，将每 5 分钟自动重试";
     reasonCode = "timeout";
     statusCode = 504;
   } else if (/too large/i.test(detail)) {
