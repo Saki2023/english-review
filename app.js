@@ -80,6 +80,7 @@
   let reviewVariantRetryTimer = null;
   let reviewVariantRetryKey = "";
   let reviewVariantStatusMessage = "";
+  let reviewVariantPoolStatus = null;
   let studyClockTimer = null;
   let studyClockRunning = false;
   let studyClockLastTickAt = 0;
@@ -1113,6 +1114,19 @@
     }
   }
 
+  function mergeReviewSessions(localSession, remoteSession) {
+    const local = normalizeClientReviewSession(localSession);
+    const remote = normalizeClientReviewSession(remoteSession);
+    const preferred = (remote.doneTaskIds || []).length >= (local.doneTaskIds || []).length ? remote : local;
+    return normalizeClientReviewSession({
+      ...preferred,
+      variants: {
+        ...(remote.variants && typeof remote.variants === "object" ? remote.variants : {}),
+        ...(local.variants && typeof local.variants === "object" ? local.variants : {})
+      }
+    });
+  }
+
   function mergeModels(local, remote) {
     const remoteTaskStates = remote && remote.taskStates ? remote.taskStates : {};
     const merged = {
@@ -1146,7 +1160,7 @@
     merged.mistakes = merged.mistakes.slice(-80);
     Object.entries(remote && remote.sessions ? remote.sessions : {}).forEach(([date, remoteSession]) => {
       const localSession = merged.sessions[date];
-      if (!localSession || (remoteSession.doneTaskIds || []).length >= (localSession.doneTaskIds || []).length) merged.sessions[date] = normalizeClientReviewSession(remoteSession);
+      merged.sessions[date] = localSession ? mergeReviewSessions(localSession, remoteSession) : normalizeClientReviewSession(remoteSession);
     });
     Object.keys(merged.sessions).forEach(date => { merged.sessions[date] = normalizeClientReviewSession(merged.sessions[date]); });
     return repairReviewEvidence(DATA, merged).state;
@@ -1159,6 +1173,7 @@
       if (response.status === 401) return showAuthView();
       if (!response.ok) throw new Error("state request failed");
       const remote = await response.json();
+      if (remote && remote.reviewVariantPool) reviewVariantPoolStatus = remote.reviewVariantPool;
       model = mergeModels(model, remote);
       remoteReady = true;
       saveModel();
@@ -1355,6 +1370,24 @@
     $("#generateAiQuestions").disabled = !aiOptions.configured || aiRequestInProgress;
   }
 
+  async function prefetchReviewVariantPool(force = false) {
+    if (!API_ENABLED || !aiOptionsLoaded || !aiOptions.configured) return;
+    try {
+      const settings = selectedAiSettings();
+      const response = await fetch("/api/review/sentence-variants", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prefetch: true, model: settings.model, reasoningEffort: settings.reasoningEffort, force: Boolean(force) })
+      });
+      const data = await responseJson(response);
+      if (data && data.pool) reviewVariantPoolStatus = data.pool;
+      if (activeView === "home") renderHome();
+    } catch (_) {
+      // The review page keeps working with the already persisted pool and retries through the normal sentence flow.
+    }
+  }
+
   async function loadAiOptions() {
     aiStatusMessage = "";
     if (!API_ENABLED) {
@@ -1395,6 +1428,7 @@
     renderExamView();
     if (activeView === "home") renderHome();
     preparePreviewPracticeSentences();
+    void prefetchReviewVariantPool();
   }
 
   async function loadAiExams() {
@@ -4201,6 +4235,7 @@
         data = await waitForReviewVariantJob(data, key);
         if (!data) return;
         if (data.source !== "ai") throw Object.assign(new Error("AI 未返回可固定的句子变式"), { statusCode: 503 });
+        if (data.pool) reviewVariantPoolStatus = data.pool;
         const missingIds = new Set(missing.map(task => task.taskId));
         let added = 0;
         (Array.isArray(data.variants) ? data.variants : []).forEach(item => {
@@ -4314,6 +4349,16 @@
   function renderHome() {
     const session = ensureBatch();
     const stats = todayStats();
+    const pool = reviewVariantPoolStatus && typeof reviewVariantPoolStatus === "object" ? reviewVariantPoolStatus : null;
+    const poolStatus = $("#reviewVariantPoolStatus");
+    if (poolStatus) {
+      if (!pool || !pool.targetCount) poolStatus.textContent = "";
+      else if (pool.status === "ready" || Number(pool.generatedCount) >= Number(pool.targetCount)) poolStatus.textContent = `今日 AI 句子池：${pool.generatedCount}/${pool.targetCount}，刷新后会继续保留`;
+      else if (pool.status === "pending") poolStatus.textContent = `今日 AI 句子池正在后台生成：${pool.generatedCount}/${pool.targetCount}，已生成的会立即保存`;
+      else if (pool.status === "failed") poolStatus.textContent = `今日 AI 句子池暂时失败（${pool.generatedCount}/${pool.targetCount}），稍后会自动重试`;
+      else if (pool.status === "needs-attention") poolStatus.textContent = `今日 AI 句子池需要重试（${pool.generatedCount}/${pool.targetCount}）`;
+      else poolStatus.textContent = `今日 AI 句子池：${pool.generatedCount || 0}/${pool.targetCount}`;
+    }
     const due = taskCandidates(reviewMode, new Set()).length;
     const done = session.doneTaskIds.length;
     $("#todayLabel").textContent = displayDate();
@@ -5135,7 +5180,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=42", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=43", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

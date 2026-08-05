@@ -279,6 +279,22 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
 | POST | `/api/review/sentence-variants` | 已登录 | 按已学词句、近期变式和薄弱点创建或恢复后台句子变式任务；可带当前账号选择的 `model`、`reasoningEffort` 和强制新一轮的 `force` |
 | GET | `/api/review/sentence-variants?jobId=...` | 已登录 | 轮询后台句子变式任务；单次上游等待最多 10 分钟，合格项立即保留，失败项最多修正 3 轮并返回精确原因；网络/上游失败会在 5 分钟后继续尝试，内容失败不会无限自动请求 |
+
+### 每日 100 条句子池
+
+`POST /api/review/sentence-variants` 还支持后台预生成请求：
+
+```json
+{
+  "prefetch": true,
+  "model": "当前账号选择的模型",
+  "reasoningEffort": "medium"
+}
+```
+
+预生成按每批最多 20 条执行，目标为当天 100 条。每批成功后立即写入该账号的服务器状态；返回的 `pool` 只包含摘要（`date`、`generatedCount`、`targetCount`、`status`），不会把完整句子池塞进浏览器状态请求。当天刷新、重新登录或服务重启后，复习请求会从同一池按句型稳定分配；日期变化或已学课程内容签名变化时，旧池会被丢弃并重新建立。句子池不写入正式词句库。
+
+`status` 可能为 `pending`、`ready`、`failed` 或 `needs-attention`。网络/上游暂时失败会在 5 分钟后继续尝试；内容连续 3 轮无法通过校验时会暂停，网页可用 `force: true` 手动重新开始。
 | GET | `/api/ai/exams` | 已登录 | 获取脱敏后的试卷状态和历史 |
 | POST | `/api/ai/exams/generate` | 已登录 | 创建 100 分或 150 分完整试卷的后台生成任务，需发送 `X-English-Review-Exam-Version: 2`，返回 `202`；旧网页会收到明确的刷新提示 |
 | PUT | `/api/ai/exams/current` | 已登录 | 保存整卷草稿，不触发判分 |

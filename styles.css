@@ -128,6 +128,7 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .question-count { color: var(--muted); font-size: 12px; }
 .question-area { max-width: 720px; margin: 0 auto; padding: 45px 22px 6px; text-align: center; }
 .direction-label { margin-bottom: 14px; color: var(--muted); font-size: 13px; }
+.review-pool-status { margin: 8px 0 0; color: var(--muted); font-size: 12px; text-align: center; min-height: 18px; }
 .prompt-text { min-height: 58px; color: var(--ink); font-size: 34px; line-height: 1.35; font-weight: 500; overflow-wrap: anywhere; }
 .phonetic-line { min-height: 22px; margin-top: 8px; color: var(--primary); font-size: 16px; }
 .review-variant-retry { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 18px auto 0; color: var(--muted); font-size: 12px; line-height: 1.5; }

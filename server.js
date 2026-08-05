@@ -14,6 +14,17 @@ const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./se
 const { publicTeachingProfile, sanitizeTeachingProfile } = require("./server/teaching-profile");
 const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis");
 const { normalizeEnglish: normalizeVariantEnglish, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById, validateGeneratedSentenceVariant } = require("./review-variants");
+const {
+  REVIEW_VARIANT_POOL_BATCH,
+  REVIEW_VARIANT_POOL_TARGET,
+  assignReviewVariantPoolTasks,
+  buildReviewVariantPoolTasks,
+  ensureReviewVariantPool,
+  reviewVariantContentSignature,
+  reviewVariantPoolSummary,
+  sanitizeReviewVariantPool,
+  storeReviewVariantPoolResults
+} = require("./server/review-variant-pool");
 const { sanitizePreviewPractice } = require("./server/preview-practice");
 const { repairLearningEvidence } = require("./server/evidence-repair");
 const { normalizeStudyTime } = require("./study-time");
@@ -81,6 +92,7 @@ const REVIEW_VARIANT_MAX_REPAIR_ROUNDS = 3;
 const REVIEW_VARIANT_JOB_POLL_MS = 2000;
 const REVIEW_VARIANT_JOB_CACHE_MS = 10 * 60 * 1000;
 const REVIEW_VARIANT_UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000;
+const REVIEW_VARIANT_POOL_AUTOFILL = process.env.REVIEW_VARIANT_POOL_AUTOFILL !== "false";
 
 ensureDataDir();
 const aiSettingsStore = createAiSettingsStore(DATA_DIR);
@@ -93,6 +105,8 @@ let userStates = loadUserStates();
 const activeExamGenerationJobs = new Map();
 const reviewVariantJobsById = new Map();
 const reviewVariantJobIdsByKey = new Map();
+const reviewVariantPoolJobsByUserId = new Map();
+const reviewVariantPoolRetryTimersByUserId = new Map();
 const legacyState = repairLearningEvidence(content, sanitizeState(readJson(LEGACY_STATE_FILE, {}))).state;
 repairStoredUserStates();
 
@@ -192,13 +206,14 @@ function sanitizeState(value) {
     aiExam: sanitizeAiExamState(source.aiExam),
     dictation: sanitizeDictationState(source.dictation),
     focusedPractice: sanitizeFocusedState(source.focusedPractice),
-    teachingProfile: sanitizeTeachingProfile(source.teachingProfile)
+    teachingProfile: sanitizeTeachingProfile(source.teachingProfile),
+    reviewVariantPool: sanitizeReviewVariantPool(source.reviewVariantPool)
   };
 }
 
 function publicReviewState(value) {
-  const { aiExam, dictation, focusedPractice, teachingProfile, ...reviewState } = sanitizeState(value);
-  return reviewState;
+  const { aiExam, dictation, focusedPractice, teachingProfile, reviewVariantPool, ...reviewState } = sanitizeState(value);
+  return { ...reviewState, reviewVariantPool: reviewVariantPoolSummary(reviewVariantPool) };
 }
 
 function defaultState() { return repairLearningEvidence(content, sanitizeState({})).state; }
@@ -242,7 +257,7 @@ function repairStoredUserStates() {
   Object.entries(userStates.users).forEach(([userId, value]) => {
     const repaired = repairLearningEvidence(content, sanitizeState(value));
     userStates.users[userId] = repaired.state;
-    if (repaired.changed) changed = true;
+    if (repaired.changed || JSON.stringify(repaired.state) !== JSON.stringify(value)) changed = true;
   });
   if (changed) persistUserStates();
 }
@@ -326,15 +341,24 @@ function sessionCookie(req, token, maxAge = SESSION_MAX_AGE) {
 function clearSessionCookie(req) { return sessionCookie(req, "", 0); }
 
 function getUserState(user) {
+  let changed = false;
   if (!userStates.users[user.id]) {
     const canMigrate = user.role === "admin" && users.users.length === 1 && !isEmptyState(legacyState);
     userStates.users[user.id] = canMigrate ? legacyState : defaultState();
-    persistUserStates();
+    changed = true;
   } else {
     const repaired = repairLearningEvidence(content, sanitizeState(userStates.users[user.id]));
     userStates.users[user.id] = repaired.state;
-    if (repaired.changed) persistUserStates();
+    if (repaired.changed) changed = true;
   }
+  const ensured = ensureReviewVariantPool(userStates.users[user.id].reviewVariantPool, {
+    date: today(),
+    contentSignature: reviewVariantContentSignature(content),
+    targetCount: REVIEW_VARIANT_POOL_TARGET
+  });
+  userStates.users[user.id].reviewVariantPool = ensured.pool;
+  if (ensured.changed) changed = true;
+  if (changed) persistUserStates();
   return userStates.users[user.id];
 }
 
@@ -567,7 +591,7 @@ function handleState(req, res, user) {
   if (req.method === "GET") return sendJson(res, 200, publicReviewState(getUserState(user)));
   if (req.method === "PUT") return readBody(req).then(body => {
     const existing = getUserState(user);
-    userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({ ...body, aiExam: existing.aiExam, dictation: existing.dictation, focusedPractice: existing.focusedPractice, teachingProfile: existing.teachingProfile })).state;
+    userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({ ...body, aiExam: existing.aiExam, dictation: existing.dictation, focusedPractice: existing.focusedPractice, teachingProfile: existing.teachingProfile, reviewVariantPool: existing.reviewVariantPool })).state;
     persistUserStates();
     sendJson(res, 200, publicReviewState(userStates.users[user.id]));
   }).catch(error => sendError(res, error.statusCode || 400, error.message));
@@ -911,6 +935,181 @@ async function generateReviewVariantsWithRepairs(route, input) {
   };
 }
 
+function reviewVariantGrammarFamilies() {
+  return {
+    identity: "subject + am/is + a person or identity",
+    description: "It is + an adjective, or It is a/an + adjective/noun",
+    "sat-on": "subject + sat on + a surface or object",
+    inside: "subject + is in + a place or container",
+    on: "subject + is on + a surface or object"
+  };
+}
+
+function buildReviewVariantGenerationInput(state, date, route, tasks, extraExcludedEnglish = []) {
+  const profile = buildLearningProfile(content, state, date);
+  const recent = recentReviewVariants(state);
+  const fixedEnglish = content.sentences.map(item => item.english);
+  const recentEnglish = Array.from(new Set([
+    ...recent.map(item => item.english).filter(Boolean),
+    ...(Array.isArray(extraExcludedEnglish) ? extraExcludedEnglish : [])
+  ]));
+  return {
+    date,
+    tasks,
+    route,
+    allowedWords: profile.allowedWords,
+    grammarFamilies: reviewVariantGrammarFamilies(),
+    fixedEnglish,
+    recentEnglish,
+    excludedEnglish: Array.from(new Set([...fixedEnglish, ...recentEnglish])),
+    weakItems: profile.weakItems.slice(0, 12)
+  };
+}
+
+function persistReviewVariantJobResult(user, input, result) {
+  const state = getUserState(user);
+  const pool = state.reviewVariantPool;
+  if (pool.date !== input.date || pool.contentSignature !== reviewVariantContentSignature(content)) {
+    return { ...result, pool: reviewVariantPoolSummary(pool) };
+  }
+  const taskFamilies = Object.fromEntries(input.tasks.map(task => [task.taskId, sentenceFamily(task.baseItem)]));
+  const stored = storeReviewVariantPoolResults(pool, result.variants, { taskFamilies });
+  stored.pool.model = result.model || input.route.model;
+  stored.pool.reasoningEffort = result.reasoningEffort || input.route.reasoningEffort;
+  state.reviewVariantPool = stored.pool;
+  persistUserStates();
+  return { ...result, pool: reviewVariantPoolSummary(stored.pool) };
+}
+
+function clearReviewVariantPoolRetry(userId) {
+  const timer = reviewVariantPoolRetryTimersByUserId.get(userId);
+  if (timer) clearTimeout(timer);
+  reviewVariantPoolRetryTimersByUserId.delete(userId);
+}
+
+function scheduleReviewVariantPoolRetry(user, date, contentSignature, route) {
+  clearReviewVariantPoolRetry(user.id);
+  const timer = setTimeout(() => {
+    reviewVariantPoolRetryTimersByUserId.delete(user.id);
+    refreshContent();
+    const state = getUserState(user);
+    const pool = state.reviewVariantPool;
+    if (pool.date !== date || pool.contentSignature !== contentSignature || pool.status !== "failed") return;
+    if (!aiConfigured()) return scheduleReviewVariantPoolRetry(user, date, contentSignature, route);
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) return scheduleReviewVariantPoolRetry(user, date, contentSignature, route);
+    startReviewVariantPoolFill(user, route, true);
+  }, AI_SENTENCE_RETRY_MS);
+  if (timer && typeof timer.unref === "function") timer.unref();
+  reviewVariantPoolRetryTimersByUserId.set(user.id, timer);
+}
+
+function startReviewVariantPoolFill(user, route, force = false) {
+  if (!REVIEW_VARIANT_POOL_AUTOFILL) return null;
+  const state = getUserState(user);
+  const pool = state.reviewVariantPool;
+  const existing = reviewVariantPoolJobsByUserId.get(user.id);
+  if (existing && existing.date === pool.date && existing.contentSignature === pool.contentSignature) return existing;
+  if (pool.variants.length >= pool.targetCount || pool.status === "ready") return null;
+  if (!force && pool.status === "needs-attention") return null;
+  if (!force && pool.status === "failed" && Date.parse(pool.nextRetryAt || "") > Date.now()) return null;
+  if (existing) reviewVariantPoolJobsByUserId.delete(user.id);
+  clearReviewVariantPoolRetry(user.id);
+  pool.status = "pending";
+  pool.model = route.model;
+  pool.reasoningEffort = route.reasoningEffort;
+  pool.error = "";
+  pool.nextRetryAt = "";
+  pool.updatedAt = new Date().toISOString();
+  persistUserStates();
+
+  const job = {
+    id: `review-pool-${crypto.randomUUID()}`,
+    userId: user.id,
+    date: pool.date,
+    contentSignature: pool.contentSignature,
+    status: "pending",
+    startedAtMs: Date.now(),
+    promise: null
+  };
+  reviewVariantPoolJobsByUserId.set(user.id, job);
+  job.promise = (async () => {
+    let batches = 0;
+    while (batches < 20) {
+      refreshContent();
+      const currentState = getUserState(user);
+      let currentPool = currentState.reviewVariantPool;
+      if (currentPool.date !== job.date || currentPool.contentSignature !== job.contentSignature) return;
+      if (currentPool.variants.length >= currentPool.targetCount) {
+        currentPool.status = "ready";
+        currentPool.error = "";
+        currentPool.nextRetryAt = "";
+        currentState.reviewVariantPool = currentPool;
+        persistUserStates();
+        job.status = "completed";
+        return;
+      }
+      const tasks = buildReviewVariantPoolTasks(content, currentPool, REVIEW_VARIANT_POOL_BATCH);
+      if (!tasks.length) {
+        currentPool.status = "needs-attention";
+        currentPool.error = "当前已学句型不足，无法继续生成今日句子池。";
+        currentPool.updatedAt = new Date().toISOString();
+        currentState.reviewVariantPool = currentPool;
+        persistUserStates();
+        job.status = "needs-attention";
+        return;
+      }
+      const input = buildReviewVariantGenerationInput(currentState, job.date, route, tasks, currentPool.variants.map(item => item.english));
+      const result = await generateReviewVariantsWithRepairs(route, input);
+      const taskFamilies = Object.fromEntries(tasks.map(task => [task.taskId, task.family]));
+      const stored = storeReviewVariantPoolResults(currentPool, result.variants, { requestedCount: tasks.length, taskFamilies });
+      currentPool = stored.pool;
+      currentPool.model = result.model || route.model;
+      currentPool.reasoningEffort = result.reasoningEffort || route.reasoningEffort;
+      currentPool.updatedAt = new Date().toISOString();
+      if (!stored.added) {
+        currentPool.status = "needs-attention";
+        currentPool.error = result.message || "连续 3 轮没有生成新的合格句子，已停止自动重试。";
+        currentState.reviewVariantPool = currentPool;
+        persistUserStates();
+        job.status = "needs-attention";
+        return;
+      }
+      currentPool.status = currentPool.variants.length >= currentPool.targetCount ? "ready" : "pending";
+      currentPool.error = "";
+      currentPool.nextRetryAt = "";
+      currentState.reviewVariantPool = currentPool;
+      persistUserStates();
+      batches += 1;
+    }
+    const currentState = getUserState(user);
+    if (currentState.reviewVariantPool.date === job.date && currentState.reviewVariantPool.status !== "ready") {
+      currentState.reviewVariantPool.status = "needs-attention";
+      currentState.reviewVariantPool.error = "今日句子池尚未补满，请点立即重试继续生成。";
+      currentState.reviewVariantPool.updatedAt = new Date().toISOString();
+      persistUserStates();
+    }
+    job.status = currentState.reviewVariantPool.status;
+  })().catch(error => {
+    console.warn(`AI review variant pool generation failed; retry will be scheduled: ${error && error.message ? error.message : "unknown error"}`);
+    const currentState = getUserState(user);
+    const currentPool = currentState.reviewVariantPool;
+    if (currentPool.date !== job.date || currentPool.contentSignature !== job.contentSignature) return;
+    const failure = publicAiSentenceVariantFailure(error);
+    currentPool.status = "failed";
+    currentPool.error = failure.message;
+    currentPool.nextRetryAt = new Date(Date.now() + AI_SENTENCE_RETRY_MS).toISOString();
+    currentPool.updatedAt = new Date().toISOString();
+    currentState.reviewVariantPool = currentPool;
+    persistUserStates();
+    job.status = "failed";
+    scheduleReviewVariantPoolRetry(user, job.date, job.contentSignature, route);
+  }).finally(() => {
+    if (reviewVariantPoolJobsByUserId.get(user.id) === job) reviewVariantPoolJobsByUserId.delete(user.id);
+  });
+  return job;
+}
+
 function reviewVariantJobKey(userId, input) {
   return crypto.createHash("sha256").update(JSON.stringify({ userId, date: input.date, taskIds: input.tasks.map(task => task.taskId), model: input.route.model, reasoningEffort: input.route.reasoningEffort, contentUpdatedAt: content.updatedAt })).digest("hex");
 }
@@ -973,7 +1172,8 @@ function startReviewVariantJob(user, key, route, input) {
   job.promise = generateReviewVariantsWithRepairs(route, input).then(result => {
     if (job.status !== "pending") return;
     job.status = "completed";
-    job.result = result;
+    job.result = persistReviewVariantJobResult(user, input, result);
+    startReviewVariantPoolFill(user, route);
   }).catch(error => {
     if (job.status !== "pending") return;
     console.warn(`AI review variant generation failed; retry will be scheduled: ${error && error.message ? error.message : "unknown error"}`);
@@ -985,7 +1185,7 @@ function startReviewVariantJob(user, key, route, input) {
   return job;
 }
 
-async function handleReviewSentenceVariants(req, res, user) {
+async function handleReviewSentenceVariantsLegacy(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   purgeReviewVariantJobs();
   const requestUrl = new URL(req.url, "http://localhost");
@@ -1042,6 +1242,113 @@ async function handleReviewSentenceVariants(req, res, user) {
 
     const rate = takeAiRequest(user.id);
     if (!rate.allowed) return sendJson(res, 429, { error: "AI 变式请求受限，将每 5 分钟自动重试", retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
+    return sendReviewVariantJob(res, startReviewVariantJob(user, key, route, input));
+  } catch (error) {
+    return sendError(res, error.statusCode || 400, error.message);
+  }
+}
+
+async function handleReviewSentenceVariants(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  purgeReviewVariantJobs();
+  const requestUrl = new URL(req.url, "http://localhost");
+  if (req.method === "GET") {
+    const job = reviewVariantJobsById.get(String(requestUrl.searchParams.get("jobId") || ""));
+    if (!job || job.userId !== user.id) return sendError(res, 404, "review variant job not found");
+    return sendReviewVariantJob(res, job);
+  }
+  if (req.method !== "POST") return sendError(res, 404, "review variant endpoint not found");
+  try {
+    refreshContent();
+    const body = await readBody(req);
+    const date = today();
+    const state = getUserState(user);
+    const pool = state.reviewVariantPool;
+    const unavailable = (message = "AI 句子暂时不可用，将每 5 分钟自动重试") => sendJson(res, 503, { error: message, retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
+
+    if (body.prefetch === true && pool.variants.length >= pool.targetCount) {
+      return sendJson(res, 200, { status: "ready", source: "ai", cached: true, pool: reviewVariantPoolSummary(pool) });
+    }
+
+    const taskIds = Array.from(new Set((Array.isArray(body.taskIds) ? body.taskIds : []).map(value => String(value || "")).filter(Boolean))).slice(0, 10);
+    const tasks = taskIds.map(taskId => findSentenceTask(taskId)).filter(Boolean);
+    if (body.prefetch !== true && !taskIds.length) return sendError(res, 400, "taskIds are required");
+    if (tasks.length !== taskIds.length) return sendError(res, 404, "sentence task not found");
+
+    if (body.prefetch !== true && body.force !== true) {
+      const assigned = assignReviewVariantPoolTasks(pool, tasks);
+      state.reviewVariantPool = assigned.pool;
+      persistUserStates();
+      if (assigned.variants.length === tasks.length) {
+        const first = assigned.variants[0] || {};
+        return sendJson(res, 200, {
+          status: "completed",
+          variants: assigned.variants,
+          failures: [],
+          message: "",
+          source: "ai",
+          provider: { id: first.providerId || "", name: first.providerName || "" },
+          model: first.model || assigned.pool.model,
+          reasoningEffort: first.reasoningEffort || assigned.pool.reasoningEffort,
+          repairRounds: 0,
+          maxRepairRounds: REVIEW_VARIANT_MAX_REPAIR_ROUNDS,
+          autoRetry: false,
+          retryAfterMs: 0,
+          cached: true,
+          pool: reviewVariantPoolSummary(assigned.pool)
+        });
+      }
+    }
+
+    if (!aiConfigured()) return unavailable("AI 尚未配置，句子变式将每 5 分钟自动重试");
+    const practice = sanitizeAiPractice(state.aiPractice);
+    const availableModels = getAvailableModels(aiSettings);
+    const requestedModel = [body.model, practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
+    const requestedEffort = AI_EFFORTS.includes(body.reasoningEffort) ? body.reasoningEffort : practice.settings.reasoningEffort;
+    const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: requestedEffort });
+
+    if (body.prefetch === true) {
+      const active = reviewVariantPoolJobsByUserId.get(user.id);
+      if (active && active.date === pool.date && active.contentSignature === pool.contentSignature) {
+        return sendJson(res, 202, {
+          status: "pending",
+          prefetch: true,
+          pollAfterMs: REVIEW_VARIANT_JOB_POLL_MS,
+          message: "今日 100 条 AI 句子正在后台生成并逐批保存。",
+          pool: reviewVariantPoolSummary(pool)
+        });
+      }
+      if (pool.status === "needs-attention" && body.force !== true) {
+        return sendJson(res, 200, {
+          status: "needs-attention",
+          prefetch: true,
+          source: "ai",
+          autoRetry: false,
+          message: pool.error,
+          pool: reviewVariantPoolSummary(pool)
+        });
+      }
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) return sendJson(res, 429, { error: "AI 句子请求过多，将每 5 分钟自动重试", retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
+      const started = startReviewVariantPoolFill(user, route, body.force === true);
+      const currentPool = getUserState(user).reviewVariantPool;
+      return sendJson(res, started ? 202 : 200, {
+        status: started ? "pending" : currentPool.status,
+        prefetch: true,
+        source: "ai",
+        pollAfterMs: REVIEW_VARIANT_JOB_POLL_MS,
+        message: started ? "今日 100 条 AI 句子正在后台生成并逐批保存。" : currentPool.error,
+        pool: reviewVariantPoolSummary(currentPool)
+      });
+    }
+
+    const input = buildReviewVariantGenerationInput(state, date, route, tasks);
+    const key = reviewVariantJobKey(user.id, input);
+    const existing = reviewVariantJobsById.get(reviewVariantJobIdsByKey.get(key));
+    if (existing && (existing.status === "pending" || body.force !== true)) return sendReviewVariantJob(res, existing);
+    if (existing) deleteReviewVariantJob(existing);
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) return sendJson(res, 429, { error: "AI 句子请求过多，将每 5 分钟自动重试", retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
     return sendReviewVariantJob(res, startReviewVariantJob(user, key, route, input));
   } catch (error) {
     return sendError(res, error.statusCode || 400, error.message);

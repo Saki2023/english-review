@@ -387,7 +387,8 @@ test("admin configures AI on the web and progress-based questions use the select
       ...process.env,
       DATA_DIR: dataDir,
       PORT: String(appPort),
-      COOKIE_SECURE: "false"
+      COOKIE_SECURE: "false",
+      REVIEW_VARIANT_POOL_AUTOFILL: "false"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -602,7 +603,7 @@ test("admin configures AI on the web and progress-based questions use the select
 
     const reviewEfforts = ["low", "medium", "high", "xhigh", "max"];
     for (const reasoningEffort of reviewEfforts) {
-      const { response: reviewVariants, body: reviewBody, startStatus } = await requestReviewVariants(baseUrl, cookie, { taskIds: ["d4-s5:en-zh"], model: "strong-model", reasoningEffort });
+      const { response: reviewVariants, body: reviewBody, startStatus } = await requestReviewVariants(baseUrl, cookie, { taskIds: ["d4-s5:en-zh"], model: "strong-model", reasoningEffort, force: true });
       assert.equal(startStatus, 202);
       assert.equal(reviewVariants.status, 200);
       assert.equal(reviewBody.source, "ai");
@@ -635,7 +636,8 @@ test("admin configures AI on the web and progress-based questions use the select
     const rejectedReview = await requestReviewVariants(baseUrl, cookie, {
       taskIds: ["d2-s2:en-zh"],
       model: "strong-model",
-      reasoningEffort: "max"
+      reasoningEffort: "max",
+      force: true
     });
     assert.equal(rejectedReview.response.status, 200);
     assert.equal(rejectedReview.body.status, "needs-attention");
