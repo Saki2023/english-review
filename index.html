@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=45">
+  <link rel="stylesheet" href="styles.css?v=46">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v45">v45</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v46">v46</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -173,9 +173,9 @@
           <section class="review-pool-status-card" id="reviewVariantPoolStatusCard" hidden aria-live="polite">
             <div class="review-pool-status-head">
               <span>今日 AI 句子池</span>
-              <strong id="reviewVariantPoolCount">已保存 0 / 100 条</strong>
+              <strong id="reviewVariantPoolCount">已保存 0 / 50 条</strong>
             </div>
-            <div class="review-pool-track" id="reviewVariantPoolTrack" role="progressbar" aria-label="今日 AI 句子池生成进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0 / 100 条已保存">
+            <div class="review-pool-track" id="reviewVariantPoolTrack" role="progressbar" aria-label="今日 AI 句子池生成进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0 / 50 条已保存">
               <div class="review-pool-progress" id="reviewVariantPoolProgress"></div>
             </div>
             <p class="review-pool-status" id="reviewVariantPoolStatus"></p>
@@ -1000,12 +1000,12 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=45"></script>
-  <script src="data.js?v=45"></script>
-  <script src="pronunciation-data.js?v=45"></script>
-  <script src="review-variants.js?v=45"></script>
-  <script src="answer-utils.js?v=45"></script>
-  <script src="study-time.js?v=45"></script>
+  <script src="vendor/lucide.min.js?v=46"></script>
+  <script src="data.js?v=46"></script>
+  <script src="pronunciation-data.js?v=46"></script>
+  <script src="review-variants.js?v=46"></script>
+  <script src="answer-utils.js?v=46"></script>
+  <script src="study-time.js?v=46"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1021,7 +1021,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=45";
+      appScript.src = "app.js?v=46";
       document.body.appendChild(appScript);
     })();
   </script>

@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const { eligibleSentenceVariants, normalizeEnglish, sentenceFamily } = require("../review-variants");
 
 const REVIEW_VARIANT_POOL_SCHEMA = 1;
-const REVIEW_VARIANT_POOL_TARGET = 100;
+const REVIEW_VARIANT_POOL_TARGET = 50;
 const REVIEW_VARIANT_POOL_BATCH = 20;
 const REVIEW_VARIANT_POOL_STATUSES = new Set(["idle", "pending", "ready", "failed", "needs-attention"]);
 

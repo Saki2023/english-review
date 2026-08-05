@@ -151,12 +151,12 @@ test("daily sentence pool survives refresh, stale state PUT, and server restart"
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert.equal(poolState.reviewVariantPool.status, "ready");
-    assert.equal(poolState.reviewVariantPool.generatedCount, 100);
-    assert.ok(providerInfo.calls.length >= 5);
+    assert.equal(poolState.reviewVariantPool.generatedCount, 50);
+    assert.ok(providerInfo.calls.length >= 3);
 
     const diskState = JSON.parse(fs.readFileSync(path.join(dataDir, "user-states.json"), "utf8"));
     const storedState = Object.values(diskState.users)[0];
-    assert.equal(storedState.reviewVariantPool.variants.length, 100);
+    assert.equal(storedState.reviewVariantPool.variants.length, 50);
 
     const assigned = await fetch(`${baseUrl}/api/review/sentence-variants`, {
       method: "POST",
@@ -182,7 +182,7 @@ test("daily sentence pool survives refresh, stale state PUT, and server restart"
     const restartedCookie = await login(restartedUrl);
     const persisted = await (await fetch(`${restartedUrl}/api/state`, { headers: { "Cookie": restartedCookie } })).json();
     assert.equal(persisted.reviewVariantPool.status, "ready");
-    assert.equal(persisted.reviewVariantPool.generatedCount, 100);
+    assert.equal(persisted.reviewVariantPool.generatedCount, 50);
   } finally {
     for (const child of [app, restarted]) {
       if (child && child.exitCode === null) child.kill();
@@ -232,7 +232,7 @@ test("review immediately reuses a stored learned sentence even before its matchi
 
     const poolState = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
     assert.equal(poolState.reviewVariantPool.generatedCount, 1);
-    assert.equal(poolState.reviewVariantPool.remainingCount, 99);
+    assert.equal(poolState.reviewVariantPool.remainingCount, 49);
 
     const reusedResponse = await fetch(`${baseUrl}/api/review/sentence-variants`, {
       method: "POST",

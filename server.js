@@ -1382,7 +1382,7 @@ async function handleReviewSentenceVariants(req, res, user) {
           status: "pending",
           prefetch: true,
           pollAfterMs: REVIEW_VARIANT_JOB_POLL_MS,
-          message: "今日 100 条 AI 句子正在后台生成并逐批保存。",
+          message: "今日 50 条 AI 句子正在后台生成并逐批保存。",
           pool: reviewVariantPoolSummary(pool)
         });
       }
@@ -1405,7 +1405,7 @@ async function handleReviewSentenceVariants(req, res, user) {
         prefetch: true,
         source: "ai",
         pollAfterMs: REVIEW_VARIANT_JOB_POLL_MS,
-        message: started ? "今日 100 条 AI 句子正在后台生成并逐批保存。" : currentPool.error,
+        message: started ? "今日 50 条 AI 句子正在后台生成并逐批保存。" : currentPool.error,
         pool: reviewVariantPoolSummary(currentPool)
       });
     }

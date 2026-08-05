@@ -46,13 +46,13 @@ function poolVariant(index, family = index % 2 ? "description" : "on") {
   };
 }
 
-test("daily review variant pool keeps 100 variants and stable assignments after serialization", () => {
+test("daily review variant pool keeps 50 variants and stable assignments after serialization", () => {
   let pool = createReviewVariantPool({ date: "2026-08-05", contentSignature: "signature-a" });
   const stored = storeReviewVariantPoolResults(pool, Array.from({ length: REVIEW_VARIANT_POOL_TARGET }, (_, index) => poolVariant(index)), {
     requestedCount: REVIEW_VARIANT_POOL_TARGET
   });
   pool = stored.pool;
-  assert.equal(pool.variants.length, 100);
+  assert.equal(pool.variants.length, 50);
   assert.equal(pool.status, "ready");
 
   const tasks = [
@@ -63,9 +63,22 @@ test("daily review variant pool keeps 100 variants and stable assignments after 
   const reloaded = sanitizeReviewVariantPool(JSON.parse(JSON.stringify(first.pool)));
   const second = assignReviewVariantPoolTasks(reloaded, tasks);
   assert.deepEqual(second.variants.map(item => item.id), first.variants.map(item => item.id));
-  assert.equal(reviewVariantPoolSummary(second.pool).generatedCount, 100);
+  assert.equal(reviewVariantPoolSummary(second.pool).generatedCount, 50);
   assert.equal(reviewVariantPoolSummary(second.pool).remainingCount, 0);
   assert.equal(reviewVariantPoolSummary(second.pool).assignedCount, 2);
+});
+
+test("legacy 100-sentence pools are capped at the new 50-sentence target", () => {
+  const legacy = {
+    ...createReviewVariantPool({ date: "2026-08-05", contentSignature: "signature-a" }),
+    targetCount: 100,
+    variants: Array.from({ length: 100 }, (_, index) => poolVariant(index)),
+    status: "ready"
+  };
+  const normalized = ensureReviewVariantPool(legacy, { date: "2026-08-05", contentSignature: "signature-a" });
+  assert.equal(normalized.pool.targetCount, 50);
+  assert.equal(normalized.pool.variants.length, 50);
+  assert.equal(reviewVariantPoolSummary(normalized.pool).remainingCount, 0);
 });
 
 test("a new date or changed learned content discards the previous daily pool", () => {
