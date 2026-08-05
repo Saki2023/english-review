@@ -149,12 +149,12 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=43/);
+  assert.match(html, /pronunciation-data\.js\?v=44/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /speechButtonHtml\(item\.example/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=43/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=44/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -336,6 +336,17 @@ test("daily sentence pools persist one hundred variants and client merges cannot
   assert.match(server, /startReviewVariantPoolFill/);
 });
 
+test("review redraws preserve an unsubmitted answer for the same task", () => {
+  const app = read("app.js");
+  assert.match(app, /let reviewAnswerResetRequested = true/);
+  assert.match(app, /dataset\.reviewTaskKey/);
+  assert.match(app, /const previousReviewUi = answerInput \? \{/);
+  assert.match(app, /const preserveReviewUi = !resetAnswer && previousReviewUi && previousReviewUi\.taskKey === taskKey/);
+  assert.match(app, /answerInput\.value = previousReviewUi\.value/);
+  assert.match(app, /function advance\(retry = false\) \{\s*reviewAnswerResetRequested = true/);
+  assert.match(app, /function replaceReviewSession\(taskIds, mode = "all"\) \{\s*reviewAnswerResetRequested = true/);
+});
+
 test("partial answers have distinct feedback and preserve mastery", () => {
   const app = read("app.js");
   const css = read("styles.css");
@@ -363,7 +374,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 43", () => {
+test("PWA client assets consistently use the displayed cache version 44", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -374,8 +385,8 @@ test("PWA client assets consistently use the displayed cache version 43", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "43");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v43"/);
+  assert.equal(displayedVersion[1], "44");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v44"/);
 });
 
 test("daily study plan explains six guided stages and records sixty minutes across web and learning-window work", () => {
@@ -401,6 +412,6 @@ test("daily study plan explains six guided stages and records sixty minutes acro
   assert.match(app, /STUDY_TIME_IDLE_TIMEOUT_MS = 5 \* 60 \* 1000/);
   assert.match(app, /document\.hidden/);
   assert.match(app, /model\.studyTime/);
-  assert.match(html, /study-time\.js\?v=43/);
-  assert.match(serviceWorker, /study-time\.js\?v=43/);
+  assert.match(html, /study-time\.js\?v=44/);
+  assert.match(serviceWorker, /study-time\.js\?v=44/);
 });

@@ -74,6 +74,10 @@
   let model = loadModel();
   let toastTimer;
   let gradingInProgress = false;
+  // renderHome() is also called by background sync/prefetch polling. Keep the
+  // answer controls tied to the current task so those redraws cannot erase a
+  // draft (or hide feedback) while the learner is working.
+  let reviewAnswerResetRequested = true;
   let aiRequestInProgress = false;
   let aiTutorRequestInProgress = false;
   let reviewVariantPreparation = null;
@@ -4046,6 +4050,7 @@
   }
 
   function replaceReviewSession(taskIds, mode = "all") {
+    reviewAnswerResetRequested = true;
     reviewMode = mode;
     const today = localDate();
     const normalizedTaskIds = Array.from(new Set(taskIds)).filter(taskId => reviewTaskIsEligible(taskById.get(taskId)));
@@ -4290,6 +4295,7 @@
     const session = getSession();
     let changed = pruneReviewSession(session);
     if (!session.taskIds.length && !session.batchComplete) {
+      reviewAnswerResetRequested = true;
       session.taskIds = buildBatch();
       session.index = 0;
       session.currentTaskId = session.taskIds[0] || null;
@@ -4334,6 +4340,7 @@
   }
 
   function setReviewMode(mode) {
+    reviewAnswerResetRequested = true;
     reviewMode = mode;
     const today = localDate();
     model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false, variants: {} };
@@ -4347,6 +4354,19 @@
   }
 
   function renderHome() {
+    const answerInput = $("#answerInput");
+    const submitButton = $("#submitAnswer");
+    const feedback = $("#feedback");
+    const feedbackActions = $("#feedbackActions");
+    const previousReviewUi = answerInput ? {
+      taskKey: String(answerInput.dataset.reviewTaskKey || ""),
+      value: answerInput.value,
+      disabled: answerInput.disabled,
+      submitDisabled: Boolean(submitButton && submitButton.disabled),
+      feedbackHidden: !feedback || feedback.hidden,
+      actionsHidden: !feedbackActions || feedbackActions.hidden
+    } : null;
+    const resetAnswer = reviewAnswerResetRequested;
     const session = ensureBatch();
     const stats = todayStats();
     const pool = reviewVariantPoolStatus && typeof reviewVariantPoolStatus === "object" ? reviewVariantPoolStatus : null;
@@ -4372,6 +4392,11 @@
     const task = currentTask();
     const panel = $("#reviewPanel"); const complete = $("#reviewComplete");
     if (!task) {
+      reviewAnswerResetRequested = true;
+      if (answerInput) {
+        answerInput.value = "";
+        delete answerInput.dataset.reviewTaskKey;
+      }
       panel.hidden = true; complete.hidden = false;
       reviewVariantRetryUi(session, false);
       const remaining = taskCandidates(reviewMode, new Set(session.doneTaskIds)).length;
@@ -4388,6 +4413,8 @@
     }
     panel.hidden = false; complete.hidden = true;
     if (baseTask.item.type === "sentence" && !session.variants[baseTask.taskId]) {
+      const pendingTaskKey = `${baseTask.taskId}|pending`;
+      const preservePendingUi = !resetAnswer && previousReviewUi && previousReviewUi.taskKey === pendingTaskKey;
       reviewVariantRetryUi(session, true);
       $("#promptType").textContent = "句子变式";
       $("#promptDay").textContent = `第 ${baseTask.item.day} 天 · 正在准备`;
@@ -4401,14 +4428,20 @@
       $("#promptSpeech").innerHTML = "";
       $("#phoneticLine").textContent = "不会加入未学单词；单次生成最多等待 10 分钟，AI 暂不可用时每 5 分钟自动重试，不使用本地备用句。";
       $("#exampleLine").textContent = "";
-      $("#answerInput").value = "";
-      $("#answerInput").disabled = true;
-      $("#submitAnswer").disabled = true;
-      $("#feedback").hidden = true;
-      $("#feedbackActions").hidden = true;
+      if (answerInput) {
+        answerInput.dataset.reviewTaskKey = pendingTaskKey;
+        if (!preservePendingUi) answerInput.value = "";
+        answerInput.disabled = true;
+      }
+      if (submitButton) submitButton.disabled = true;
+      if (feedback) feedback.hidden = true;
+      if (feedbackActions) feedbackActions.hidden = true;
+      reviewAnswerResetRequested = false;
       return;
     }
     reviewVariantRetryUi(session, false);
+    const taskKey = `${task.taskId}|${task.reviewVariant?.id || "base"}`;
+    const preserveReviewUi = !resetAnswer && previousReviewUi && previousReviewUi.taskKey === taskKey;
     $("#promptType").textContent = task.item.type === "word" ? "单词" : "句子变式";
     $("#promptDay").textContent = `第 ${task.item.day} 天`;
     $("#questionCount").textContent = `${session.index + 1} / ${session.taskIds.length}`;
@@ -4418,13 +4451,29 @@
     $("#promptSpeech").innerHTML = task.direction === "en-zh" ? speechButtonHtml(task.item.english, "播放题目发音") : "";
     $("#phoneticLine").textContent = task.item.type === "word" && task.direction === "en-zh" ? task.item.phonetic : "";
     $("#exampleLine").textContent = task.reviewVariant ? "已学句型变式 · AI 生成 · 原句仍保留在词句库" : "";
-    $("#answerInput").value = "";
-    $("#answerInput").placeholder = task.direction === "en-zh" ? "输入中文答案" : "输入英文答案";
-    $("#answerInput").disabled = false;
-    $("#submitAnswer").disabled = false;
-    $("#feedback").hidden = true;
-    $("#feedbackActions").hidden = true;
-    requestAnimationFrame(() => $("#answerInput").focus());
+    if (answerInput) {
+      answerInput.dataset.reviewTaskKey = taskKey;
+      answerInput.placeholder = task.direction === "en-zh" ? "输入中文答案" : "输入英文答案";
+      if (preserveReviewUi) {
+        // Preserve the exact control state during sync/polling redraws. This
+        // covers both an unsubmitted draft and feedback after grading.
+        answerInput.value = previousReviewUi.value;
+        answerInput.disabled = previousReviewUi.disabled;
+      } else {
+        answerInput.value = "";
+        answerInput.disabled = false;
+      }
+    }
+    if (submitButton) submitButton.disabled = preserveReviewUi ? previousReviewUi.submitDisabled : false;
+    if (preserveReviewUi) {
+      if (feedback) feedback.hidden = previousReviewUi.feedbackHidden;
+      if (feedbackActions) feedbackActions.hidden = previousReviewUi.actionsHidden;
+    } else {
+      if (feedback) feedback.hidden = true;
+      if (feedbackActions) feedbackActions.hidden = true;
+    }
+    reviewAnswerResetRequested = false;
+    if (!preserveReviewUi && answerInput && !answerInput.disabled) requestAnimationFrame(() => answerInput.focus());
   }
 
   function answerMatches(task, answer) {
@@ -4570,6 +4619,7 @@
   function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", "\"": "&quot;" }[char])); }
 
   function advance(retry = false) {
+    reviewAnswerResetRequested = true;
     const session = getSession();
     const task = currentTask();
     if (!task) return;
@@ -4589,6 +4639,7 @@
       return;
     }
     const today = localDate();
+    reviewAnswerResetRequested = true;
     reviewMode = task.item.type;
     model.sessions[today] = { date: today, mode: reviewMode, taskIds: [taskId], index: 0, doneTaskIds: [], currentTaskId: taskId, batchComplete: false };
     saveModel();
@@ -4603,6 +4654,7 @@
       return;
     }
     const today = localDate();
+    reviewAnswerResetRequested = true;
     reviewMode = "all";
     model.sessions[today] = { date: today, mode: reviewMode, taskIds, index: 0, doneTaskIds: [], currentTaskId: taskIds[0], batchComplete: false };
     saveModel();
@@ -4941,6 +4993,7 @@
 
   function resetModel() {
     stopStudyClock("复习记录已重置", false);
+    reviewAnswerResetRequested = true;
     localStorage.removeItem(storageKey());
     model = loadModel();
     saveModel();
@@ -5180,7 +5233,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=43", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=44", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

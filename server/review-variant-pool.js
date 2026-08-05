@@ -61,6 +61,7 @@ function createReviewVariantPool({ date, contentSignature, targetCount = REVIEW_
     targetCount: Math.max(1, Math.min(REVIEW_VARIANT_POOL_TARGET, Number(targetCount) || REVIEW_VARIANT_POOL_TARGET)),
     variants: [],
     assignments: {},
+    blockedFamilies: [],
     nextSlot: 0,
     status: "idle",
     model: "",
@@ -102,6 +103,7 @@ function sanitizeReviewVariantPool(value) {
     targetCount,
     variants,
     assignments,
+    blockedFamilies: cleanStringList(source.blockedFamilies, 20, 40),
     nextSlot: Math.max(0, Number(source.nextSlot) || 0),
     status,
     model: cleanText(source.model, 160),
@@ -134,6 +136,7 @@ function reviewVariantPoolSummary(value) {
     targetCount: pool.targetCount,
     generatedCount: pool.variants.length,
     assignedCount: Object.keys(pool.assignments).length,
+    blockedFamilies: [...pool.blockedFamilies],
     status: pool.status,
     model: pool.model,
     reasoningEffort: pool.reasoningEffort,
@@ -159,7 +162,8 @@ function learnedSentenceFamilies(content) {
 
 function buildReviewVariantPoolTasks(content, value, requestedCount = REVIEW_VARIANT_POOL_BATCH) {
   const pool = sanitizeReviewVariantPool(value);
-  const families = learnedSentenceFamilies(content);
+  const blockedFamilies = new Set(pool.blockedFamilies);
+  const families = learnedSentenceFamilies(content).filter(group => !blockedFamilies.has(group.family));
   if (!families.length || pool.variants.length >= pool.targetCount) return [];
   const count = Math.max(0, Math.min(REVIEW_VARIANT_POOL_BATCH, Number(requestedCount) || REVIEW_VARIANT_POOL_BATCH, pool.targetCount - pool.variants.length));
   const capacities = families.map(group => Math.max(1, eligibleSentenceVariants(content, group.items[0]).length));
@@ -194,6 +198,7 @@ function storeReviewVariantPoolResults(value, results, { requestedCount = 0, tas
   const byId = new Map(pool.variants.map(item => [item.id, item]));
   const byEnglish = new Map(pool.variants.map(item => [normalizeEnglish(item.english), item]));
   const storedByTaskId = {};
+  const addedByFamily = {};
   let added = 0;
   (Array.isArray(results) ? results : []).forEach(item => {
     const variant = sanitizePoolVariant(item);
@@ -209,6 +214,7 @@ function storeReviewVariantPoolResults(value, results, { requestedCount = 0, tas
       byId.set(stored.id, stored);
       byEnglish.set(normalized, stored);
       added += 1;
+      addedByFamily[stored.family] = (addedByFamily[stored.family] || 0) + 1;
     }
     if (taskId && stored) {
       storedByTaskId[taskId] = stored;
@@ -222,7 +228,7 @@ function storeReviewVariantPoolResults(value, results, { requestedCount = 0, tas
     pool.nextRetryAt = "";
     pool.error = "";
   }
-  return { pool, added, storedByTaskId };
+  return { pool, added, addedByFamily, storedByTaskId };
 }
 
 function stableIndex(value, length) {

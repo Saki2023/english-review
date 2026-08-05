@@ -1020,6 +1020,7 @@ function startReviewVariantPoolFill(user, route, force = false) {
   pool.reasoningEffort = route.reasoningEffort;
   pool.error = "";
   pool.nextRetryAt = "";
+  if (force) pool.blockedFamilies = [];
   pool.updatedAt = new Date().toISOString();
   persistUserStates();
 
@@ -1064,10 +1065,26 @@ function startReviewVariantPoolFill(user, route, force = false) {
       const taskFamilies = Object.fromEntries(tasks.map(task => [task.taskId, task.family]));
       const stored = storeReviewVariantPoolResults(currentPool, result.variants, { requestedCount: tasks.length, taskFamilies });
       currentPool = stored.pool;
+      // Only families that produced a variant accepted by the pool count as
+      // available. Raw upstream responses may contain malformed, duplicate,
+      // or wrong-family items that storeReviewVariantPoolResults rejects.
+      const returnedByFamily = new Set(Object.keys(stored.addedByFamily || {}));
+      const blockedFamilies = new Set(currentPool.blockedFamilies || []);
+      tasks.forEach(task => { if (!returnedByFamily.has(task.family)) blockedFamilies.add(task.family); });
+      currentPool.blockedFamilies = Array.from(blockedFamilies).slice(0, 20);
       currentPool.model = result.model || route.model;
       currentPool.reasoningEffort = result.reasoningEffort || route.reasoningEffort;
       currentPool.updatedAt = new Date().toISOString();
       if (!stored.added) {
+        const canContinue = buildReviewVariantPoolTasks(content, currentPool, 1).length > 0;
+        if (canContinue) {
+          currentPool.status = "pending";
+          currentPool.error = result.message || "某个句型的可用组合已耗尽，正在改用其他已学句型补齐。";
+          currentState.reviewVariantPool = currentPool;
+          persistUserStates();
+          batches += 1;
+          continue;
+        }
         currentPool.status = "needs-attention";
         currentPool.error = result.message || "连续 3 轮没有生成新的合格句子，已停止自动重试。";
         currentState.reviewVariantPool = currentPool;
