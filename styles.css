@@ -88,16 +88,17 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .study-plan-step { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 76px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 7px; background: #fbfdfc; }
 .study-plan-step.is-current { border-color: #9bcbbc; background: var(--primary-soft); }
 .study-plan-step.is-complete { background: var(--surface-soft); }
-.study-plan-step.is-locked { color: var(--muted); background: #f8faf9; }
-.study-plan-step-number { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 50%; color: var(--muted); background: var(--surface); font-size: 12px; font-weight: 600; }
-.study-plan-step.is-current .study-plan-step-number, .study-plan-step.is-complete .study-plan-step-number { border-color: var(--primary); color: var(--surface); background: var(--primary); }
+.study-plan-step.is-available { background: #fbfdfc; }
+.study-plan-step-icon { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 50%; color: var(--muted); background: var(--surface); }
+.study-plan-step-icon svg { width: 15px; height: 15px; }
+.study-plan-step.is-current .study-plan-step-icon, .study-plan-step.is-complete .study-plan-step-icon { border-color: var(--primary); color: var(--surface); background: var(--primary); }
 .study-plan-step-copy { min-width: 0; }
 .study-plan-step-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px; margin-bottom: 4px; }
 .study-plan-step-title strong { font-size: 14px; font-weight: 600; }
 .study-plan-step-title span { color: var(--primary-deep); font-size: 12px; font-variant-numeric: tabular-nums; }
 .study-plan-step-copy p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .study-plan-step-action { min-width: 104px; min-height: 36px; padding: 0 11px; }
-.study-plan-step.is-locked .study-plan-step-action { cursor: not-allowed; }
+.study-plan-step.is-available:hover { border-color: #bfd8cf; }
 .study-plan-rule { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; line-height: 1.55; }
 .is-study-stage-target { animation: study-stage-target 2.2s ease; outline: 3px solid transparent; outline-offset: 4px; }
 @keyframes study-stage-target {

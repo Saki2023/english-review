@@ -5,7 +5,9 @@ const { DAILY_STUDY_PLAN, STUDY_TIME_TARGET_SECONDS, formatStudyDuration, mergeS
 test("study time normalizes bounded daily records and formats the sixty-minute target", () => {
   const state = normalizeStudyTime({ daily: { "2026-08-04": 3599, invalid: 999, "2026-08-05": 999999 } });
   assert.equal(studySecondsForDate(state, "2026-08-04"), 3599);
-  assert.equal(studySecondsForDate(state, "2026-08-05"), 86400);
+  assert.equal(studySecondsForDate(state, "2026-08-05"), 3600);
+  assert.equal(state.stages["2026-08-04"].review, 600);
+  assert.equal(state.stages["2026-08-04"].phonics, 900);
   assert.equal(formatStudyDuration(STUDY_TIME_TARGET_SECONDS), "60:00");
 });
 
@@ -17,7 +19,7 @@ test("study time merges accounts by the greatest recorded value for each day", (
   assert.deepEqual(merged.daily, { "2026-08-02": 900, "2026-08-03": 1200, "2026-08-04": 2400 });
 });
 
-test("daily study plan is a sequential sixty-minute curriculum", () => {
+test("daily study plan has six independently selectable stages", () => {
   assert.equal(DAILY_STUDY_PLAN.length, 6);
   assert.equal(DAILY_STUDY_PLAN.reduce((sum, stage) => sum + stage.minutes * 60, 0), STUDY_TIME_TARGET_SECONDS);
   assert.deepEqual(DAILY_STUDY_PLAN.filter(stage => stage.allowBackground).map(stage => stage.id), ["phonics", "pattern", "reading"]);
@@ -36,6 +38,11 @@ test("daily study plan is a sequential sixty-minute curriculum", () => {
   const middle = studyPlanProgress(600 + 900 + 600);
   assert.equal(middle.currentStage.id, "reading");
   assert.equal(middle.currentStage.elapsedSeconds, 0);
+  const selected = normalizeStudyTime({ selected: { "2026-08-05": "reading" }, stages: { "2026-08-05": { reading: 120 } } });
+  const selectedPlan = studyPlanProgress(selected, "2026-08-05");
+  assert.equal(selectedPlan.currentStage.id, "reading");
+  assert.equal(selectedPlan.stages.find(stage => stage.id === "reading").elapsedSeconds, 120);
+  assert.equal(selectedPlan.stages.find(stage => stage.id === "review").elapsedSeconds, 0);
   const complete = studyPlanProgress(STUDY_TIME_TARGET_SECONDS);
   assert.equal(complete.complete, true);
   assert.equal(complete.currentStage, null);

@@ -1,12 +1,59 @@
 (() => {
   "use strict";
 
-  window.ENGLISH_PRONUNCIATION_DATA = {
-    version: 1,
+  const SOUND_AUDIO = Object.freeze({
+    "v-i-long": ["audio/phonemes/v-close-front.ogg"],
+    "v-i-short": ["audio/phonemes/v-near-close-front.ogg"],
+    "v-e": ["audio/phonemes/v-open-mid-front.ogg"],
+    "v-ae": ["audio/phonemes/v-near-open-front.ogg"],
+    "v-a-back": ["audio/phonemes/v-open-back.ogg"],
+    "v-aw": ["audio/phonemes/v-open-mid-back-rounded.ogg"],
+    "v-u-short": ["audio/phonemes/v-near-close-back-rounded.ogg"],
+    "v-u-long": ["audio/phonemes/v-close-back-rounded.ogg"],
+    "v-caret": ["audio/phonemes/v-open-mid-back-unrounded.ogg"],
+    "v-er-stressed": ["audio/phonemes/v-r-colored.ogg"],
+    "v-schwa": ["audio/phonemes/v-mid-central.ogg"],
+    "v-er-unstressed": ["audio/phonemes/v-mid-central.ogg", "audio/phonemes/c-r.ogg"],
+    "v-ei": ["audio/phonemes/v-close-mid-front.ogg", "audio/phonemes/v-near-close-front.ogg"],
+    "v-ai": ["audio/phonemes/v-open-front.ogg", "audio/phonemes/v-near-close-front.ogg"],
+    "v-oi": ["audio/phonemes/v-open-mid-back-rounded.ogg", "audio/phonemes/v-near-close-front.ogg"],
+    "v-ou": ["audio/phonemes/v-close-mid-back.ogg", "audio/phonemes/v-near-close-back-rounded.ogg"],
+    "v-au": ["audio/phonemes/v-au.wav"],
+    "v-ir": ["audio/phonemes/v-near-close-front.ogg", "audio/phonemes/c-r.ogg"],
+    "v-air": ["audio/phonemes/v-ea.wav", "audio/phonemes/c-r.ogg"],
+    "v-ur": ["audio/phonemes/v-ua.wav", "audio/phonemes/c-r.ogg"],
+    "c-p": ["audio/phonemes/c-p.ogg"],
+    "c-b": ["audio/phonemes/c-b.ogg"],
+    "c-t": ["audio/phonemes/c-t.ogg"],
+    "c-d": ["audio/phonemes/c-d.ogg"],
+    "c-k": ["audio/phonemes/c-k.ogg"],
+    "c-g": ["audio/phonemes/c-g.ogg"],
+    "c-f": ["audio/phonemes/c-f.ogg"],
+    "c-v": ["audio/phonemes/c-v.ogg"],
+    "c-th-voiceless": ["audio/phonemes/c-th-voiceless.ogg"],
+    "c-th-voiced": ["audio/phonemes/c-th-voiced.ogg"],
+    "c-s": ["audio/phonemes/c-s.ogg"],
+    "c-z": ["audio/phonemes/c-z.ogg"],
+    "c-sh": ["audio/phonemes/c-sh.ogg"],
+    "c-zh": ["audio/phonemes/c-zh.ogg"],
+    "c-h": ["audio/phonemes/c-h.ogg"],
+    "c-ch": ["audio/phonemes/c-ch.ogg"],
+    "c-j": ["audio/phonemes/c-j.ogg"],
+    "c-m": ["audio/phonemes/c-m.ogg"],
+    "c-n": ["audio/phonemes/c-n.ogg"],
+    "c-ng": ["audio/phonemes/c-ng.ogg"],
+    "c-l": ["audio/phonemes/c-l.ogg"],
+    "c-r": ["audio/phonemes/c-r.ogg"],
+    "c-y": ["audio/phonemes/c-y.ogg"],
+    "c-w": ["audio/phonemes/c-w.ogg"]
+  });
+
+  const pronunciationData = {
+    version: 2,
     locale: "en-US",
     title: "英语基础发音参考表",
     summary: "以当前课程的美式发音为主，整理 20 个元音参考音和 24 个辅音，共 44 个基础音。先学课程标记为“已学”的音，其余内容只需随用随查，不要求一次背完。",
-    audioNotice: "喇叭播放的是包含该音的英文示范词，不是孤立音标的真人录音。请先看口型和动作，再慢速跟读示范词。",
+    audioNotice: "卡片顶部喇叭播放目标音素本身（组合音会按音素段播放）；示范词行的喇叭播放完整单词。辅音录音可能配极短元音，便于听清释放动作。",
     accentNotice: "不同词典和口音的写法会有差异，例如 /e/ 也常写成 /ɛ/，美式 hot 的 /ɑ/ 在英式中常写成 /ɒ/，美式 /oʊ/ 在英式中常写成 /əʊ/。这些通常是口音或标注体系差异，不代表其中一种一定错误。",
     concepts: [
       {
@@ -664,4 +711,8 @@
       }
     ]
   };
+
+  pronunciationData.phonemes = pronunciationData.phonemes.map(item => ({ ...item, soundAudio: SOUND_AUDIO[item.id] || [] }));
+  pronunciationData.audioCredits = "音素录音来自 Wikimedia Commons，具体作者与许可请查看音频来源页。";
+  window.ENGLISH_PRONUNCIATION_DATA = pronunciationData;
 })();

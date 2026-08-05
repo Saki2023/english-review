@@ -341,6 +341,7 @@ function buildLearningSyncProfile(content, state, user) {
     activity: {
       dailyReview: state.history && typeof state.history === "object" ? state.history : {},
       dailyStudyTime: studyTime.daily,
+      dailyStudyStages: studyTime.stages,
       studyGoalSeconds: STUDY_TIME_TARGET_SECONDS,
       studyPlan: DAILY_STUDY_PLAN.map(stage => ({ id: stage.id, label: stage.label, minutes: stage.minutes, targetSeconds: stage.minutes * 60, canContinueInLearningWindow: stage.allowBackground === true })),
       aiSets,

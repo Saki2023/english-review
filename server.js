@@ -2521,7 +2521,7 @@ async function handleAiFocusedPractice(req, res, url, user) {
   return sendError(res, 404, "focused practice endpoint not found");
 }
 
-function mimeType(filePath) { return { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".webmanifest": "application/manifest+json; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon" }[path.extname(filePath).toLowerCase()] || "application/octet-stream"; }
+function mimeType(filePath) { return { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".webmanifest": "application/manifest+json; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".ogg": "audio/ogg", ".wav": "audio/wav" }[path.extname(filePath).toLowerCase()] || "application/octet-stream"; }
 
 function serveStatic(req, res, url) {
   let relative = decodeURIComponent(url.pathname); if (relative === "/") relative = "/index.html";

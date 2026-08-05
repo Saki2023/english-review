@@ -20,18 +20,22 @@
     formatStudyDuration = value => String(Math.max(0, Math.floor(Number(value) || 0))),
     mergeStudyTime = value => value || { daily: {}, updatedAt: "" },
     normalizeStudyTime = value => value || { daily: {}, updatedAt: "" },
-    studyPlanProgress = value => {
-      let boundary = 0;
-      const seconds = Math.max(0, Math.min(STUDY_TIME_TARGET_SECONDS, Math.floor(Number(value) || 0)));
+    studyPlanProgress = (value, date = "") => {
+      let remaining = typeof value === "number" ? Math.max(0, Math.min(STUDY_TIME_TARGET_SECONDS, Math.floor(Number(value) || 0))) : 0;
+      const savedStages = value && typeof value === "object" && value.stages && value.stages[date] && typeof value.stages[date] === "object" ? value.stages[date] : null;
       const stages = DAILY_STUDY_PLAN.map((stage, index) => {
         const targetSeconds = stage.minutes * 60;
-        const startSeconds = boundary;
-        const endSeconds = startSeconds + targetSeconds;
-        boundary = endSeconds;
-        return { ...stage, index, targetSeconds, startSeconds, endSeconds, elapsedSeconds: Math.max(0, Math.min(targetSeconds, seconds - startSeconds)), complete: seconds >= endSeconds, current: seconds >= startSeconds && seconds < endSeconds };
+        const elapsedSeconds = savedStages ? Math.max(0, Math.min(targetSeconds, Math.floor(Number(savedStages[stage.id]) || 0))) : Math.min(targetSeconds, remaining);
+        remaining = Math.max(0, remaining - elapsedSeconds);
+        return { ...stage, index, targetSeconds, elapsedSeconds, complete: elapsedSeconds >= targetSeconds, current: false, available: true };
       });
-      return { seconds, complete: seconds >= STUDY_TIME_TARGET_SECONDS, stages, currentStage: stages.find(stage => stage.current) || null };
+      const seconds = stages.reduce((sum, stage) => sum + stage.elapsedSeconds, 0);
+      const requestedId = value && typeof value === "object" ? value.selected?.[date] : "";
+      const currentStage = stages.find(stage => stage.id === requestedId && !stage.complete) || stages.find(stage => !stage.complete) || null;
+      if (currentStage) currentStage.current = true;
+      return { seconds, complete: stages.every(stage => stage.complete), stages, currentStage };
     },
+    studyStageSecondsForDate = (value, date) => value && value.stages && value.stages[date] ? value.stages[date] : {},
     studySecondsForDate = (value, date) => Number(value?.daily?.[date]) || 0
   } = STUDY_TIME;
   const STORAGE_KEY = "daily-english-review-v1";
@@ -363,9 +367,80 @@
     return `<button class="speak-button" type="button" data-speak-text="${escapeHtml(text)}" data-tooltip="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><i data-lucide="volume-2" aria-hidden="true"></i></button>`;
   }
 
+  function phonemeSoundButtonHtml(item) {
+    const sources = Array.isArray(item && item.soundAudio) ? item.soundAudio.filter(Boolean) : [];
+    if (!item || !sources.length) return "";
+    const label = `播放目标音素 ${item.symbol}`;
+    return `<button class="speak-button phoneme-sound-button" type="button" data-pronunciation-sound="${escapeHtml(item.id)}" data-tooltip="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><i data-lucide="volume-2" aria-hidden="true"></i></button>`;
+  }
+
+  let pronunciationAudioPlayers = [];
+  let pronunciationAudioButton = null;
+
+  function stopPronunciationSound() {
+    pronunciationAudioPlayers.forEach(player => {
+      try {
+        player.pause();
+        player.currentTime = 0;
+      } catch (_) {
+        // Ignore a player that has not finished loading.
+      }
+    });
+    pronunciationAudioPlayers = [];
+    pronunciationAudioButton?.classList.remove("is-playing");
+    pronunciationAudioButton = null;
+  }
+
+  function playPronunciationSound(itemId, button = null) {
+    if (typeof Audio !== "function") {
+      showToast("当前浏览器不支持目标音频播放");
+      return false;
+    }
+    const item = (Array.isArray(PRONUNCIATION.phonemes) ? PRONUNCIATION.phonemes : []).find(entry => entry.id === itemId);
+    const sources = Array.isArray(item && item.soundAudio) ? item.soundAudio.filter(Boolean) : [];
+    if (!item || !sources.length) {
+      showToast("这个音素的目标录音暂时不可用");
+      return false;
+    }
+    stopPronunciationSound();
+    const players = sources.map(source => {
+      const player = new Audio(source);
+      player.preload = "auto";
+      player.playbackRate = sources.length > 1 ? 1.08 : 1;
+      return player;
+    });
+    pronunciationAudioPlayers = players;
+    pronunciationAudioButton = button;
+    button?.classList.add("is-playing");
+    let index = 0;
+    const finish = () => {
+      if (pronunciationAudioPlayers === players) stopPronunciationSound();
+    };
+    const playNext = () => {
+      const player = players[index];
+      if (!player) return finish();
+      player.onended = () => {
+        index += 1;
+        playNext();
+      };
+      player.onerror = () => {
+        finish();
+        showToast(`目标音素 ${item.symbol} 的录音加载失败`);
+      };
+      const promise = player.play();
+      if (promise && typeof promise.catch === "function") promise.catch(() => {
+        finish();
+        showToast("浏览器阻止了音频播放，请再次点击喇叭");
+      });
+    };
+    playNext();
+    return true;
+  }
+
   function speakEnglish(text, button = null, rate = 0.72) {
     const value = String(text || "").trim();
     if (!value || !speechSynthesisAvailable()) return false;
+    stopPronunciationSound();
     window.speechSynthesis.cancel();
     $$(".speak-button.is-playing").forEach(item => item.classList.remove("is-playing"));
     const utterance = new SpeechSynthesisUtterance(value);
@@ -3719,11 +3794,11 @@
   }
 
   function studyTimeComplete() {
-    return todayStudySeconds() >= STUDY_TIME_TARGET_SECONDS;
+    return currentStudyPlan().complete;
   }
 
   function currentStudyPlan() {
-    return studyPlanProgress(todayStudySeconds());
+    return studyPlanProgress(studyTimeState(), localDate());
   }
 
   function studyStageDescription(stage) {
@@ -3747,26 +3822,30 @@
 
   function studyStageButtonLabel(stage, running) {
     if (stage.complete) return "回看";
-    if (!stage.current) return "按顺序完成";
-    if (running) return "正在学习";
-    return stage.elapsedSeconds > 0 ? "继续本阶段" : stage.actionLabel;
+    if (running && stage.current) return "正在学习";
+    if (running) return stage.elapsedSeconds > 0 ? "切换并继续" : "切换到此项";
+    return stage.elapsedSeconds > 0 ? "继续此项" : stage.actionLabel;
   }
 
   function renderStudyPlanSteps(plan) {
     const list = $("#studyPlanSteps");
     if (!list) return;
     list.innerHTML = plan.stages.map(stage => {
-      const statusClass = stage.complete ? "is-complete" : stage.current ? "is-current" : "is-locked";
-      const icon = stage.complete ? '<i data-lucide="check" aria-hidden="true"></i>' : String(stage.index + 1);
+      const statusClass = stage.complete ? "is-complete" : stage.current ? "is-current" : "is-available";
+      const icon = stage.complete
+        ? '<i data-lucide="check" aria-hidden="true"></i>'
+        : stage.current
+          ? '<i data-lucide="play" aria-hidden="true"></i>'
+          : '<i data-lucide="clock-3" aria-hidden="true"></i>';
       const timing = `${formatStudyDuration(stage.elapsedSeconds)} / ${formatStudyDuration(stage.targetSeconds)}`;
       return `
         <li class="study-plan-step ${statusClass}">
-          <span class="study-plan-step-number">${icon}</span>
+          <span class="study-plan-step-icon">${icon}</span>
           <div class="study-plan-step-copy">
             <div class="study-plan-step-title"><strong>${escapeHtml(stage.label)}</strong><span>${stage.minutes} 分钟 · ${timing}</span></div>
             <p>${escapeHtml(studyStageDescription(stage))}</p>
           </div>
-          <button class="secondary-button study-plan-step-action" type="button" data-study-stage="${escapeHtml(stage.id)}" ${stage.current || stage.complete ? "" : "disabled"}>${escapeHtml(studyStageButtonLabel(stage, studyClockRunning))}</button>
+          <button class="secondary-button study-plan-step-action" type="button" data-study-stage="${escapeHtml(stage.id)}">${escapeHtml(studyStageButtonLabel(stage, studyClockRunning))}</button>
         </li>`;
     }).join("");
   }
@@ -3786,12 +3865,12 @@
     progress.setAttribute("aria-valuenow", String(seconds));
     progress.setAttribute("aria-valuetext", `${formatStudyDuration(seconds)} / ${formatStudyDuration(STUDY_TIME_TARGET_SECONDS)}`);
     button.disabled = complete;
-    button.textContent = complete ? "今日已完成" : studyClockRunning ? "暂停当前阶段" : `开始第 ${current.index + 1} 阶段`;
+    button.textContent = complete ? "今日已完成" : studyClockRunning ? "暂停当前项目" : current.elapsedSeconds > 0 ? `继续“${current.label}”` : `开始“${current.label}”`;
     button.setAttribute("aria-label", complete ? "今日学习计划已完成" : studyClockRunning ? `暂停${current.label}` : `开始${current.label}`);
     if (complete) status.textContent = "六个学习阶段和 60 分钟有效学习时间都已完成，今日达标。";
-    else if (studyClockRunning) status.textContent = `正在进行第 ${current.index + 1} 阶段“${current.label}”：${studyStageDescription(current)}${current.allowBackground ? "这一阶段可以切换到英语学习窗口，回来后会继续显示进度。" : "请保持网页可见并有操作，离开页面会自动暂停。"}`;
-    else if (studyClockPauseReason) status.textContent = `已暂停：${studyClockPauseReason}。下一步是第 ${current.index + 1} 阶段“${current.label}”。`;
-    else status.textContent = `现在先做第 ${current.index + 1} 阶段“${current.label}”：${studyStageDescription(current)}`;
+    else if (studyClockRunning) status.textContent = `正在学习“${current.label}”：${studyStageDescription(current)}${current.allowBackground ? "这一项可以切换到英语学习窗口，回来后会继续显示进度。" : "请保持网页可见并有操作，离开页面会自动暂停。"}你也可以随时切换到其他未完成项目。`;
+    else if (studyClockPauseReason) status.textContent = `已暂停：${studyClockPauseReason}。可以继续“${current.label}”，也可以从下方自由选择其他未完成项目。`;
+    else status.textContent = `六项可以自由选择；当前选中“${current.label}”：${studyStageDescription(current)}`;
     renderStudyPlanSteps(plan);
 
     const dock = $("#studyPlanDock");
@@ -3801,7 +3880,7 @@
     if (dock && dockLabel && dockTime && dockToggle) {
       dock.hidden = activeView === "home" || complete;
       if (current) {
-        dockLabel.textContent = `第 ${current.index + 1} 阶段 · ${current.label}`;
+        dockLabel.textContent = `当前项目 · ${current.label}`;
         dockTime.textContent = `${formatStudyDuration(current.elapsedSeconds)} / ${formatStudyDuration(current.targetSeconds)}`;
         dockToggle.textContent = studyClockRunning ? "暂停" : current.elapsedSeconds > 0 ? "继续" : "开始";
         dockToggle.setAttribute("aria-label", studyClockRunning ? `暂停${current.label}` : `继续${current.label}`);
@@ -3831,19 +3910,26 @@
     if (!increment) return;
     const state = studyTimeState();
     const date = localDate();
-    const previous = studySecondsForDate(state, date);
-    const previousPlan = studyPlanProgress(previous);
-    const activeStage = previousPlan.currentStage;
-    const stageBoundary = activeStage ? activeStage.endSeconds : STUDY_TIME_TARGET_SECONDS;
-    const next = Math.min(stageBoundary, previous + increment);
+    const activeStage = studyPlanProgress(state, date).currentStage;
+    if (!activeStage) return;
+    if (!state.stages[date]) state.stages[date] = Object.fromEntries(DAILY_STUDY_PLAN.map(stage => [stage.id, 0]));
+    const previous = Number(state.stages[date][activeStage.id]) || 0;
+    const next = Math.min(activeStage.targetSeconds, previous + increment);
     if (next === previous) return;
-    state.daily[date] = next;
+    state.stages[date][activeStage.id] = next;
+    state.daily[date] = DAILY_STUDY_PLAN.reduce((sum, stage) => sum + (Number(state.stages[date][stage.id]) || 0), 0);
+    const stageComplete = next >= activeStage.targetSeconds;
+    if (stageComplete) {
+      const nextStage = DAILY_STUDY_PLAN.find(stage => (Number(state.stages[date][stage.id]) || 0) < stage.minutes * 60);
+      if (nextStage) state.selected[date] = nextStage.id;
+      else delete state.selected[date];
+    }
     persistStudyTime(false);
     renderStudyTimer();
-    if (next >= stageBoundary) {
-      const finalStage = next >= STUDY_TIME_TARGET_SECONDS;
-      stopStudyClock(finalStage ? "今日六个阶段均已完成" : `“${activeStage.label}”已完成`, false);
-      showToast(finalStage ? "今日 60 分钟学习计划完成" : `“${activeStage.label}”完成，请开始下一阶段`);
+    if (stageComplete) {
+      const finalStage = state.daily[date] >= STUDY_TIME_TARGET_SECONDS;
+      stopStudyClock(finalStage ? "今日六个项目均已完成" : `“${activeStage.label}”已完成`, false);
+      showToast(finalStage ? "今日 60 分钟学习计划完成" : `“${activeStage.label}”完成，可任选其他未完成项目`);
     }
   }
 
@@ -3969,10 +4055,18 @@
   }
 
   async function openStudyStage(stage, startCurrent = false) {
-    if (!stage || (!stage.current && !stage.complete)) return;
-    if (startCurrent && stage.current && !studyClockRunning) startStudyClock();
-    await launchStudyStageContent(stage, startCurrent && stage.current);
-    showToast(`已进入第 ${stage.index + 1} 阶段：${stage.label}`);
+    if (!stage) return;
+    if (!stage.complete) {
+      const current = currentStudyPlan().currentStage;
+      if (studyClockRunning && current && current.id !== stage.id) stopStudyClock(`切换到“${stage.label}”`);
+      const state = studyTimeState();
+      state.selected[localDate()] = stage.id;
+      persistStudyTime(true);
+      stage = currentStudyPlan().stages.find(item => item.id === stage.id) || stage;
+      if (startCurrent && !studyClockRunning) startStudyClock();
+    }
+    await launchStudyStageContent(stage, startCurrent && !stage.complete);
+    showToast(stage.complete ? `正在回看“${stage.label}”` : `已开始“${stage.label}”`);
   }
 
   function openCurrentStudyStage() {
@@ -4842,7 +4936,9 @@
     const consonantCount = phonemes.filter(item => item.type === "consonant").length;
 
     $("#pronunciationSummary").textContent = PRONUNCIATION.summary || "先学课程中已经单独讲过的音，其余内容随用随查。";
-    $("#pronunciationAudioNotice").textContent = PRONUNCIATION.audioNotice || "喇叭播放英文示范词。";
+    $("#pronunciationAudioNotice").textContent = PRONUNCIATION.audioNotice || "顶部喇叭播放目标音素，示范词行喇叭播放完整单词。";
+    const audioCredits = $("#pronunciationAudioCredits");
+    if (audioCredits) audioCredits.textContent = PRONUNCIATION.audioCredits || "音频来源见各音素的开放许可说明。";
     $("#pronunciationAccentNotice").textContent = PRONUNCIATION.accentNotice || "不同词典和口音的音标写法可能不同。";
     $("#pronunciationCount").textContent = `显示 ${items.length} 个${filterLabels[pronunciationFilter] || ""}发音 · 元音 ${vowelCount} · 辅音 ${consonantCount}`;
 
@@ -4869,11 +4965,11 @@
             </div>
             <div class="pronunciation-card-actions">
               ${item.learned ? '<span class="pronunciation-learned-badge">本课已学</span>' : ""}
-              ${speechButtonHtml(item.example, `慢速播放示范词 ${item.example}`)}
+              ${phonemeSoundButtonHtml(item)}
             </div>
           </header>
           <div class="pronunciation-example">
-            <div><code>${escapeHtml(item.example)}</code><span>${escapeHtml(item.examplePhonetic)}</span></div>
+            <div><code>${escapeHtml(item.example)}</code><span>${escapeHtml(item.examplePhonetic)}</span>${speechButtonHtml(item.example, `慢速播放完整示范词 ${item.example}`)}</div>
             <span>${escapeHtml(item.exampleZh)}</span>
           </div>
           <dl class="pronunciation-steps">
@@ -5156,7 +5252,7 @@
       const button = event.target.closest("[data-study-stage]");
       if (!button) return;
       const stage = currentStudyPlan().stages.find(item => item.id === button.dataset.studyStage);
-      if (stage) void openStudyStage(stage, stage.current);
+      if (stage) void openStudyStage(stage, !stage.complete);
     });
     ["pointerdown", "keydown", "touchstart", "input", "scroll"].forEach(type => document.addEventListener(type, markStudyActivity, { passive: true }));
     document.addEventListener("visibilitychange", handleStudyVisibility);
@@ -5295,6 +5391,11 @@
       if (button) playFocusedListening(button);
     });
     $("#appBody").addEventListener("click", event => {
+      const phonemeButton = event.target.closest("[data-pronunciation-sound]");
+      if (phonemeButton) {
+        playPronunciationSound(phonemeButton.dataset.pronunciationSound, phonemeButton);
+        return;
+      }
       const button = event.target.closest("[data-speak-text]");
       if (button) speakEnglish(button.dataset.speakText, button);
     });
@@ -5363,7 +5464,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=47", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=48", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

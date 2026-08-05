@@ -28,6 +28,8 @@ test("pronunciation reference contains 20 vowels and 24 consonants with unique i
     assert.ok(["vowel", "consonant"].includes(item.type), `${item.id} has an invalid type`);
     assert.equal(typeof item.learned, "boolean", `${item.id} must declare whether it was explicitly learned`);
     requiredFields.forEach(field => assert.ok(String(item[field] || "").trim(), `${item.id}.${field} is required`));
+    assert.ok(Array.isArray(item.soundAudio) && item.soundAudio.length > 0, `${item.id}.soundAudio is required`);
+    item.soundAudio.forEach(source => assert.match(source, /^audio\/phonemes\/.+\.(?:ogg|wav)$/u));
     assert.match(item.symbol, /^\/.+\/$/u);
     assert.match(item.examplePhonetic, /^\/.+\/$/u);
   });
@@ -39,8 +41,9 @@ test("pronunciation course-first filter starts with the four explicitly taught v
 
   assert.deepEqual(learned, ["/e/", "/æ/", "/ɑ/", "/ɪ/"].sort());
   assert.match(data.summary, /不要求一次背完/);
+  assert.match(data.audioNotice, /目标音素/);
   assert.match(data.audioNotice, /示范词/);
-  assert.match(data.audioNotice, /不是孤立音标/);
+  assert.match(data.audioCredits, /Wikimedia Commons/);
   assert.match(data.accentNotice, /\/e\/.*\/ɛ\//);
   assert.match(data.accentNotice, /\/ɑ\/.*\/ɒ\//);
   assert.match(data.accentNotice, /\/oʊ\/.*\/əʊ\//);
@@ -57,4 +60,12 @@ test("pronunciation foundations explain symbols, vowels, consonants, voicing, sy
   });
   assert.match(data.concepts.find(item => item.id === "voicing").action, /\/s\/.*\/z\//);
   assert.match(data.concepts.find(item => item.id === "syllables").summary, /ˈ/);
+});
+
+test("every target sound points to a bundled local audio asset", () => {
+  const data = loadPronunciationData();
+  const sources = new Set(data.phonemes.flatMap(item => item.soundAudio));
+  assert.equal(sources.size >= 41, true);
+  sources.forEach(source => assert.equal(fs.existsSync(path.join(ROOT, source)), true, `${source} must be bundled`));
+  assert.equal(fs.existsSync(path.join(ROOT, "audio", "phonemes", "SOURCES.json")), true);
 });

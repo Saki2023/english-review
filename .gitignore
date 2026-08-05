@@ -1,3 +1,4 @@
 .env
 .sync.env
 server/data/*.json
+.browser-test-data/
