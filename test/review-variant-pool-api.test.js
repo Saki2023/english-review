@@ -93,10 +93,10 @@ function createProvider() {
   return { provider, calls };
 }
 
-async function startApp(dataDir, port) {
+async function startApp(dataDir, port, autofill = true) {
   const child = spawn(process.execPath, [path.join(ROOT, "server.js")], {
     cwd: ROOT,
-    env: { ...process.env, DATA_DIR: dataDir, PORT: String(port), COOKIE_SECURE: "false", REVIEW_VARIANT_POOL_AUTOFILL: "true" },
+    env: { ...process.env, DATA_DIR: dataDir, PORT: String(port), COOKIE_SECURE: "false", REVIEW_VARIANT_POOL_AUTOFILL: String(Boolean(autofill)) },
     stdio: ["ignore", "pipe", "pipe"]
   });
   await waitForHealth(`http://127.0.0.1:${port}`, child);
@@ -187,6 +187,83 @@ test("daily sentence pool survives refresh, stale state PUT, and server restart"
     for (const child of [app, restarted]) {
       if (child && child.exitCode === null) child.kill();
     }
+    await new Promise(resolve => providerInfo.provider.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("review immediately reuses a stored learned sentence even before its matching family is generated", async () => {
+  const dataDir = temporaryDataDir();
+  const providerInfo = createProvider();
+  let app;
+  try {
+    const users = loadUsers(dataDir);
+    createUser(users, { username: "pool-owner", password: "pool-test-password" });
+    saveUsers(dataDir, users);
+    await new Promise((resolve, reject) => providerInfo.provider.listen(0, "127.0.0.1", error => error ? reject(error) : resolve()));
+    const providerPort = providerInfo.provider.address().port;
+    const appPort = await freePort();
+    const baseUrl = `http://127.0.0.1:${appPort}`;
+    app = await startApp(dataDir, appPort, false);
+    const cookie = await login(baseUrl);
+
+    const configured = await fetch(`${baseUrl}/api/admin/ai-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "pool-test-key", models: ["test-model"], defaultModel: "test-model", timeoutMs: 10000, rateLimitPerMinute: 60 })
+    });
+    assert.equal(configured.status, 200);
+
+    let response = await fetch(`${baseUrl}/api/review/sentence-variants`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ taskIds: ["d4-s5:en-zh"], model: "test-model", reasoningEffort: "high", force: true })
+    });
+    assert.equal(response.status, 202);
+    let generated = await response.json();
+    for (let attempt = 0; response.status === 202 && attempt < 100; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+      response = await fetch(`${baseUrl}/api/review/sentence-variants?jobId=${encodeURIComponent(generated.jobId)}`, { headers: { "Cookie": cookie } });
+      generated = await response.json();
+    }
+    assert.equal(response.status, 200);
+    assert.equal(generated.variants.length, 1);
+    assert.equal(generated.variants[0].family, "description");
+
+    const poolState = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
+    assert.equal(poolState.reviewVariantPool.generatedCount, 1);
+    assert.equal(poolState.reviewVariantPool.remainingCount, 99);
+
+    const reusedResponse = await fetch(`${baseUrl}/api/review/sentence-variants`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ taskIds: ["d4-s2:en-zh"], model: "test-model", reasoningEffort: "high" })
+    });
+    assert.equal(reusedResponse.status, 200, "an existing pool sentence must be returned without waiting for AI");
+    const reused = await reusedResponse.json();
+    assert.equal(reused.status, "completed");
+    assert.equal(reused.cached, true);
+    assert.equal(reused.variants[0].id, generated.variants[0].id);
+    assert.equal(reused.variants[0].family, "description", "the stored sentence may be reused before the inside family is ready");
+
+    const gradeResponse = await fetch(`${baseUrl}/api/ai/grade`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({
+        taskId: "d4-s2:en-zh",
+        variantId: reused.variants[0].id,
+        reviewVariant: reused.variants[0],
+        answer: reused.variants[0].chinese,
+        model: "test-model",
+        reasoningEffort: "high"
+      })
+    });
+    assert.equal(gradeResponse.status, 200);
+    const grade = await gradeResponse.json();
+    assert.equal(grade.correct, true);
+    assert.equal(grade.source, "local");
+  } finally {
+    if (app && app.exitCode === null) app.kill();
     await new Promise(resolve => providerInfo.provider.close(resolve));
     fs.rmSync(dataDir, { recursive: true, force: true });
   }

@@ -774,6 +774,22 @@ function findSentenceTask(taskId, variantId = "", suppliedVariant = null) {
   return { item: { ...baseItem, ...variant }, baseItem, direction, taskId: value, variant };
 }
 
+function findStoredPoolSentenceTask(user, taskId, variantId = "") {
+  if (!user) return null;
+  const base = findSentenceTask(taskId);
+  if (!base) return null;
+  const state = getUserState(user);
+  const pool = state.reviewVariantPool;
+  const assignedId = String(pool && pool.assignments && pool.assignments[base.taskId] || "");
+  const requestedId = String(variantId || "").trim();
+  // A pool variant is accepted only when the server has assigned that exact
+  // ID to this task. The browser cannot inject arbitrary sentence text.
+  if (!assignedId || (requestedId && requestedId !== assignedId)) return null;
+  const variant = Array.isArray(pool.variants) ? pool.variants.find(item => item.id === assignedId) : null;
+  if (!variant) return null;
+  return { ...base, item: { ...base.baseItem, ...variant }, variant };
+}
+
 function localSentenceAnswerMatches(task, answer) {
   if (task.direction === "zh-en") return englishAnswerMatches(answer, task.item.acceptedEnglish || [task.item.english]);
   return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese]);
@@ -1158,6 +1174,31 @@ function sendReviewVariantJob(res, job) {
   }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
 }
 
+function sendPartialReviewVariantResponse(res, assigned, pendingTasks, { job = null, message = "", autoRetry = true, pool = null } = {}) {
+  const variants = Array.isArray(assigned && assigned.variants) ? assigned.variants : [];
+  const pendingTaskIds = (Array.isArray(pendingTasks) ? pendingTasks : []).map(task => String(task && task.taskId || "")).filter(Boolean);
+  const first = variants[0] || {};
+  return sendJson(res, job ? 202 : 200, {
+    status: "partial",
+    jobId: job ? job.id : "",
+    pollAfterMs: job ? REVIEW_VARIANT_JOB_POLL_MS : 0,
+    variants,
+    pendingTaskIds,
+    failures: [],
+    message: String(message || `已先使用 ${variants.length} 条已生成句子，剩余 ${pendingTaskIds.length} 条继续准备。`).slice(0, 240),
+    source: "ai",
+    provider: { id: first.providerId || "", name: first.providerName || "" },
+    model: first.model || (pool && pool.model) || "",
+    reasoningEffort: first.reasoningEffort || (pool && pool.reasoningEffort) || "",
+    repairRounds: 0,
+    maxRepairRounds: REVIEW_VARIANT_MAX_REPAIR_ROUNDS,
+    autoRetry: Boolean(autoRetry),
+    retryAfterMs: autoRetry ? AI_SENTENCE_RETRY_MS : 0,
+    cached: true,
+    pool: pool || (assigned && assigned.pool ? reviewVariantPoolSummary(assigned.pool) : null)
+  });
+}
+
 function failReviewVariantJob(job, error) {
   if (!job || job.status !== "pending") return;
   job.status = "failed";
@@ -1292,11 +1333,18 @@ async function handleReviewSentenceVariants(req, res, user) {
     if (body.prefetch !== true && !taskIds.length) return sendError(res, 400, "taskIds are required");
     if (tasks.length !== taskIds.length) return sendError(res, 404, "sentence task not found");
 
+    let assigned = { pool, variants: [] };
+    let pendingTasks = tasks;
     if (body.prefetch !== true && body.force !== true) {
-      const assigned = assignReviewVariantPoolTasks(pool, tasks);
+      // Use every compatible sentence already saved in today's pool first.
+      // The remaining tasks can be generated in the background; the learner
+      // should never wait for the full 100-sentence pool when one is ready.
+      assigned = assignReviewVariantPoolTasks(pool, tasks);
       state.reviewVariantPool = assigned.pool;
       persistUserStates();
-      if (assigned.variants.length === tasks.length) {
+      const assignedTaskIds = new Set(assigned.variants.map(item => item.taskId));
+      pendingTasks = tasks.filter(task => !assignedTaskIds.has(task.taskId));
+      if (!pendingTasks.length) {
         const first = assigned.variants[0] || {};
         return sendJson(res, 200, {
           status: "completed",
@@ -1317,7 +1365,10 @@ async function handleReviewSentenceVariants(req, res, user) {
       }
     }
 
-    if (!aiConfigured()) return unavailable("AI 尚未配置，句子变式将每 5 分钟自动重试");
+    if (!aiConfigured()) {
+      if (assigned.variants.length) return sendPartialReviewVariantResponse(res, assigned, pendingTasks, { message: `已先使用 ${assigned.variants.length} 条已生成句子；剩余 ${pendingTasks.length} 条将在 AI 恢复后继续生成。`, pool: reviewVariantPoolSummary(assigned.pool) });
+      return unavailable("AI 尚未配置，句子变式将每 5 分钟自动重试");
+    }
     const practice = sanitizeAiPractice(state.aiPractice);
     const availableModels = getAvailableModels(aiSettings);
     const requestedModel = [body.model, practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
@@ -1359,14 +1410,26 @@ async function handleReviewSentenceVariants(req, res, user) {
       });
     }
 
-    const input = buildReviewVariantGenerationInput(state, date, route, tasks);
+    const input = buildReviewVariantGenerationInput(state, date, route, pendingTasks, assigned.variants.map(item => item.english));
     const key = reviewVariantJobKey(user.id, input);
     const existing = reviewVariantJobsById.get(reviewVariantJobIdsByKey.get(key));
-    if (existing && (existing.status === "pending" || body.force !== true)) return sendReviewVariantJob(res, existing);
+    if (existing && existing.status === "pending") {
+      if (assigned.variants.length) return sendPartialReviewVariantResponse(res, assigned, pendingTasks, { job: existing, message: `已先使用 ${assigned.variants.length} 条已生成句子；剩余 ${pendingTasks.length} 条正在后台生成。`, pool: reviewVariantPoolSummary(assigned.pool) });
+      return sendReviewVariantJob(res, existing);
+    }
+    if (existing && body.force !== true) {
+      if (assigned.variants.length) return sendPartialReviewVariantResponse(res, assigned, pendingTasks, { message: `已先使用 ${assigned.variants.length} 条已生成句子；剩余 ${pendingTasks.length} 条等待重试。`, pool: reviewVariantPoolSummary(assigned.pool) });
+      return sendReviewVariantJob(res, existing);
+    }
     if (existing) deleteReviewVariantJob(existing);
     const rate = takeAiRequest(user.id);
-    if (!rate.allowed) return sendJson(res, 429, { error: "AI 句子请求过多，将每 5 分钟自动重试", retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
-    return sendReviewVariantJob(res, startReviewVariantJob(user, key, route, input));
+    if (!rate.allowed) {
+      if (assigned.variants.length) return sendPartialReviewVariantResponse(res, assigned, pendingTasks, { message: `已先使用 ${assigned.variants.length} 条已生成句子；剩余 ${pendingTasks.length} 条受限流影响，将在 5 分钟后重试。`, pool: reviewVariantPoolSummary(assigned.pool) });
+      return sendJson(res, 429, { error: "AI 句子请求过多，将每 5 分钟自动重试", retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
+    }
+    const job = startReviewVariantJob(user, key, route, input);
+    if (assigned.variants.length) return sendPartialReviewVariantResponse(res, assigned, pendingTasks, { job, message: `已先使用 ${assigned.variants.length} 条已生成句子；剩余 ${pendingTasks.length} 条正在后台生成。`, pool: reviewVariantPoolSummary(assigned.pool) });
+    return sendReviewVariantJob(res, job);
   } catch (error) {
     return sendError(res, error.statusCode || 400, error.message);
   }
@@ -1639,7 +1702,9 @@ async function handleAiGrade(req, res, user) {
     const answer = String(body.answer || "").trim();
     if (!answer) return sendError(res, 400, "answer is required");
     if (answer.length > MAX_AI_ANSWER_LENGTH) return sendError(res, 400, "answer is too long");
-    const task = findSentenceTask(body.taskId, body.variantId, body.reviewVariant);
+    const requestedVariantId = String(body.variantId || (body.reviewVariant && body.reviewVariant.id) || "").trim();
+    const task = findStoredPoolSentenceTask(user, body.taskId, requestedVariantId)
+      || findSentenceTask(body.taskId, requestedVariantId, body.reviewVariant);
     if (!task) return sendError(res, 404, "sentence task not found");
     const acceptedAnswers = task.direction === "zh-en" ? (task.item.acceptedEnglish || [task.item.english]) : (task.item.acceptedChinese || [task.item.chinese]);
     const localGrade = localTranslationGrade(task.direction, task.item.english, answer, acceptedAnswers);

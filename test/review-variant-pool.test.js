@@ -64,6 +64,7 @@ test("daily review variant pool keeps 100 variants and stable assignments after 
   const second = assignReviewVariantPoolTasks(reloaded, tasks);
   assert.deepEqual(second.variants.map(item => item.id), first.variants.map(item => item.id));
   assert.equal(reviewVariantPoolSummary(second.pool).generatedCount, 100);
+  assert.equal(reviewVariantPoolSummary(second.pool).remainingCount, 0);
   assert.equal(reviewVariantPoolSummary(second.pool).assignedCount, 2);
 });
 
@@ -111,3 +112,11 @@ test("assignments only use variants from the same sentence family and prefer dif
   assert.notEqual(result.variants[0].id, result.variants[1].id);
 });
 
+test("a persisted pool variant is used immediately when the current family is not ready", () => {
+  let pool = createReviewVariantPool({ date: "2026-08-05", contentSignature: "signature-a" });
+  pool = storeReviewVariantPoolResults(pool, [poolVariant(1, "description")]).pool;
+  const result = assignReviewVariantPoolTasks(pool, [{ taskId: "inside-one:en-zh", family: "inside" }]);
+  assert.equal(result.variants.length, 1);
+  assert.equal(result.variants[0].id, "ai-description-1");
+  assert.equal(result.pool.assignments["inside-one:en-zh"], "ai-description-1");
+});

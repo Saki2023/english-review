@@ -149,12 +149,12 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=44/);
+  assert.match(html, /pronunciation-data\.js\?v=45/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /speechButtonHtml\(item\.example/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=44/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=45/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -329,11 +329,23 @@ test("daily sentence pools persist one hundred variants and client merges cannot
   assert.match(app, /remote\.variants[\s\S]*local\.variants/);
   assert.match(app, /prefetch:\s*true/);
   assert.match(app, /reviewVariantPoolStatus/);
+  assert.match(app, /function clearReviewVariantPoolStatusPolling\(\)/);
+  assert.match(app, /function scheduleReviewVariantPoolStatusPolling\(\)/);
+  assert.match(app, /fetch\("\/api\/state", \{ cache: "no-store", credentials: "same-origin" \}\)/);
+  assert.match(app, /function updateReviewVariantPoolStatus\(value, render = false\)/);
   assert.match(html, /id="reviewVariantPoolStatus"/);
+  assert.match(html, /id="reviewVariantPoolStatusCard"/);
+  assert.match(html, /id="reviewVariantPoolCount"/);
+  assert.match(html, /id="reviewVariantPoolProgress"/);
   assert.match(pool, /const REVIEW_VARIANT_POOL_TARGET = 100/);
   assert.match(pool, /const REVIEW_VARIANT_POOL_BATCH = 20/);
+  assert.match(pool, /const compatible = pool\.variants\.filter/);
+  assert.match(pool, /const candidates = compatible\.length \? compatible : pool\.variants/);
+  assert.match(pool, /remainingCount/);
   assert.match(server, /reviewVariantPool: existing\.reviewVariantPool/);
   assert.match(server, /startReviewVariantPoolFill/);
+  assert.match(server, /function findStoredPoolSentenceTask\(user, taskId, variantId = ""\)/);
+  assert.match(server, /accepted only when the server has assigned that exact/);
 });
 
 test("review redraws preserve an unsubmitted answer for the same task", () => {
@@ -374,7 +386,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 44", () => {
+test("PWA client assets consistently use the displayed cache version 45", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -385,8 +397,8 @@ test("PWA client assets consistently use the displayed cache version 44", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "44");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v44"/);
+  assert.equal(displayedVersion[1], "45");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v45"/);
 });
 
 test("daily study plan explains six guided stages and records sixty minutes across web and learning-window work", () => {
@@ -412,6 +424,6 @@ test("daily study plan explains six guided stages and records sixty minutes acro
   assert.match(app, /STUDY_TIME_IDLE_TIMEOUT_MS = 5 \* 60 \* 1000/);
   assert.match(app, /document\.hidden/);
   assert.match(app, /model\.studyTime/);
-  assert.match(html, /study-time\.js\?v=44/);
-  assert.match(serviceWorker, /study-time\.js\?v=44/);
+  assert.match(html, /study-time\.js\?v=45/);
+  assert.match(serviceWorker, /study-time\.js\?v=45/);
 });

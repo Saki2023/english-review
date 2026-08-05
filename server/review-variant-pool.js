@@ -130,11 +130,14 @@ function ensureReviewVariantPool(value, { date, contentSignature, targetCount = 
 
 function reviewVariantPoolSummary(value) {
   const pool = sanitizeReviewVariantPool(value);
+  const generatedCount = pool.variants.length;
+  const remainingCount = Math.max(0, pool.targetCount - generatedCount);
   return {
     schema: pool.schema,
     date: pool.date,
     targetCount: pool.targetCount,
-    generatedCount: pool.variants.length,
+    generatedCount,
+    remainingCount,
     assignedCount: Object.keys(pool.assignments).length,
     blockedFamilies: [...pool.blockedFamilies],
     status: pool.status,
@@ -248,10 +251,15 @@ function assignReviewVariantPoolTasks(value, tasks) {
   (Array.isArray(tasks) ? tasks : []).forEach(task => {
     const taskId = cleanText(task && task.taskId, 180);
     const family = cleanText(task && (task.family || sentenceFamily(task.baseItem)), 40);
-    if (!taskId || !family) return;
+    if (!taskId) return;
     let variant = byId.get(pool.assignments[taskId]);
-    if (!variant || variant.family !== family) {
-      const candidates = pool.variants.filter(item => item.family === family);
+    if (!variant) {
+      // Prefer the same sentence family, but do not make the learner wait for
+      // a new AI request when today's persisted pool already has valid learned
+      // sentences from another family. All pool entries are generated from
+      // learned words and are safe to reuse as a review variant.
+      const compatible = pool.variants.filter(item => family && item.family === family);
+      const candidates = compatible.length ? compatible : pool.variants;
       if (!candidates.length) return;
       const start = stableIndex(`${pool.date}|${taskId}`, candidates.length);
       for (let offset = 0; offset < candidates.length; offset += 1) {

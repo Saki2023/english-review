@@ -618,7 +618,8 @@ test("admin configures AI on the web and progress-based questions use the select
     const repairedReview = await requestReviewVariants(baseUrl, cookie, {
       taskIds: ["d4-s5:en-zh", "d2-s3:en-zh"],
       model: "strong-model",
-      reasoningEffort: "max"
+      reasoningEffort: "max",
+      force: true
     });
     assert.equal(repairedReview.startStatus, 202);
     assert.equal(repairedReview.response.status, 200);

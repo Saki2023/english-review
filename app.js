@@ -51,6 +51,7 @@
   const EXAM_GENERATION_POLL_MS = 2000;
   const REVIEW_VARIANT_POLL_MS = 2000;
   const REVIEW_VARIANT_RETRY_MS = 5 * 60 * 1000;
+  const REVIEW_VARIANT_POOL_STATUS_POLL_MS = 2000;
   const REVIEW_VARIANT_WAIT_TIMEOUT_MS = 12 * 60 * 1000;
   const REVIEW_VARIANT_POLL_REQUEST_TIMEOUT_MS = 15000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
@@ -85,6 +86,7 @@
   let reviewVariantRetryKey = "";
   let reviewVariantStatusMessage = "";
   let reviewVariantPoolStatus = null;
+  let reviewVariantPoolStatusTimer = null;
   let studyClockTimer = null;
   let studyClockRunning = false;
   let studyClockLastTickAt = 0;
@@ -1170,6 +1172,78 @@
     return repairReviewEvidence(DATA, merged).state;
   }
 
+  function normalizeReviewVariantPoolStatus(value) {
+    if (!value || typeof value !== "object") return null;
+    const targetCount = Math.max(0, Number(value.targetCount) || 0);
+    const generatedCount = Math.max(0, Math.min(targetCount || Number.MAX_SAFE_INTEGER, Number(value.generatedCount) || 0));
+    return {
+      ...value,
+      targetCount,
+      generatedCount,
+      remainingCount: Math.max(0, targetCount - generatedCount)
+    };
+  }
+
+  function reviewVariantPoolStatusKey(value) {
+    const pool = normalizeReviewVariantPoolStatus(value);
+    if (!pool) return "";
+    return [
+      pool.date,
+      pool.targetCount,
+      pool.generatedCount,
+      pool.remainingCount,
+      pool.assignedCount,
+      pool.status,
+      pool.updatedAt,
+      pool.nextRetryAt,
+      pool.error,
+      pool.model,
+      pool.reasoningEffort
+    ].map(item => String(item || "")).join("|");
+  }
+
+  function clearReviewVariantPoolStatusPolling() {
+    if (reviewVariantPoolStatusTimer) clearTimeout(reviewVariantPoolStatusTimer);
+    reviewVariantPoolStatusTimer = null;
+  }
+
+  function scheduleReviewVariantPoolStatusPolling() {
+    if (!API_ENABLED || !currentUser || activeView !== "home" || !reviewVariantPoolStatus || reviewVariantPoolStatus.status !== "pending") {
+      clearReviewVariantPoolStatusPolling();
+      return;
+    }
+    if (reviewVariantPoolStatusTimer) return;
+    const pollUserId = currentUser.id;
+    reviewVariantPoolStatusTimer = setTimeout(async () => {
+      reviewVariantPoolStatusTimer = null;
+      if (!API_ENABLED || !currentUser || currentUser.id !== pollUserId || activeView !== "home" || !reviewVariantPoolStatus || reviewVariantPoolStatus.status !== "pending") return;
+      try {
+        const response = await fetch("/api/state", { cache: "no-store", credentials: "same-origin" });
+        if (response.status === 401) {
+          showAuthView();
+          return;
+        }
+        if (!response.ok) throw new Error("review pool status request failed");
+        const remote = await response.json();
+        if (currentUser && currentUser.id === pollUserId && remote && remote.reviewVariantPool) updateReviewVariantPoolStatus(remote.reviewVariantPool, true);
+      } catch (_) {
+        // A transient status request failure must not stop the background poll.
+      } finally {
+        scheduleReviewVariantPoolStatusPolling();
+      }
+    }, REVIEW_VARIANT_POOL_STATUS_POLL_MS);
+  }
+
+  function updateReviewVariantPoolStatus(value, render = false) {
+    const next = normalizeReviewVariantPoolStatus(value);
+    const changed = reviewVariantPoolStatusKey(reviewVariantPoolStatus) !== reviewVariantPoolStatusKey(next);
+    reviewVariantPoolStatus = next;
+    if (next && next.status === "pending" && activeView === "home") scheduleReviewVariantPoolStatusPolling();
+    else clearReviewVariantPoolStatusPolling();
+    if (changed && render && activeView === "home") renderHome();
+    return changed;
+  }
+
   async function syncRemoteState() {
     if (!API_ENABLED) return;
     try {
@@ -1177,7 +1251,7 @@
       if (response.status === 401) return showAuthView();
       if (!response.ok) throw new Error("state request failed");
       const remote = await response.json();
-      if (remote && remote.reviewVariantPool) reviewVariantPoolStatus = remote.reviewVariantPool;
+      if (remote && remote.reviewVariantPool) updateReviewVariantPoolStatus(remote.reviewVariantPool);
       model = mergeModels(model, remote);
       remoteReady = true;
       saveModel();
@@ -1190,6 +1264,8 @@
   }
 
   function showAuthView() {
+    clearReviewVariantPoolStatusPolling();
+    reviewVariantPoolStatus = null;
     document.body.classList.add("auth-mode");
     $("#appBody").hidden = true;
     $("#authScreen").hidden = false;
@@ -1244,6 +1320,8 @@
       const data = await response.json().catch(() => ({}));
       if (!response.ok) return setAuthFeedback(data.error || "操作失败，请稍后重试");
       stopStudyClock("切换账号", false);
+      clearReviewVariantPoolStatusPolling();
+      reviewVariantPoolStatus = null;
       currentUser = data.user;
       model = loadModel();
       previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
@@ -1263,6 +1341,8 @@
 
   async function logout() {
     stopStudyClock("退出账号", false);
+    clearReviewVariantPoolStatusPolling();
+    reviewVariantPoolStatus = null;
     if (API_ENABLED) { try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch (_) {} }
     currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
     previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
@@ -1385,8 +1465,7 @@
         body: JSON.stringify({ prefetch: true, model: settings.model, reasoningEffort: settings.reasoningEffort, force: Boolean(force) })
       });
       const data = await responseJson(response);
-      if (data && data.pool) reviewVariantPoolStatus = data.pool;
-      if (activeView === "home") renderHome();
+      if (data && data.pool) updateReviewVariantPoolStatus(data.pool, true);
     } catch (_) {
       // The review page keeps working with the already persisted pool and retries through the normal sentence flow.
     }
@@ -4115,10 +4194,10 @@
     label.textContent = busy ? "正在请求…" : "立即重试";
     const validationStopped = reviewVariantStatusMessage.includes("停止自动重试");
     note.textContent = busy
-      ? "AI 正在后台生成，单次最多等待 10 分钟；网络或上游失败后会每 5 分钟自动重试。"
+      ? "正在从当天句子池取题；池为空时才请求 AI，网络或上游失败后会每 5 分钟自动重试。"
       : validationStopped
         ? "本轮内容校验已经停止；可立即重试或先更换模型。"
-      : "AI 暂不可用时可立即再试；网络或上游失败每 5 分钟自动重试。单次任务最多等待 10 分钟。";
+      : "今日复习优先抽取已保存句子；池为空或暂时不可用时可立即再试，网络失败每 5 分钟自动重试。";
   }
 
   function sentenceTasksMissingVariants(session) {
@@ -4162,7 +4241,7 @@
   async function waitForReviewVariantJob(data, key) {
     let current = data;
     const waitStartedAt = Date.now();
-    while (current && current.status === "pending" && current.jobId) {
+    while (current && ["pending", "partial"].includes(current.status) && current.jobId) {
       const elapsed = Date.now() - waitStartedAt;
       if (elapsed >= REVIEW_VARIANT_WAIT_TIMEOUT_MS) {
         const timeoutError = new Error("AI 句子变式本次等待超过 12 分钟，已停止页面轮询；后台任务会每 5 分钟自动重试。");
@@ -4208,6 +4287,21 @@
     return current;
   }
 
+  function applyReviewVariantResults(session, missing, data) {
+    if (!session || !Array.isArray(missing) || !data || !Array.isArray(data.variants)) return 0;
+    const missingIds = new Set(missing.map(task => task.taskId));
+    let added = 0;
+    data.variants.forEach(item => {
+      const taskId = String(item && item.taskId || "");
+      const variant = normalizeClientReviewVariant(item);
+      if (!missingIds.has(taskId) || !variant || variant.source !== "ai") return;
+      if (session.variants[taskId] && session.variants[taskId].id === variant.id) return;
+      session.variants[taskId] = variant;
+      added += 1;
+    });
+    return added;
+  }
+
   async function prepareReviewSentenceVariants(session, force = false) {
     const missing = sentenceTasksMissingVariants(session);
     const key = reviewVariantBatchKey(session);
@@ -4237,19 +4331,16 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ date: session.date, taskIds: missing.map(task => task.taskId), model: settings.model, reasoningEffort: settings.reasoningEffort, force: Boolean(force) })
         }));
+        let added = applyReviewVariantResults(session, missing, data);
+        if (added) {
+          saveModel();
+          if (activeView === "home") renderHome();
+        }
         data = await waitForReviewVariantJob(data, key);
         if (!data) return;
         if (data.source !== "ai") throw Object.assign(new Error("AI 未返回可固定的句子变式"), { statusCode: 503 });
-        if (data.pool) reviewVariantPoolStatus = data.pool;
-        const missingIds = new Set(missing.map(task => task.taskId));
-        let added = 0;
-        (Array.isArray(data.variants) ? data.variants : []).forEach(item => {
-          const taskId = String(item && item.taskId || "");
-          const variant = normalizeClientReviewVariant(item);
-          if (!missingIds.has(taskId) || !variant || variant.source !== "ai") return;
-          session.variants[taskId] = variant;
-          added += 1;
-        });
+        if (data.pool) updateReviewVariantPoolStatus(data.pool);
+        added += applyReviewVariantResults(session, missing, data);
         const unresolved = sentenceTasksMissingVariants(session);
         if (added) saveModel();
         if (unresolved.length) {
@@ -4310,6 +4401,7 @@
 
   function setView(view) {
     activeView = view;
+    if (view !== "home") clearReviewVariantPoolStatusPolling();
     $$(".nav-item").forEach(button => {
       const active = button.dataset.view === view;
       button.classList.toggle("is-active", active);
@@ -4336,6 +4428,7 @@
     if (view === "progress") renderProgress();
     renderStudyTimer();
     renderAiTutorWindow();
+    if (view === "home") scheduleReviewVariantPoolStatusPolling();
     refreshIcons();
   }
 
@@ -4351,6 +4444,51 @@
       button.setAttribute("aria-pressed", String(active));
     });
     renderHome();
+  }
+
+  function renderReviewVariantPoolStatus(session, baseTask) {
+    const card = $("#reviewVariantPoolStatusCard");
+    const count = $("#reviewVariantPoolCount");
+    const track = $("#reviewVariantPoolTrack");
+    const progress = $("#reviewVariantPoolProgress");
+    const status = $("#reviewVariantPoolStatus");
+    if (!card || !count || !track || !progress || !status) return;
+    const pool = normalizeReviewVariantPoolStatus(reviewVariantPoolStatus);
+    if (!pool || !pool.targetCount) {
+      card.hidden = true;
+      status.textContent = "";
+      return;
+    }
+    const generated = pool.generatedCount;
+    const target = pool.targetCount;
+    const remaining = pool.remainingCount;
+    const percent = Math.max(0, Math.min(100, Math.round((generated / target) * 100)));
+    const waitingForCurrent = Boolean(baseTask && baseTask.item && baseTask.item.type === "sentence" && session && !session.variants[baseTask.taskId]);
+    card.hidden = false;
+    count.textContent = `已保存 ${generated} / ${target} 条`;
+    progress.style.width = `${percent}%`;
+    track.setAttribute("aria-valuenow", String(percent));
+    track.setAttribute("aria-valuetext", `${generated} / ${target} 条已保存`);
+    card.dataset.status = String(pool.status || "idle");
+    let message = "";
+    if (pool.status === "ready" || generated >= target) {
+      message = `今日句子池已生成完成；刷新页面后仍会保留这 ${target} 条。`;
+    } else if (pool.status === "pending") {
+      message = waitingForCurrent
+        ? `已保存 ${generated} 条；当前题暂时没有可抽取的已保存句子，剩余 ${remaining} 条正在后台生成。`
+        : `正在后台生成剩余 ${remaining} 条；已保存的句子不会丢失。`;
+    } else if (pool.status === "failed") {
+      message = `已保存 ${generated} 条；本轮生成暂时失败，${remaining} 条将在 5 分钟后自动重试。`;
+    } else if (pool.status === "needs-attention") {
+      message = `已保存 ${generated} 条；有 ${remaining} 条暂未通过校验，请点击当前题下方“立即重试”或更换模型。`;
+    } else {
+      message = `已保存 ${generated} 条，目标 ${target} 条。`;
+    }
+    if (waitingForCurrent && reviewVariantStatusMessage) {
+      const detail = reviewVariantStatusMessage.trim().slice(0, 180);
+      if (detail && !message.includes(detail)) message += ` 当前题：${detail}`;
+    }
+    status.textContent = message;
   }
 
   function renderHome() {
@@ -4369,16 +4507,6 @@
     const resetAnswer = reviewAnswerResetRequested;
     const session = ensureBatch();
     const stats = todayStats();
-    const pool = reviewVariantPoolStatus && typeof reviewVariantPoolStatus === "object" ? reviewVariantPoolStatus : null;
-    const poolStatus = $("#reviewVariantPoolStatus");
-    if (poolStatus) {
-      if (!pool || !pool.targetCount) poolStatus.textContent = "";
-      else if (pool.status === "ready" || Number(pool.generatedCount) >= Number(pool.targetCount)) poolStatus.textContent = `今日 AI 句子池：${pool.generatedCount}/${pool.targetCount}，刷新后会继续保留`;
-      else if (pool.status === "pending") poolStatus.textContent = `今日 AI 句子池正在后台生成：${pool.generatedCount}/${pool.targetCount}，已生成的会立即保存`;
-      else if (pool.status === "failed") poolStatus.textContent = `今日 AI 句子池暂时失败（${pool.generatedCount}/${pool.targetCount}），稍后会自动重试`;
-      else if (pool.status === "needs-attention") poolStatus.textContent = `今日 AI 句子池需要重试（${pool.generatedCount}/${pool.targetCount}）`;
-      else poolStatus.textContent = `今日 AI 句子池：${pool.generatedCount || 0}/${pool.targetCount}`;
-    }
     const due = taskCandidates(reviewMode, new Set()).length;
     const done = session.doneTaskIds.length;
     $("#todayLabel").textContent = displayDate();
@@ -4389,6 +4517,7 @@
     renderStudyTimer();
     $("#queueNote").textContent = due ? "先复习错题，再练新词和句子。" : "今天的到期题已完成，可以回到词句库自由练习。";
     const baseTask = currentBaseTask();
+    renderReviewVariantPoolStatus(session, baseTask);
     const task = currentTask();
     const panel = $("#reviewPanel"); const complete = $("#reviewComplete");
     if (!task) {
@@ -4426,7 +4555,7 @@
           ? "这道句子变式暂时待生成，AI 恢复后会自动重试。"
           : "AI 正在根据你已经学过的单词和句型准备新句子…";
       $("#promptSpeech").innerHTML = "";
-      $("#phoneticLine").textContent = "不会加入未学单词；单次生成最多等待 10 分钟，AI 暂不可用时每 5 分钟自动重试，不使用本地备用句。";
+      $("#phoneticLine").textContent = "优先从当天已保存的 AI 句子池抽取；只有句子池为空时才等待生成，不会加入未学单词，也不使用本地备用句。";
       $("#exampleLine").textContent = "";
       if (answerInput) {
         answerInput.dataset.reviewTaskKey = pendingTaskKey;
@@ -5233,7 +5362,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=44", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=45", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
