@@ -3,7 +3,7 @@
 const crypto = require("node:crypto");
 const { eligibleSentenceVariants, normalizeEnglish, sentenceFamily } = require("../review-variants");
 
-const REVIEW_VARIANT_POOL_SCHEMA = 1;
+const REVIEW_VARIANT_POOL_SCHEMA = 2;
 const REVIEW_VARIANT_POOL_TARGET = 50;
 const REVIEW_VARIANT_POOL_BATCH = 20;
 const REVIEW_VARIANT_POOL_STATUSES = new Set(["idle", "pending", "ready", "failed", "needs-attention"]);
@@ -53,10 +53,19 @@ function reviewVariantContentSignature(content) {
   })).digest("base64url").slice(0, 24);
 }
 
-function createReviewVariantPool({ date, contentSignature, targetCount = REVIEW_VARIANT_POOL_TARGET, now = new Date().toISOString() } = {}) {
+function reviewVariantSyncKey(content) {
+  const source = content && typeof content === "object" ? content : {};
+  return crypto.createHash("sha256").update(JSON.stringify({
+    updatedAt: cleanText(source.updatedAt, 80),
+    contentSignature: reviewVariantContentSignature(source)
+  })).digest("base64url").slice(0, 24);
+}
+
+function createReviewVariantPool({ date, syncKey, contentSignature, targetCount = REVIEW_VARIANT_POOL_TARGET, now = new Date().toISOString() } = {}) {
   return {
     schema: REVIEW_VARIANT_POOL_SCHEMA,
     date: cleanText(date, 10),
+    syncKey: cleanText(syncKey, 80),
     contentSignature: cleanText(contentSignature, 80),
     targetCount: Math.max(1, Math.min(REVIEW_VARIANT_POOL_TARGET, Number(targetCount) || REVIEW_VARIANT_POOL_TARGET)),
     variants: [],
@@ -99,6 +108,7 @@ function sanitizeReviewVariantPool(value) {
   return {
     schema: REVIEW_VARIANT_POOL_SCHEMA,
     date: cleanText(source.date, 10),
+    syncKey: cleanText(source.syncKey, 80),
     contentSignature: cleanText(source.contentSignature, 80),
     targetCount,
     variants,
@@ -115,13 +125,20 @@ function sanitizeReviewVariantPool(value) {
   };
 }
 
-function ensureReviewVariantPool(value, { date, contentSignature, targetCount = REVIEW_VARIANT_POOL_TARGET, now = new Date().toISOString() } = {}) {
+function ensureReviewVariantPool(value, { date, syncKey, contentSignature, targetCount = REVIEW_VARIANT_POOL_TARGET, now = new Date().toISOString() } = {}) {
   const expectedDate = cleanText(date, 10);
+  const expectedSyncKey = cleanText(syncKey, 80);
   const expectedSignature = cleanText(contentSignature, 80);
   const normalized = sanitizeReviewVariantPool(value);
-  if (!expectedDate || normalized.date !== expectedDate || normalized.contentSignature !== expectedSignature) {
-    return { pool: createReviewVariantPool({ date: expectedDate, contentSignature: expectedSignature, targetCount, now }), changed: true, replaced: true };
+  const syncCycleChanged = Boolean(expectedSyncKey && normalized.syncKey && normalized.syncKey !== expectedSyncKey);
+  if (!expectedDate || normalized.contentSignature !== expectedSignature || syncCycleChanged) {
+    return { pool: createReviewVariantPool({ date: expectedDate, syncKey: expectedSyncKey, contentSignature: expectedSignature, targetCount, now }), changed: true, replaced: true };
   }
+  // Pools created before schema 2 have no syncKey. Attach the current course
+  // sync cycle without deleting already generated sentences or assignments.
+  // Once migrated, a later learning sync changes syncKey and replaces the pool.
+  if (!normalized.syncKey && expectedSyncKey) normalized.syncKey = expectedSyncKey;
+  if (!normalized.date) normalized.date = expectedDate;
   normalized.targetCount = Math.max(1, Math.min(REVIEW_VARIANT_POOL_TARGET, Number(targetCount) || REVIEW_VARIANT_POOL_TARGET));
   if (normalized.variants.length >= normalized.targetCount) normalized.status = "ready";
   const changed = JSON.stringify(normalized) !== JSON.stringify(value && typeof value === "object" ? value : {});
@@ -135,6 +152,7 @@ function reviewVariantPoolSummary(value) {
   return {
     schema: pool.schema,
     date: pool.date,
+    syncKey: pool.syncKey,
     targetCount: pool.targetCount,
     generatedCount,
     remainingCount,
@@ -188,7 +206,7 @@ function buildReviewVariantPoolTasks(content, value, requestedCount = REVIEW_VAR
     existingByFamily[group.family] += 1;
     const baseItem = group.items[Math.floor(slot / families.length) % group.items.length];
     return {
-      taskId: `pool:${pool.date}:${slot}:${group.family}`,
+      taskId: `pool:${pool.syncKey || pool.date}:${slot}:${group.family}`,
       poolSlot: slot,
       family: group.family,
       baseItem
@@ -261,7 +279,7 @@ function assignReviewVariantPoolTasks(value, tasks) {
       const compatible = pool.variants.filter(item => family && item.family === family);
       const candidates = compatible.length ? compatible : pool.variants;
       if (!candidates.length) return;
-      const start = stableIndex(`${pool.date}|${taskId}`, candidates.length);
+      const start = stableIndex(`${pool.syncKey || pool.date}|${taskId}`, candidates.length);
       for (let offset = 0; offset < candidates.length; offset += 1) {
         const candidate = candidates[(start + offset) % candidates.length];
         if (!used.has(candidate.id)) { variant = candidate; break; }
@@ -286,6 +304,7 @@ module.exports = {
   ensureReviewVariantPool,
   reviewVariantContentSignature,
   reviewVariantPoolSummary,
+  reviewVariantSyncKey,
   sanitizeReviewVariantPool,
   storeReviewVariantPoolResults
 };

@@ -67,7 +67,7 @@ function variantCandidates(family) {
   return Array.from(new Set(values));
 }
 
-function createProvider() {
+function createProvider({ delayMs = 0 } = {}) {
   const calls = [];
   const provider = http.createServer(async (req, res) => {
     if (req.url === "/v1/models" && req.method === "GET") {
@@ -80,6 +80,7 @@ function createProvider() {
     const body = await readBody(req);
     calls.push(body);
     const input = JSON.parse(body.messages[1].content);
+    if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
     const excluded = new Set((Array.isArray(input.excludedEnglish) ? input.excludedEnglish : []).map(normalizeEnglish));
     const variants = input.targets.map((target, index) => {
       const family = target.grammarFamily;
@@ -91,6 +92,17 @@ function createProvider() {
     res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ variants }) } }] }));
   });
   return { provider, calls };
+}
+
+async function waitForReadyPool(baseUrl, cookie) {
+  let poolState;
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    poolState = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
+    if (poolState.reviewVariantPool.status === "ready") return poolState.reviewVariantPool;
+    if (poolState.reviewVariantPool.status === "needs-attention") throw new Error(poolState.reviewVariantPool.error);
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error(`sentence pool did not become ready: ${JSON.stringify(poolState && poolState.reviewVariantPool)}`);
 }
 
 async function startApp(dataDir, port, autofill = true) {
@@ -187,6 +199,72 @@ test("daily sentence pool survives refresh, stale state PUT, and server restart"
     for (const child of [app, restarted]) {
       if (child && child.exitCode === null) child.kill();
     }
+    await new Promise(resolve => providerInfo.provider.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("course sync automatically replaces and fills the 50-sentence pool exactly once per sync cycle", async () => {
+  const dataDir = temporaryDataDir();
+  const providerInfo = createProvider({ delayMs: 40 });
+  let app;
+  try {
+    const users = loadUsers(dataDir);
+    createUser(users, { username: "pool-owner", password: "pool-test-password" });
+    saveUsers(dataDir, users);
+    await new Promise((resolve, reject) => providerInfo.provider.listen(0, "127.0.0.1", error => error ? reject(error) : resolve()));
+    const providerPort = providerInfo.provider.address().port;
+    const appPort = await freePort();
+    const baseUrl = `http://127.0.0.1:${appPort}`;
+    app = await startApp(dataDir, appPort);
+    const cookie = await login(baseUrl);
+
+    const configured = await fetch(`${baseUrl}/api/admin/ai-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "pool-test-key", models: ["test-model"], defaultModel: "test-model", timeoutMs: 10000, rateLimitPerMinute: 60 })
+    });
+    assert.equal(configured.status, 200);
+
+    const syncCourse = async updatedAt => {
+      const response = await fetch(`${baseUrl}/api/content/batch`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "Cookie": cookie },
+        body: JSON.stringify({
+          updatedAt,
+          notes: [{ day: 4, date: updatedAt, score: "已完成", summary: "同步后准备下一轮复习句子。", goals: [], pronunciation: [], patterns: [], mistakes: [], review: "复习已学内容。" }]
+        })
+      });
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+
+    const firstSync = await syncCourse("2026-08-05");
+    assert.deepEqual({ cycleChanged: firstSync.reviewSentencePool.cycleChanged, accounts: firstSync.reviewSentencePool.accounts, started: firstSync.reviewSentencePool.started }, { cycleChanged: true, accounts: 1, started: 1 });
+    const firstPool = await waitForReadyPool(baseUrl, cookie);
+    assert.equal(firstPool.generatedCount, 50);
+    const firstSyncKey = firstPool.syncKey;
+    const callsAfterFirstFill = providerInfo.calls.length;
+
+    const repeatedSync = await syncCourse("2026-08-05");
+    assert.deepEqual({ cycleChanged: repeatedSync.reviewSentencePool.cycleChanged, started: repeatedSync.reviewSentencePool.started, ready: repeatedSync.reviewSentencePool.ready }, { cycleChanged: false, started: 0, ready: 1 });
+    await new Promise(resolve => setTimeout(resolve, 120));
+    assert.equal(providerInfo.calls.length, callsAfterFirstFill, "repeating the same learning sync must not regenerate the pool");
+    const repeatedPool = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
+    assert.equal(repeatedPool.reviewVariantPool.syncKey, firstSyncKey);
+    assert.equal(repeatedPool.reviewVariantPool.generatedCount, 50);
+
+    const nextSync = await syncCourse("2026-08-06");
+    assert.deepEqual({ cycleChanged: nextSync.reviewSentencePool.cycleChanged, started: nextSync.reviewSentencePool.started }, { cycleChanged: true, started: 1 });
+    const clearedPool = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
+    assert.notEqual(clearedPool.reviewVariantPool.syncKey, firstSyncKey);
+    assert.equal(clearedPool.reviewVariantPool.generatedCount, 0, "the previous 50 sentences are removed before the new background request completes");
+    const nextPool = await waitForReadyPool(baseUrl, cookie);
+    assert.equal(nextPool.generatedCount, 50);
+    assert.notEqual(nextPool.syncKey, firstSyncKey);
+    assert.ok(providerInfo.calls.length > callsAfterFirstFill);
+  } finally {
+    if (app && app.exitCode === null) app.kill();
     await new Promise(resolve => providerInfo.provider.close(resolve));
     fs.rmSync(dataDir, { recursive: true, force: true });
   }

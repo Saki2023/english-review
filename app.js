@@ -1189,6 +1189,7 @@
     if (!pool) return "";
     return [
       pool.date,
+      pool.syncKey,
       pool.targetCount,
       pool.generatedCount,
       pool.remainingCount,
@@ -4194,10 +4195,10 @@
     label.textContent = busy ? "正在请求…" : "立即重试";
     const validationStopped = reviewVariantStatusMessage.includes("停止自动重试");
     note.textContent = busy
-      ? "正在从当天句子池取题；池为空时才请求 AI，网络或上游失败后会每 5 分钟自动重试。"
+      ? "正在从本轮学习同步后保存的句子池取题；池为空时才请求 AI，网络或上游失败后会每 5 分钟自动重试。"
       : validationStopped
         ? "本轮内容校验已经停止；可立即重试或先更换模型。"
-      : "今日复习优先抽取已保存句子；池为空或暂时不可用时可立即再试，网络失败每 5 分钟自动重试。";
+      : "今日复习优先抽取本轮已保存句子；池为空或暂时不可用时可立即再试，网络失败每 5 分钟自动重试。";
   }
 
   function sentenceTasksMissingVariants(session) {
@@ -4472,17 +4473,17 @@
     card.dataset.status = String(pool.status || "idle");
     let message = "";
     if (pool.status === "ready" || generated >= target) {
-      message = `今日句子池已生成完成；刷新页面后仍会保留这 ${target} 条。`;
+      message = `本轮句子池已生成完成；会一直保留到下一次学习同步。`;
     } else if (pool.status === "pending") {
       message = waitingForCurrent
         ? `已保存 ${generated} 条；当前题暂时没有可抽取的已保存句子，剩余 ${remaining} 条正在后台生成。`
-        : `正在后台生成剩余 ${remaining} 条；已保存的句子不会丢失。`;
+        : `学习同步后已自动开始生成，剩余 ${remaining} 条正在后台准备；已保存的句子不会丢失。`;
     } else if (pool.status === "failed") {
-      message = `已保存 ${generated} 条；本轮生成暂时失败，${remaining} 条将在 5 分钟后自动重试。`;
+      message = `已保存 ${generated} 条；本轮生成暂时失败，${remaining} 条将在 5 分钟后自动重试，下一次学习同步前不会清空。`;
     } else if (pool.status === "needs-attention") {
       message = `已保存 ${generated} 条；有 ${remaining} 条暂未通过校验，请点击当前题下方“立即重试”或更换模型。`;
     } else {
-      message = `已保存 ${generated} 条，目标 ${target} 条。`;
+      message = `已保存 ${generated} 条，目标 ${target} 条；下一次学习同步成功后才会更换。`;
     }
     if (waitingForCurrent && reviewVariantStatusMessage) {
       const detail = reviewVariantStatusMessage.trim().slice(0, 180);
@@ -4555,7 +4556,7 @@
           ? "这道句子变式暂时待生成，AI 恢复后会自动重试。"
           : "AI 正在根据你已经学过的单词和句型准备新句子…";
       $("#promptSpeech").innerHTML = "";
-      $("#phoneticLine").textContent = "优先从当天已保存的 AI 句子池抽取；只有句子池为空时才等待生成，不会加入未学单词，也不使用本地备用句。";
+      $("#phoneticLine").textContent = "优先从本轮学习同步后已保存的 AI 句子池抽取；只有句子池为空时才等待生成，不会加入未学单词，也不使用本地备用句。";
       $("#exampleLine").textContent = "";
       if (answerInput) {
         answerInput.dataset.reviewTaskKey = pendingTaskKey;
@@ -5362,7 +5363,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=46", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=47", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

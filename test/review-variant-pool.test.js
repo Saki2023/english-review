@@ -10,11 +10,13 @@ const {
   ensureReviewVariantPool,
   reviewVariantContentSignature,
   reviewVariantPoolSummary,
+  reviewVariantSyncKey,
   sanitizeReviewVariantPool,
   storeReviewVariantPoolResults
 } = require("../server/review-variant-pool");
 
 const content = {
+  updatedAt: "2026-08-05",
   currentDay: 2,
   words: [
     { id: "word-it", english: "it", day: 1 },
@@ -81,18 +83,41 @@ test("legacy 100-sentence pools are capped at the new 50-sentence target", () =>
   assert.equal(reviewVariantPoolSummary(normalized.pool).remainingCount, 0);
 });
 
-test("a new date or changed learned content discards the previous daily pool", () => {
+test("natural date changes keep the pool until a new learning sync cycle arrives", () => {
   const signature = reviewVariantContentSignature(content);
-  const initial = storeReviewVariantPoolResults(createReviewVariantPool({ date: "2026-08-05", contentSignature: signature }), [poolVariant(1)], { requestedCount: 1 }).pool;
-  const nextDay = ensureReviewVariantPool(initial, { date: "2026-08-06", contentSignature: signature });
-  assert.equal(nextDay.replaced, true);
-  assert.equal(nextDay.pool.variants.length, 0);
-  assert.deepEqual(nextDay.pool.assignments, {});
+  const syncKey = reviewVariantSyncKey(content);
+  const initial = storeReviewVariantPoolResults(createReviewVariantPool({ date: "2026-08-05", syncKey, contentSignature: signature }), [poolVariant(1)], { requestedCount: 1 }).pool;
+  const nextDay = ensureReviewVariantPool(initial, { date: "2026-08-06", syncKey, contentSignature: signature });
+  assert.equal(nextDay.replaced, false);
+  assert.equal(nextDay.pool.date, "2026-08-05");
+  assert.equal(nextDay.pool.variants.length, 1);
+
+  const nextSyncContent = { ...content, updatedAt: "2026-08-06" };
+  assert.equal(reviewVariantContentSignature(nextSyncContent), signature, "a review-only learning day can keep the same learned content signature");
+  const nextSync = ensureReviewVariantPool(initial, { date: "2026-08-06", syncKey: reviewVariantSyncKey(nextSyncContent), contentSignature: signature });
+  assert.equal(nextSync.replaced, true);
+  assert.equal(nextSync.pool.variants.length, 0);
+  assert.deepEqual(nextSync.pool.assignments, {});
 
   const changedContent = { ...content, words: [...content.words, { id: "word-cat", english: "cat", day: 2 }] };
-  const changed = ensureReviewVariantPool(initial, { date: "2026-08-05", contentSignature: reviewVariantContentSignature(changedContent) });
+  const changed = ensureReviewVariantPool(initial, { date: "2026-08-05", syncKey, contentSignature: reviewVariantContentSignature(changedContent) });
   assert.equal(changed.replaced, true);
   assert.equal(changed.pool.variants.length, 0);
+});
+
+test("legacy pools gain the current sync key without losing saved sentences", () => {
+  const signature = reviewVariantContentSignature(content);
+  const legacy = storeReviewVariantPoolResults(createReviewVariantPool({ date: "2026-08-05", contentSignature: signature }), [poolVariant(1)], { requestedCount: 1 }).pool;
+  legacy.assignments["sentence-description:en-zh"] = legacy.variants[0].id;
+  const migrated = ensureReviewVariantPool(legacy, {
+    date: "2026-08-06",
+    syncKey: reviewVariantSyncKey(content),
+    contentSignature: signature
+  });
+  assert.equal(migrated.replaced, false);
+  assert.equal(migrated.pool.syncKey, reviewVariantSyncKey(content));
+  assert.equal(migrated.pool.variants.length, 1);
+  assert.equal(migrated.pool.assignments["sentence-description:en-zh"], legacy.variants[0].id);
 });
 
 test("pool generation saves batches and resumes with the next slot after reload", () => {
