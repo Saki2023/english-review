@@ -42,3 +42,18 @@ test("AI variant validation rejects an unlearned word or a changed sentence fami
   assert.equal(accepted.acceptedEnglish[0], "a pig sat on a box");
   assert.equal(accepted.acceptedChinese[1], "一只猪坐在箱子上");
 });
+
+test("AI variant validation rejects a learned word used with an unlearned sense", () => {
+  const scopedContent = { currentDay: 5, words: [
+    { english: "it", chinese: "它", day: 2 },
+    { english: "is", chinese: "是", day: 2 },
+    { english: "a", chinese: "一个", day: 1 },
+    { english: "fun", chinese: "有趣的", day: 5 },
+    { english: "top", chinese: "顶部；最上面的部分", acceptedChinese: ["顶部", "顶端", "最上面", "最上面的部分"], day: 4 }
+  ], sentences: [] };
+  const base = { id: "top-base", english: "It is fun.", chinese: "它很有趣。" };
+  const result = variants.validateGeneratedSentenceVariant(scopedContent, base, { english: "It is a fun top.", chinese: "它是一个有趣的陀螺。" });
+  assert.equal(result.valid, false);
+  assert.equal(result.reasonCode, "unlearned-word-sense");
+  assert.deepEqual(result.unlearnedWords, ["top"]);
+});

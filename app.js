@@ -180,7 +180,10 @@
       setId,
       questionId,
       historyId: String(value.historyId || "").slice(0, 180),
-      source: ["current", "history"].includes(value.source) ? value.source : "",
+      source: ["current", "history", "review"].includes(value.source) ? value.source : "",
+      taskId: String(value.taskId || "").slice(0, 180),
+      variantId: String(value.variantId || "").slice(0, 120),
+      direction: ["en-zh", "zh-en"].includes(value.direction) ? value.direction : "",
       prompt: String(value.prompt || "").trim().slice(0, 300),
       updatedAt: String(value.updatedAt || "").slice(0, 40),
       messages
@@ -197,7 +200,10 @@
       setId,
       questionId,
       historyId: String(value.historyId || "").slice(0, 180),
-      source: ["current", "history"].includes(value.source) ? value.source : "",
+      source: ["current", "history", "review"].includes(value.source) ? value.source : "",
+      taskId: String(value.taskId || "").slice(0, 180),
+      variantId: String(value.variantId || "").slice(0, 120),
+      direction: ["en-zh", "zh-en"].includes(value.direction) ? value.direction : "",
       prompt: String(value.prompt || "").trim().slice(0, 300),
       resetAt
     };
@@ -215,7 +221,9 @@
       setId,
       questionId,
       historyId: String(value.historyId || "").slice(0, 180),
-      source: value.source === "history" ? "history" : "current",
+      source: ["current", "history", "review"].includes(value.source) ? value.source : "current",
+      taskId: String(value.taskId || "").slice(0, 180),
+      variantId: String(value.variantId || "").slice(0, 120),
       direction: ["en-zh", "zh-en"].includes(value.direction) ? value.direction : "",
       prompt: String(value.prompt || "").slice(0, 300),
       learnerAnswer: String(value.learnerAnswer || "").slice(0, 500),
@@ -295,6 +303,7 @@
       doneTaskIds: Array.isArray(source.doneTaskIds) ? source.doneTaskIds.map(item => String(item || "").slice(0, 180)).filter(Boolean).slice(0, 100) : [],
       currentTaskId: String(source.currentTaskId || "").slice(0, 180),
       batchComplete: Boolean(source.batchComplete),
+      updatedAt: String(source.updatedAt || "").slice(0, 40),
       variants
     };
   }
@@ -1198,7 +1207,12 @@
   function mergeReviewSessions(localSession, remoteSession) {
     const local = normalizeClientReviewSession(localSession);
     const remote = normalizeClientReviewSession(remoteSession);
-    const preferred = (remote.doneTaskIds || []).length >= (local.doneTaskIds || []).length ? remote : local;
+    const localUpdated = String(local.updatedAt || "");
+    const remoteUpdated = String(remote.updatedAt || "");
+    const preferred = localUpdated || remoteUpdated
+      ? (remoteUpdated > localUpdated ? remote : local)
+      : (remote.doneTaskIds || []).length > (local.doneTaskIds || []).length
+        || ((remote.doneTaskIds || []).length === (local.doneTaskIds || []).length && Number(remote.index || 0) >= Number(local.index || 0)) ? remote : local;
     return normalizeClientReviewSession({
       ...preferred,
       variants: {
@@ -1233,8 +1247,9 @@
       if (!localHistory) merged.history[date] = remoteHistory;
       else merged.history[date] = { reviewed: Math.max(localHistory.reviewed || 0, remoteHistory.reviewed || 0), correct: Math.max(localHistory.correct || 0, remoteHistory.correct || 0) };
     });
-    const attemptKeys = new Set(merged.attempts.map(item => `${item.date}|${item.taskId}|${item.answer}`));
-    (remote && remote.attempts ? remote.attempts : []).forEach(item => { const key = `${item.date}|${item.taskId}|${item.answer}`; if (!attemptKeys.has(key)) { merged.attempts.push(item); attemptKeys.add(key); } });
+    const attemptIdentity = item => String(item && item.id || "") || `${item && item.date || ""}|${item && item.taskId || ""}|${item && item.variantId || ""}|${item && item.answer || ""}|${item && item.expected || ""}`;
+    const attemptKeys = new Set(merged.attempts.map(attemptIdentity));
+    (remote && remote.attempts ? remote.attempts : []).forEach(item => { const key = attemptIdentity(item); if (!attemptKeys.has(key)) { merged.attempts.push(item); attemptKeys.add(key); } });
     merged.attempts = merged.attempts.slice(-120);
     const mistakeKeys = new Set(merged.mistakes.map(item => item.id));
     (remote && remote.mistakes ? remote.mistakes : []).forEach(item => { if (!mistakeKeys.has(item.id)) { merged.mistakes.push(item); mistakeKeys.add(item.id); } });
@@ -1618,6 +1633,41 @@
     return set && Array.isArray(set.questions) ? set.questions[Number(set.index) || 0] : null;
   }
 
+  function reviewTutorQuestionId(taskId, variantId = "") {
+    const value = `${String(taskId || "")}\u0000${String(variantId || "base")}`;
+    let first = 2166136261;
+    let second = 2246822519;
+    for (const character of value) {
+      const code = character.codePointAt(0);
+      first = Math.imul(first ^ code, 16777619);
+      second = Math.imul(second ^ (code + 374761393), 3266489917);
+    }
+    return `review-${(first >>> 0).toString(36)}-${(second >>> 0).toString(36)}`;
+  }
+
+  function aiTutorTargetForReviewTask(task) {
+    if (!task || !task.taskId) return null;
+    const variantId = String(task.reviewVariant && task.reviewVariant.id || "");
+    return {
+      kind: "review",
+      historyId: "",
+      setId: "review",
+      questionId: reviewTutorQuestionId(task.taskId, variantId),
+      taskId: task.taskId,
+      variantId,
+      direction: task.direction,
+      prompt: task.direction === "en-zh" ? task.item.english : task.item.chinese
+    };
+  }
+
+  function currentReviewTutorTarget() {
+    if (activeView !== "home") return undefined;
+    const session = getSession();
+    const baseTask = currentBaseTask();
+    if (!baseTask || (baseTask.item.type === "sentence" && !session.variants[baseTask.taskId])) return null;
+    return aiTutorTargetForReviewTask(reviewVariantForTask(baseTask, session));
+  }
+
   function aiHistoryQuestionId(item) {
     const id = String(item && item.id || "");
     const setId = String(item && item.setId || "");
@@ -1639,6 +1689,18 @@
   function aiTutorTargetForSavedThread(practice) {
     const tutor = normalizeClientTutor(practice.tutor);
     if (!tutor) return null;
+    if (tutor.source === "review" && tutor.taskId) {
+      return {
+        kind: "review",
+        historyId: "",
+        setId: tutor.setId,
+        questionId: tutor.questionId,
+        taskId: tutor.taskId,
+        variantId: tutor.variantId,
+        direction: tutor.direction,
+        prompt: tutor.prompt
+      };
+    }
     if (tutor.historyId) {
       const exactHistory = practice.history.find(item => item.id === tutor.historyId);
       if (exactHistory) return aiTutorTargetForHistory(exactHistory);
@@ -1661,6 +1723,8 @@
   }
 
   function resolveAiTutorTarget(practice) {
+    const reviewTarget = currentReviewTutorTarget();
+    if (reviewTarget !== undefined) return reviewTarget;
     if (aiTutorTarget && aiTutorTarget.kind === "history") {
       const historyItem = practice.history.find(item => item.id === aiTutorTarget.historyId);
       if (historyItem) return aiTutorTargetForHistory(historyItem);
@@ -1670,6 +1734,7 @@
       const question = set && set.id === aiTutorTarget.setId ? set.questions.find(item => item.id === aiTutorTarget.questionId) : null;
       if (question) return { ...aiTutorTarget, prompt: question.direction === "en-zh" ? question.english : question.chinese };
     }
+    if (aiTutorTarget && aiTutorTarget.kind === "review" && aiTutorTarget.taskId) return { ...aiTutorTarget };
     const savedTarget = aiTutorTargetForSavedThread(practice);
     if (savedTarget) return savedTarget;
     const set = practice.currentSet;
@@ -1806,16 +1871,16 @@
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ setId: target.setId, questionId: target.questionId, historyId: target.historyId })
+          body: JSON.stringify({ setId: target.setId, questionId: target.questionId, historyId: target.historyId, taskId: target.taskId || "", variantId: target.variantId || "" })
         }));
         model.aiPractice = normalizeClientAiPractice(data.practice);
       } else {
         const resetAt = new Date().toISOString();
         practice.tutorResets = [
           ...practice.tutorResets.filter(item => item.setId !== target.setId || item.questionId !== target.questionId),
-          { setId: target.setId, questionId: target.questionId, historyId: target.historyId, source: target.kind, prompt: target.prompt, resetAt }
+          { setId: target.setId, questionId: target.questionId, historyId: target.historyId, source: target.kind, taskId: target.taskId || "", variantId: target.variantId || "", direction: target.direction || "", prompt: target.prompt, resetAt }
         ].slice(-MAX_CLIENT_TUTOR_RESETS);
-        practice.tutor = { setId: target.setId, questionId: target.questionId, historyId: target.historyId, source: target.kind, prompt: target.prompt, updatedAt: resetAt, messages: [] };
+        practice.tutor = { setId: target.setId, questionId: target.questionId, historyId: target.historyId, source: target.kind, taskId: target.taskId || "", variantId: target.variantId || "", direction: target.direction || "", prompt: target.prompt, updatedAt: resetAt, messages: [] };
         practice.updatedAt = resetAt;
         model.aiPractice = practice;
       }
@@ -1846,6 +1911,12 @@
     practice.tutor = {
       setId: target.setId,
       questionId: target.questionId,
+      historyId: target.historyId,
+      source: target.kind,
+      taskId: target.taskId || "",
+      variantId: target.variantId || "",
+      direction: target.direction || "",
+      prompt: target.prompt,
       messages: [
         ...thread.messages,
         { role: "user", content: message, createdAt },
@@ -1864,6 +1935,8 @@
           setId: target.setId,
           questionId: target.questionId,
           historyId: target.historyId,
+          taskId: target.taskId || "",
+          variantId: target.variantId || "",
           message,
           providerId: practice.tutorSettings.providerId,
           model: practice.tutorSettings.model,
@@ -4089,7 +4162,7 @@
     const today = localDate();
     const existing = model.sessions[today];
     if (!existing || existing.mode !== reviewMode) {
-      const next = { date: today, mode: reviewMode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false, variants: {} };
+      const next = { date: today, mode: reviewMode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
       model.sessions[today] = next;
       saveModel();
       return next;
@@ -4135,6 +4208,7 @@
     session.currentTaskId = taskIds[index] || null;
     session.batchComplete = taskIds.length ? index >= taskIds.length : (removedTasks ? false : Boolean(session.batchComplete));
     session.variants = variants;
+    if (before !== JSON.stringify({ taskIds: session.taskIds, index: session.index, doneTaskIds: session.doneTaskIds, currentTaskId: session.currentTaskId, batchComplete: session.batchComplete, variants: session.variants })) touchReviewSession(session);
     return before !== JSON.stringify({ taskIds: session.taskIds, index: session.index, doneTaskIds: session.doneTaskIds, currentTaskId: session.currentTaskId, batchComplete: session.batchComplete, variants: session.variants });
   }
 
@@ -4236,6 +4310,7 @@
       doneTaskIds: [],
       currentTaskId: normalizedTaskIds[0] || null,
       batchComplete: normalizedTaskIds.length === 0,
+      updatedAt: new Date().toISOString(),
       variants: {}
     };
     $$('[data-mode]').forEach(button => {
@@ -4263,6 +4338,11 @@
     return taskId ? taskById.get(taskId) : null;
   }
 
+  function touchReviewSession(session) {
+    if (session && typeof session === "object") session.updatedAt = new Date().toISOString();
+    return session;
+  }
+
   function reviewVariantForTask(task, session = getSession()) {
     if (!task || task.item.type !== "sentence") return task;
     const variant = normalizeClientReviewVariant(session.variants && session.variants[task.taskId]);
@@ -4272,6 +4352,26 @@
 
   function currentTask() {
     return reviewVariantForTask(currentBaseTask());
+  }
+
+  function immutableReviewTask(task) {
+    if (!task) return null;
+    const item = {
+      ...task.item,
+      acceptedEnglish: Array.isArray(task.item.acceptedEnglish) ? [...task.item.acceptedEnglish] : [task.item.english],
+      acceptedChinese: Array.isArray(task.item.acceptedChinese) ? [...task.item.acceptedChinese] : [task.item.chinese]
+    };
+    const reviewVariant = task.reviewVariant ? {
+      ...task.reviewVariant,
+      acceptedEnglish: [...item.acceptedEnglish],
+      acceptedChinese: [...item.acceptedChinese]
+    } : null;
+    return { ...task, item, reviewVariant, baseItem: task.baseItem ? { ...task.baseItem } : task.baseItem };
+  }
+
+  function newReviewAttemptId() {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") return `review-${globalThis.crypto.randomUUID()}`;
+    return `review-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   }
 
   function reviewVariantRetryUi(session, visible) {
@@ -4392,6 +4492,7 @@
       if (!missingIds.has(taskId) || !variant || variant.source !== "ai") return;
       if (session.variants[taskId] && session.variants[taskId].id === variant.id) return;
       session.variants[taskId] = variant;
+      touchReviewSession(session);
       added += 1;
     });
     return added;
@@ -4485,6 +4586,7 @@
       session.taskIds = buildBatch();
       session.index = 0;
       session.currentTaskId = session.taskIds[0] || null;
+      touchReviewSession(session);
       if (!session.taskIds.length) session.batchComplete = true;
       changed = true;
     }
@@ -4531,7 +4633,7 @@
     reviewAnswerResetRequested = true;
     reviewMode = mode;
     const today = localDate();
-    model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false, variants: {} };
+    model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
     saveModel();
     $$("[data-mode]").forEach(button => {
       const active = button.dataset.mode === mode;
@@ -4614,6 +4716,7 @@
     const baseTask = currentBaseTask();
     renderReviewVariantPoolStatus(session, baseTask);
     const task = currentTask();
+    renderAiTutorWindow();
     const panel = $("#reviewPanel"); const complete = $("#reviewComplete");
     if (!task) {
       reviewAnswerResetRequested = true;
@@ -4779,7 +4882,7 @@
   async function submitAnswer(event) {
     event.preventDefault();
     if (gradingInProgress) return;
-    const task = currentTask();
+    const task = immutableReviewTask(currentTask());
     if (!task) return;
     const answer = $("#answerInput").value.trim();
     let correct = answerMatches(task, answer);
@@ -4815,12 +4918,16 @@
     model.history[today].reviewed += 1;
     model.history[today].correct = Math.round((model.history[today].correct + grading.score) * 100) / 100;
     const reviewVariant = task.reviewVariant ? { ...task.reviewVariant } : null;
-    model.attempts.push({ taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, answer, correct, score: grading.score, gradingStatus: grading.gradingStatus, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation, problemWords: grading.problemWords, wordResults: grading.wordResults });
-    if (!correct) model.mistakes = [...(model.mistakes || []), { id: `attempt-${Date.now()}`, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, day: task.item.day, prompt: task.direction === "en-zh" ? task.item.english : task.item.chinese, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: grading.explanation || "本次复习未答对。" }].slice(-80);
+    const attemptId = newReviewAttemptId();
+    const submittedAt = new Date().toISOString();
+    const prompt = task.direction === "en-zh" ? task.item.english : task.item.chinese;
+    model.attempts.push({ id: attemptId, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, submittedAt, direction: task.direction, prompt, english: task.item.english, chinese: task.item.chinese, answer, correct, score: grading.score, gradingStatus: grading.gradingStatus, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation, problemWords: grading.problemWords, wordResults: grading.wordResults });
+    if (!correct) model.mistakes = [...(model.mistakes || []), { id: `mistake-${attemptId}`, attemptId, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, direction: task.direction, day: task.item.day, prompt, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: grading.explanation || "本次复习未答对。" }].slice(-80);
     else model.mistakes = (model.mistakes || []).filter(mistake => !mistakeIsResolved(model.attempts, mistake && mistake.taskId));
     const session = getSession();
     session.currentTaskId = task.taskId;
     session.doneTaskIds = Array.from(new Set([...(session.doneTaskIds || []), task.taskId]));
+    touchReviewSession(session);
     saveModel();
     abilityReport = null;
     showFeedback(task, correct, answer, grading);
@@ -4851,6 +4958,7 @@
     session.index += 1;
     session.currentTaskId = session.taskIds[session.index] || null;
     if (session.index >= session.taskIds.length) session.batchComplete = true;
+    touchReviewSession(session);
     saveModel();
     renderHome();
   }
@@ -4865,7 +4973,7 @@
     const today = localDate();
     reviewAnswerResetRequested = true;
     reviewMode = task.item.type;
-    model.sessions[today] = { date: today, mode: reviewMode, taskIds: [taskId], index: 0, doneTaskIds: [], currentTaskId: taskId, batchComplete: false };
+    model.sessions[today] = { date: today, mode: reviewMode, taskIds: [taskId], index: 0, doneTaskIds: [], currentTaskId: taskId, batchComplete: false, updatedAt: new Date().toISOString() };
     saveModel();
     $$("[data-mode]").forEach(button => { const active = button.dataset.mode === reviewMode; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
     setView("home");
@@ -4880,7 +4988,7 @@
     const today = localDate();
     reviewAnswerResetRequested = true;
     reviewMode = "all";
-    model.sessions[today] = { date: today, mode: reviewMode, taskIds, index: 0, doneTaskIds: [], currentTaskId: taskIds[0], batchComplete: false };
+    model.sessions[today] = { date: today, mode: reviewMode, taskIds, index: 0, doneTaskIds: [], currentTaskId: taskIds[0], batchComplete: false, updatedAt: new Date().toISOString() };
     saveModel();
     $$("[data-mode]").forEach(button => { const active = button.dataset.mode === reviewMode; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
     setView("home");
@@ -5464,7 +5572,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=48", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=49", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

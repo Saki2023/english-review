@@ -111,6 +111,26 @@
       .filter(Boolean));
   }
 
+  const OUT_OF_SCOPE_SENSE_HINTS = Object.freeze({
+    top: ["陀螺"],
+    run: ["经营", "运行"],
+    look: ["外观", "看起来"],
+    good: ["好处", "善良"]
+  });
+
+  function outOfScopeMeaning(content, english, chinese) {
+    const known = knownWordSet(content);
+    const tokens = englishTokens(english);
+    for (const token of tokens) {
+      if (!known.has(token)) continue;
+      const item = (Array.isArray(content && content.words) ? content.words : []).find(candidate => normalizeEnglish(candidate.english) === token);
+      const accepted = [item && item.chinese, ...(Array.isArray(item && item.acceptedChinese) ? item.acceptedChinese : [])].filter(Boolean).join("|");
+      const hint = (OUT_OF_SCOPE_SENSE_HINTS[token] || []).find(value => String(chinese || "").includes(value) && !accepted.includes(value));
+      if (hint) return { token, hint };
+    }
+    return null;
+  }
+
   function eligibleSentenceVariants(content, baseItem) {
     const family = sentenceFamily(baseItem);
     if (!family) return [];
@@ -163,6 +183,8 @@
     if (!tokens.length) return invalidGeneratedVariant("no-english-words", { english });
     const unlearnedWords = Array.from(new Set(tokens.filter(token => !known.has(token))));
     if (unlearnedWords.length) return invalidGeneratedVariant("unlearned-word", { english, unlearnedWords });
+    const outOfScope = outOfScopeMeaning(content, english, chinese);
+    if (outOfScope) return invalidGeneratedVariant("unlearned-word-sense", { english, unlearnedWords: [outOfScope.token], outOfScopeMeaning: outOfScope.hint });
     const normalized = normalizeEnglish(english);
     const acceptedChinese = [];
     [chinese, ...(Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [])].forEach(answer => {
@@ -212,6 +234,7 @@
     englishTokens,
     generatedVariantId,
     normalizeEnglish,
+    outOfScopeMeaning,
     sanitizeGeneratedSentenceVariant,
     sentenceFamily,
     sentenceVariantById,

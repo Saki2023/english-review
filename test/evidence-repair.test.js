@@ -76,3 +76,31 @@ test("measure-word repair records partial credit without clearing mastery and at
   assert.equal(articleResults.get("a"), false);
   ["big", "pig", "sat", "on", "mat"].forEach(word => assert.equal(articleResults.get(word), true));
 });
+
+test("evidence repair grades a saved AI review variant against its immutable snapshot", () => {
+  const content = {
+    words: [],
+    sentences: [{ id: "size", day: 2, learned: "2026-08-01", english: "It is big.", chinese: "它很大。", acceptedChinese: ["它很大"], acceptedEnglish: ["it is big"], directions: ["zh-en"] }]
+  };
+  const variant = {
+    id: "ai-be-variant",
+    source: "ai",
+    family: "be-adjective",
+    english: "It is a hot cup.",
+    chinese: "它是一个热杯子。",
+    acceptedEnglish: ["it is a hot cup"],
+    acceptedChinese: ["它是一个热杯子"]
+  };
+  const state = {
+    evidenceRepairVersion: 2,
+    taskStates: { "size:zh-en": { level: 0, lastResult: false, reviewCount: 1 } },
+    history: { "2026-08-06": { reviewed: 1, correct: 0 } },
+    attempts: [{ id: "attempt-variant", taskId: "size:zh-en", variantId: variant.id, reviewVariant: variant, date: "2026-08-06", answer: "It is a hot cup", correct: false, score: 0 }],
+    mistakes: [{ id: "generated-by-old-repair", taskId: "size:zh-en", date: "2026-08-06", userAnswer: "It is a hot cup", prompt: "它很大。", correctAnswer: "It is big." }]
+  };
+  const repaired = require("../answer-utils").repairReviewEvidence(content, state);
+  assert.equal(repaired.state.attempts[0].correct, true);
+  assert.equal(repaired.state.attempts[0].gradingSource, "evidence-repair-v3");
+  assert.equal(repaired.state.mistakes.length, 0);
+  assert.equal(repaired.state.history["2026-08-06"].correct, 1);
+});

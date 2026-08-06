@@ -6,7 +6,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  const EVIDENCE_REPAIR_VERSION = 2;
+  const EVIDENCE_REPAIR_VERSION = 3;
   const MISTAKE_AUTO_RESOLVE_STREAK = 2;
   const PARTIAL_TRANSLATION_SCORE = 0.8;
   const REQUIRED_ENGLISH_FUNCTION_WORDS = ["a", "an", "the", "on", "in", "am", "is", "are"];
@@ -163,6 +163,26 @@
     return item ? { item, direction, taskId: value } : null;
   }
 
+  function reviewTaskForRecord(content, value) {
+    const record = value && typeof value === "object" ? value : {};
+    const task = reviewTask(content, record.taskId);
+    if (!task) return null;
+    const source = record.reviewVariant && typeof record.reviewVariant === "object" ? record.reviewVariant : null;
+    const variantId = String(record.variantId || "").trim();
+    const snapshotId = String(source && source.id || "").trim();
+    const english = String(source && source.english || "").trim();
+    const chinese = String(source && source.chinese || "").trim();
+    if (!source || !snapshotId || !english || !chinese || (variantId && snapshotId !== variantId)) return task;
+    const acceptedEnglish = Array.isArray(source.acceptedEnglish) && source.acceptedEnglish.length ? source.acceptedEnglish : [english];
+    const acceptedChinese = Array.isArray(source.acceptedChinese) && source.acceptedChinese.length ? source.acceptedChinese : [chinese];
+    return {
+      ...task,
+      item: { ...task.item, english, chinese, acceptedEnglish, acceptedChinese },
+      variantId: snapshotId,
+      reviewVariant: { ...source, id: snapshotId, english, chinese, acceptedEnglish, acceptedChinese }
+    };
+  }
+
   function taskAcceptedAnswers(task) {
     return task.direction === "zh-en"
       ? (Array.isArray(task.item.acceptedEnglish) && task.item.acceptedEnglish.length ? task.item.acceptedEnglish : [task.item.english])
@@ -183,7 +203,12 @@
     const safeTaskId = task.taskId.replace(/[^a-z0-9_-]+/gi, "-");
     return {
       id: `evidence-repair-v${EVIDENCE_REPAIR_VERSION}-${date}-${safeTaskId}-${index}`,
+      attemptId: String(attempt.id || ""),
       taskId: task.taskId,
+      variantId: String(attempt.variantId || task.variantId || ""),
+      reviewVariant: task.reviewVariant ? { ...task.reviewVariant } : null,
+      date,
+      direction: task.direction,
       day: Number(task.item.day) || 0,
       prompt: task.direction === "en-zh" ? task.item.english : task.item.chinese,
       userAnswer: String(attempt.answer || "（未填写）"),
@@ -203,7 +228,7 @@
 
     const attempts = originalAttempts.map(attemptValue => {
       const attempt = attemptValue && typeof attemptValue === "object" ? attemptValue : {};
-      const task = reviewTask(content, attempt.taskId);
+      const task = reviewTaskForRecord(content, attempt);
       if (!task || typeof attempt.correct !== "boolean") return attempt;
       const accepted = taskAcceptedAnswers(task);
       let correct = attempt.correct;
@@ -254,18 +279,20 @@
       record.correct = Math.round(Math.max(0, Math.min(reviewed, (Number(record.correct) || 0) + delta)) * 100) / 100;
     });
 
-    const attemptByIdentity = new Map();
-    attempts.forEach((attempt, index) => {
-      const task = reviewTask(content, attempt && attempt.taskId);
-      if (!task) return;
-      attemptByIdentity.set(`${String(attempt.date || "")}|${task.taskId}|${answerIdentity(task, attempt.answer)}`, { attempt, index, task });
-    });
+    const attemptEntries = attempts.map((attempt, index) => ({ attempt, index, task: reviewTaskForRecord(content, attempt) })).filter(entry => entry.task);
+    const attemptById = new Map(attemptEntries.map(entry => [String(entry.attempt.id || ""), entry]).filter(([id]) => id));
 
     let mistakes = (Array.isArray(source.mistakes) ? source.mistakes : []).filter(mistake => {
-      const task = reviewTask(content, mistake && mistake.taskId);
+      const mistakeTask = reviewTaskForRecord(content, mistake);
+      const normalizedAnswer = answerIdentity(mistakeTask, mistake && mistake.userAnswer);
+      const requestedVariantId = String(mistake && mistake.variantId || "");
+      const matchingAttempt = attemptById.get(String(mistake && mistake.attemptId || "")) || [...attemptEntries].reverse().find(entry => {
+        if (entry.task.taskId !== String(mistake && mistake.taskId || "")) return false;
+        if (requestedVariantId && String(entry.attempt.variantId || "") !== requestedVariantId) return false;
+        return answerIdentity(entry.task, entry.attempt.answer) === normalizedAnswer;
+      });
+      const task = matchingAttempt ? matchingAttempt.task : mistakeTask;
       if (!task) return true;
-      const key = `${String(mistake.date || "")}|${task.taskId}|${answerIdentity(task, mistake.userAnswer)}`;
-      const matchingAttempt = attemptByIdentity.get(key) || Array.from(attemptByIdentity.values()).find(entry => entry.task.taskId === task.taskId && answerIdentity(task, entry.attempt.answer) === answerIdentity(task, mistake.userAnswer));
       const shouldRemove = Boolean((matchingAttempt && matchingAttempt.attempt.correct === true) || taskAnswerMatches(task, mistake.userAnswer));
       if (shouldRemove) changed = true;
       return !shouldRemove;
@@ -279,7 +306,7 @@
 
     attempts.forEach((attempt, index) => {
       if (attempt.correct !== false || originalAttempts[index] && originalAttempts[index].correct !== true) return;
-      const task = reviewTask(content, attempt.taskId);
+      const task = reviewTaskForRecord(content, attempt);
       if (!task) return;
       if (mistakeIsResolved(attempts, task.taskId)) return;
       const exists = mistakes.some(mistake => mistake.taskId === task.taskId && answerIdentity(task, mistake.userAnswer) === answerIdentity(task, attempt.answer));
@@ -329,6 +356,7 @@
     mistakeIsResolved,
     normalizeChinese,
     normalizeEnglish,
+    reviewTaskForRecord,
     repairReviewEvidence,
     shouldSubmitOnEnter
   };

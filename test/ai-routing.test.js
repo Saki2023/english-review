@@ -61,7 +61,10 @@ test("manual mode stays fixed while automatic mode fails over and rotates", asyn
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       assert.equal(body.model, "route-model");
       res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ correct: false, explanation: `${providerId} 已判定。` }) } }] }));
+      const explanation = providerId === "second" ? "备用供应商已判定。" : "主供应商已判定。";
+      const isTutor = Array.isArray(body.messages) && body.messages.some(message => String(message && message.content || "").includes("patient English tutor"));
+      const content = isTutor ? explanation : JSON.stringify({ correct: false, explanation });
+      return res.end(JSON.stringify({ choices: [{ message: { content } }] }));
     });
   });
   await new Promise((resolve, reject) => provider.listen(0, "127.0.0.1", error => error ? reject(error) : resolve()));
@@ -109,7 +112,7 @@ test("manual mode stays fixed while automatic mode fails over and rotates", asyn
     calls.length = 0;
     const failover = await grade();
     assert.equal(failover.status, 200);
-    assert.equal((await failover.json()).explanation, "second 已判定。");
+    assert.equal((await failover.json()).explanation, "备用供应商已判定。");
     assert.deepEqual(calls, ["first", "second"]);
     let visible = await (await fetch(`${baseUrl}/api/admin/ai-config`, { headers: { "Cookie": cookie } })).json();
     assert.equal(visible.rotationCursor, 0);

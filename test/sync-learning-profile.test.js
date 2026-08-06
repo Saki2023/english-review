@@ -84,6 +84,11 @@ test("a failed upload does not prevent downloading a fresh website learning prof
     assert.equal(status.downloadSuccess, true);
     assert.equal(status.success, false);
     assert.equal(status.errors[0].category, "authorization");
+    assert.equal(status.summary.aiQuestions, 9);
+    assert.equal(status.summary.aiAccuracy, 78);
+    assert.equal(status.summary.tutorQuestions, 2);
+    assert.equal(status.summary.evidence, 12);
+    assert.deepEqual(status.profileSummary, status.summary);
     assert.equal(profile.marker, "fresh-download-after-upload-failure");
     assert.ok(requests.some(entry => entry.startsWith("GET /api/sync/profile")));
   } finally {

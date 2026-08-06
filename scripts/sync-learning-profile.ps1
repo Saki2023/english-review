@@ -16,6 +16,9 @@ $sharedDirectory = Join-Path $workspaceRoot "学习同步"
 
 if (-not $ConfigPath) { $ConfigPath = Join-Path $sharedDirectory ".sync.env" }
 if (-not $OutputPath) { $OutputPath = Join-Path $sharedDirectory "网站学习档案.json" }
+$script:statusPathWasProvided = [bool]$StatusPath
+if (-not $StatusPath) { $StatusPath = Join-Path $sharedDirectory "同步记录\最近一次同步.json" }
+$script:historyPath = Join-Path (Split-Path -Parent $StatusPath) "同步历史.json"
 
 $config = @{}
 if (Test-Path -LiteralPath $ConfigPath) {
@@ -318,6 +321,20 @@ function Save-SyncStatus {
   }
   $statusJson = $syncStatus | ConvertTo-Json -Depth 10
   [IO.File]::WriteAllText($StatusPath, "$statusJson`n", $utf8NoBom)
+  if (-not $script:statusPathWasProvided) {
+    $history = @()
+    if (Test-Path -LiteralPath $script:historyPath) {
+      try {
+        $existing = Get-Content -Raw -Encoding UTF8 -LiteralPath $script:historyPath | ConvertFrom-Json
+        if ($existing -is [array]) { $history = @($existing) } elseif ($null -ne $existing) { $history = @($existing) }
+      } catch { $history = @() }
+    }
+    $history += [pscustomobject]$syncStatus
+    if ($history.Count -gt 50) { $history = @($history | Select-Object -Last 50) }
+    $historyDirectory = Split-Path -Parent $script:historyPath
+    if ($historyDirectory -and -not (Test-Path -LiteralPath $historyDirectory)) { New-Item -ItemType Directory -Path $historyDirectory -Force | Out-Null }
+    [IO.File]::WriteAllText($script:historyPath, "$($history | ConvertTo-Json -Depth 10)`n", $utf8NoBom)
+  }
 }
 
 function Read-LearningDocument([string]$Path, [int]$MaximumLength = 16000) {
@@ -432,6 +449,32 @@ if ($downloadResult.success) {
   $json = $profile | ConvertTo-Json -Depth 40
   [IO.File]::WriteAllText($OutputPath, "$json`n", $utf8NoBom)
   $syncStatus.downloadSuccess = $true
+  $profileSummary = $profile.summary
+  $courseSummary = $profile.course
+  $abilitySummary = $profile.abilities
+  $latestSummary = [ordered]@{
+    courseDay = if ($courseSummary) { [int]$courseSummary.currentDay } else { 0 }
+    courseWords = if ($courseSummary) { [int]$courseSummary.words } else { 0 }
+    coursePreviewWords = if ($courseSummary) { [int]$courseSummary.previewWords } else { 0 }
+    courseSentences = if ($courseSummary) { [int]$courseSummary.sentences } else { 0 }
+    courseNotes = if ($courseSummary) { [int]$courseSummary.notes } else { 0 }
+    aiQuestions = if ($profileSummary) { [int]$profileSummary.aiQuestions } else { 0 }
+    aiCorrect = if ($profileSummary) { [double]$profileSummary.aiCorrect } else { 0 }
+    aiAccuracy = if ($profileSummary) { [int]$profileSummary.aiAccuracy } else { 0 }
+    tutorQuestions = if ($profileSummary) { [int]$profileSummary.tutorQuestions } else { 0 }
+    exams = if ($profileSummary) { [int]$profileSummary.exams } else { 0 }
+    latestExamScore = if ($profileSummary) { $profileSummary.latestExamScore } else { $null }
+    latestExamPossible = if ($profileSummary) { $profileSummary.latestExamPossible } else { $null }
+    itemsNeedingReview = if ($profileSummary) { [int]$profileSummary.itemsNeedingReview } else { 0 }
+    dictations = if ($profileSummary) { [int]$profileSummary.dictations } else { 0 }
+    focusedSessions = if ($profileSummary) { [int]$profileSummary.focusedSessions } else { 0 }
+    evidence = if ($abilitySummary) { [int]$abilitySummary.totalEvidence } else { 0 }
+    abilityScore = if ($abilitySummary) { [int]$abilitySummary.comprehensiveScore } else { 0 }
+  }
+  # 同步中心和历史报告使用 summary 作为统一统计字段。保留
+  # profileSummary 作为兼容别名，避免旧版读取器丢失统计。
+  $syncStatus.summary = $latestSummary
+  $syncStatus.profileSummary = $latestSummary
 
   Write-Host "学习档案已同步：$OutputPath"
   Write-Host "网站 AI 做题：$($profile.summary.aiQuestions) 题，正确率 $($profile.summary.aiAccuracy)%"

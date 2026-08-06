@@ -247,6 +247,8 @@ function tutorEvidence(state) {
     questionId: item.questionId,
     historyId: item.historyId,
     source: item.source,
+    taskId: item.taskId,
+    variantId: item.variantId,
     direction: item.direction,
     prompt: item.prompt,
     learnerAnswer: item.learnerAnswer,

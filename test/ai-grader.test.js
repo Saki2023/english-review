@@ -213,6 +213,24 @@ test("AI tutor requests plain Chinese guidance with the selected maximum effort"
   assert.match(requestBody.messages[0].content, /never reveal the full translation or final answer/);
 });
 
+test("AI tutor retries and falls back to Chinese when an answer introduces unlearned English words", async () => {
+  let calls = 0;
+  const tutor = createAiTutor(aiConfig(), { fetchImpl: async () => {
+    calls += 1;
+    const content = calls === 1 ? "good 比 great 弱，weather 也可以这样用。" : "先用中文看这个词在题目中的意思。";
+    return new Response(JSON.stringify({ choices: [{ message: { content } }] }), { status: 200 });
+  } });
+  const answer = await tutor.answer({
+    exercise: { direction: "en-zh", english: "It is good.", chinese: "它很好。", answered: true },
+    history: [],
+    message: "good 是什么意思？",
+    allowedWords: ["it", "is", "good"],
+    wordMeanings: { good: ["好的"] }
+  });
+  assert.equal(calls, 2);
+  assert.equal(answer, "先用中文看这个词在题目中的意思。");
+});
+
 test("AI review variant parser keeps task ids and Chinese answer alternatives", () => {
   const result = parseReviewVariantResponse({ choices: [{ message: { content: JSON.stringify({ variants: [
     { taskId: "d2-s3:en-zh", english: "A pig sat on a box.", chinese: "一头猪坐在一个箱子上。", acceptedChinese: ["一只猪坐在箱子上"] }
@@ -592,6 +610,31 @@ test("admin configures AI on the web and progress-based questions use the select
     const stateAfterRestart = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
     assert.equal(stateAfterRestart.aiPractice.tutorHistory.length, 2);
     assert.equal(stateAfterRestart.aiPractice.tutorResets.length, 1);
+
+    const reviewTutor = await fetch(`${baseUrl}/api/ai/questions/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ taskId: "d2-s4:en-zh", message: "这道普通复习题应该看什么？", reasoningEffort: "low" })
+    });
+    assert.equal(reviewTutor.status, 200);
+    const reviewTutorBody = await reviewTutor.json();
+    assert.equal(reviewTutorBody.tutor.source, "review");
+    assert.equal(reviewTutorBody.tutor.taskId, "d2-s4:en-zh");
+    assert.equal(reviewTutorBody.tutor.variantId, "");
+    assert.equal(reviewTutorBody.exchange.prompt, "It is a big cat.");
+    assert.equal(reviewTutorBody.exchange.answered, false);
+    assert.equal(JSON.parse(providerRequests.at(-1).body.messages[1].content).exercise.english, "It is a big cat.");
+
+    const secondReviewTutor = await fetch(`${baseUrl}/api/ai/questions/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ taskId: "d2-s5:en-zh", message: "这不是上一道题。", reasoningEffort: "low" })
+    });
+    assert.equal(secondReviewTutor.status, 200);
+    const secondReviewTutorBody = await secondReviewTutor.json();
+    assert.notEqual(secondReviewTutorBody.tutor.questionId, reviewTutorBody.tutor.questionId);
+    assert.equal(secondReviewTutorBody.exchange.prompt, "It is big.");
+    assert.equal(JSON.parse(providerRequests.at(-1).body.messages[1].content).exercise.english, "It is big.");
 
     const unavailableGeneration = await fetch(`${baseUrl}/api/ai/questions/generate`, {
       method: "POST",

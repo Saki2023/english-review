@@ -805,6 +805,40 @@ function findStoredPoolSentenceTask(user, taskId, variantId = "") {
   return { ...base, item: { ...base.baseItem, ...variant }, variant };
 }
 
+function reviewTutorQuestionId(taskId, variantId = "") {
+  const value = `${String(taskId || "")}\u0000${String(variantId || "base")}`;
+  let first = 2166136261;
+  let second = 2246822519;
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    first = Math.imul(first ^ code, 16777619);
+    second = Math.imul(second ^ (code + 374761393), 3266489917);
+  }
+  return `review-${(first >>> 0).toString(36)}-${(second >>> 0).toString(36)}`;
+}
+
+function findReviewTutorTask(user, taskId, variantId = "") {
+  const value = String(taskId || "");
+  const separator = value.lastIndexOf(":");
+  if (separator <= 0) return null;
+  const id = value.slice(0, separator);
+  const direction = value.slice(separator + 1);
+  if (!["en-zh", "zh-en"].includes(direction)) return null;
+  const baseItem = [...content.words, ...content.sentences].find(item => item.id === id);
+  if (!baseItem || baseItem.preview === true || Number(baseItem.day) > Number(content.currentDay) || !baseItem.learned || String(baseItem.learned) > today()) return null;
+  const directions = Array.isArray(baseItem.directions) && baseItem.directions.length ? baseItem.directions : ["en-zh"];
+  if (!directions.includes(direction)) return null;
+  const requestedVariantId = String(variantId || "").trim();
+  if (!requestedVariantId) return { item: baseItem, baseItem, direction, taskId: value, variant: null };
+  if (!content.sentences.some(item => item.id === id)) return null;
+  return findStoredPoolSentenceTask(user, value, requestedVariantId);
+}
+
+function latestReviewAttempt(state, taskId, variantId = "") {
+  const requestedVariantId = String(variantId || "");
+  return [...(Array.isArray(state && state.attempts) ? state.attempts : [])].reverse().find(item => String(item && item.taskId || "") === String(taskId || "") && String(item && item.variantId || "") === requestedVariantId) || null;
+}
+
 function localSentenceAnswerMatches(task, answer) {
   if (task.direction === "zh-en") return englishAnswerMatches(answer, task.item.acceptedEnglish || [task.item.english]);
   return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese]);
@@ -828,6 +862,7 @@ const REVIEW_VARIANT_FAILURE_MESSAGES = Object.freeze({
   "wrong-family": "改变了原句句型",
   "no-english-words": "没有可识别的英文单词",
   "unlearned-word": "含有未学单词",
+  "unlearned-word-sense": "使用了尚未学习的词义",
   "source-duplicate": "与原句完全相同",
   "fixed-sentence-duplicate": "与词句库固定句重复",
   "recent-variant-duplicate": "与近期变式重复",
@@ -978,6 +1013,9 @@ function reviewVariantGrammarFamilies() {
 
 function buildReviewVariantGenerationInput(state, date, route, tasks, extraExcludedEnglish = [], syncKey = reviewVariantSyncKey(content)) {
   const profile = buildLearningProfile(content, state, date);
+  const wordMeanings = Object.fromEntries(content.words
+    .filter(item => !item.preview && item.learned && String(item.learned) <= String(date || today()))
+    .map(item => [normalizeVariantEnglish(item.english), Array.from(new Set([item.chinese, ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])].filter(Boolean)))]));
   const recent = recentReviewVariants(state);
   const fixedEnglish = content.sentences.map(item => item.english);
   const recentEnglish = Array.from(new Set([
@@ -991,6 +1029,7 @@ function buildReviewVariantGenerationInput(state, date, route, tasks, extraExclu
     tasks,
     route,
     allowedWords: profile.allowedWords,
+    wordMeanings,
     grammarFamilies: reviewVariantGrammarFamilies(),
     fixedEnglish,
     recentEnglish,
@@ -1897,15 +1936,19 @@ async function handleAiTutorAsk(req, res, user) {
     const practice = sanitizeAiPractice(state.aiPractice);
     const historyItem = body.historyId ? practice.history.find(item => item.id === body.historyId) : null;
     const set = practice.currentSet;
+    const reviewTask = !historyItem && body.taskId ? findReviewTutorTask(user, body.taskId, body.variantId) : null;
     const question = !historyItem && set && set.id === body.setId ? set.questions.find(item => item.id === body.questionId) : null;
     if (body.historyId && !historyItem) return sendError(res, 404, "AI history question not found");
-    if (!historyItem && (!set || set.id !== body.setId)) return sendError(res, 404, "AI question set not found");
-    if (!historyItem && !question) return sendError(res, 404, "AI question not found");
+    if (!historyItem && body.taskId && !reviewTask) return sendError(res, 404, "review question not found");
+    if (!historyItem && !reviewTask && (!set || set.id !== body.setId)) return sendError(res, 404, "AI question set not found");
+    if (!historyItem && !reviewTask && !question) return sendError(res, 404, "AI question not found");
 
     const historyPrefix = historyItem && historyItem.setId ? `${historyItem.setId}:` : "";
     const historyQuestionId = historyItem && historyPrefix && historyItem.id.startsWith(historyPrefix) ? historyItem.id.slice(historyPrefix.length) : historyItem && historyItem.id;
-    const threadSetId = historyItem ? (historyItem.setId || `history-${historyItem.id}`) : set.id;
-    const threadQuestionId = historyItem ? historyQuestionId : question.id;
+    const reviewVariantId = reviewTask && reviewTask.variant ? String(reviewTask.variant.id || "") : "";
+    const threadSetId = historyItem ? (historyItem.setId || `history-${historyItem.id}`) : reviewTask ? "review" : set.id;
+    const threadQuestionId = historyItem ? historyQuestionId : reviewTask ? reviewTutorQuestionId(reviewTask.taskId, reviewVariantId) : question.id;
+    const reviewAttempt = reviewTask ? latestReviewAttempt(state, reviewTask.taskId, reviewVariantId) : null;
     const exercise = historyItem ? {
       direction: historyItem.direction,
       english: historyItem.direction === "zh-en" ? historyItem.correctAnswer : historyItem.prompt,
@@ -1914,6 +1957,14 @@ async function handleAiTutorAsk(req, res, user) {
       answered: true,
       focus: historyItem.focus || "",
       explanation: historyItem.explanation || ""
+    } : reviewTask ? {
+      direction: reviewTask.direction,
+      english: reviewTask.item.english,
+      chinese: reviewTask.item.chinese,
+      learnerAnswer: reviewAttempt ? String(reviewAttempt.answer || "") : "",
+      answered: Boolean(reviewAttempt && typeof reviewAttempt.correct === "boolean"),
+      focus: "",
+      explanation: reviewAttempt ? String(reviewAttempt.explanation || "") : ""
     } : {
       direction: question.direction,
       english: question.english,
@@ -1926,7 +1977,7 @@ async function handleAiTutorAsk(req, res, user) {
 
     const rate = takeAiRequest(user.id);
     if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
-    const contextModel = historyItem ? historyItem.model : set.model;
+    const contextModel = historyItem ? historyItem.model : reviewTask ? "" : set.model;
     const requestedProviderId = String(body.providerId || practice.tutorSettings.providerId || "").trim();
     const selectedProvider = requestedProviderId && Array.isArray(aiSettings && aiSettings.providers) ? aiSettings.providers.find(provider => provider.id === requestedProviderId) : null;
     const availableModels = selectedProvider ? selectedProvider.models : getAvailableModels(aiSettings);
@@ -1935,13 +1986,22 @@ async function handleAiTutorAsk(req, res, user) {
     const route = selectAiCandidates(aiSettings, { providerId: requestedProviderId, model: requestedModel, reasoningEffort: tutorEffort });
     const thread = tutorThreadFromHistory(practice, threadSetId, threadQuestionId);
     thread.historyId = historyItem ? historyItem.id : "";
-    thread.source = historyItem ? "history" : "current";
+    thread.source = historyItem ? "history" : reviewTask ? "review" : "current";
+    thread.taskId = reviewTask ? reviewTask.taskId : "";
+    thread.variantId = reviewTask ? reviewVariantId : "";
+    thread.direction = exercise.direction;
     thread.prompt = historyItem ? historyItem.prompt : (exercise.direction === "en-zh" ? exercise.english : exercise.chinese);
     const askedAt = new Date().toISOString();
+    const tutorProfile = buildLearningProfile(content, state, today());
+    const tutorWordMeanings = Object.fromEntries(content.words
+      .filter(item => !item.preview && item.learned && String(item.learned) <= today())
+      .map(item => [normalizeVariantEnglish(item.english), Array.from(new Set([item.chinese, ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])].filter(Boolean)))]));
     const routed = await runAiRoute(route, config => createAiTutor(config).answer({
       exercise,
       history: thread.messages,
-      message
+      message,
+      allowedWords: tutorProfile.allowedWords,
+      wordMeanings: tutorWordMeanings
     }));
     const createdAt = new Date().toISOString();
     thread.messages = [
@@ -1955,7 +2015,9 @@ async function handleAiTutorAsk(req, res, user) {
       setId: threadSetId,
       questionId: threadQuestionId,
       historyId: historyItem ? historyItem.id : "",
-      source: historyItem ? "history" : "current",
+      source: historyItem ? "history" : reviewTask ? "review" : "current",
+      taskId: reviewTask ? reviewTask.taskId : "",
+      variantId: reviewTask ? reviewVariantId : "",
       direction: exercise.direction,
       prompt: historyItem ? historyItem.prompt : (exercise.direction === "en-zh" ? exercise.english : exercise.chinese),
       learnerAnswer: exercise.learnerAnswer,
@@ -1997,24 +2059,28 @@ async function handleAiTutorClear(req, res, user) {
     const practice = sanitizeAiPractice(state.aiPractice);
     const historyItem = body.historyId ? practice.history.find(item => item.id === body.historyId) : null;
     const set = practice.currentSet;
+    const reviewTask = !historyItem && body.taskId ? findReviewTutorTask(user, body.taskId, body.variantId) : null;
     const question = !historyItem && set && set.id === body.setId ? set.questions.find(item => item.id === body.questionId) : null;
     if (body.historyId && !historyItem) return sendError(res, 404, "AI history question not found");
-    if (!historyItem && (!set || set.id !== body.setId)) return sendError(res, 404, "AI question set not found");
-    if (!historyItem && !question) return sendError(res, 404, "AI question not found");
+    if (!historyItem && body.taskId && !reviewTask) return sendError(res, 404, "review question not found");
+    if (!historyItem && !reviewTask && (!set || set.id !== body.setId)) return sendError(res, 404, "AI question set not found");
+    if (!historyItem && !reviewTask && !question) return sendError(res, 404, "AI question not found");
 
     const historyPrefix = historyItem && historyItem.setId ? `${historyItem.setId}:` : "";
     const historyQuestionId = historyItem && historyPrefix && historyItem.id.startsWith(historyPrefix) ? historyItem.id.slice(historyPrefix.length) : historyItem && historyItem.id;
-    const threadSetId = historyItem ? (historyItem.setId || `history-${historyItem.id}`) : set.id;
-    const threadQuestionId = historyItem ? historyQuestionId : question.id;
-    const source = historyItem ? "history" : "current";
-    const prompt = historyItem ? historyItem.prompt : (question.direction === "en-zh" ? question.english : question.chinese);
+    const reviewVariantId = reviewTask && reviewTask.variant ? String(reviewTask.variant.id || "") : "";
+    const threadSetId = historyItem ? (historyItem.setId || `history-${historyItem.id}`) : reviewTask ? "review" : set.id;
+    const threadQuestionId = historyItem ? historyQuestionId : reviewTask ? reviewTutorQuestionId(reviewTask.taskId, reviewVariantId) : question.id;
+    const source = historyItem ? "history" : reviewTask ? "review" : "current";
+    const prompt = historyItem ? historyItem.prompt : reviewTask ? (reviewTask.direction === "en-zh" ? reviewTask.item.english : reviewTask.item.chinese) : (question.direction === "en-zh" ? question.english : question.chinese);
+    const direction = historyItem ? historyItem.direction : reviewTask ? reviewTask.direction : question.direction;
     const resetAt = new Date().toISOString();
-    const reset = { setId: threadSetId, questionId: threadQuestionId, historyId: historyItem ? historyItem.id : "", source, prompt, resetAt };
+    const reset = { setId: threadSetId, questionId: threadQuestionId, historyId: historyItem ? historyItem.id : "", source, taskId: reviewTask ? reviewTask.taskId : "", variantId: reviewTask ? reviewVariantId : "", direction, prompt, resetAt };
     practice.tutorResets = [
       ...practice.tutorResets.filter(item => item.setId !== threadSetId || item.questionId !== threadQuestionId),
       reset
     ].slice(-MAX_TUTOR_RESETS);
-    practice.tutor = { setId: threadSetId, questionId: threadQuestionId, historyId: reset.historyId, source, prompt, updatedAt: resetAt, messages: [] };
+    practice.tutor = { setId: threadSetId, questionId: threadQuestionId, historyId: reset.historyId, source, taskId: reviewTask ? reviewTask.taskId : "", variantId: reviewTask ? reviewVariantId : "", direction, prompt, updatedAt: resetAt, messages: [] };
     practice.updatedAt = resetAt;
     state.aiPractice = practice;
     persistUserStates();
