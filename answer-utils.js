@@ -89,14 +89,141 @@
     return tokens.map(english => ({ english, correct: !problems.has(english), issue: problems.has(english) ? "meaning" : "" }));
   }
 
+  function tokenCounts(tokens) {
+    return tokens.reduce((result, token) => {
+      result[token] = (result[token] || 0) + 1;
+      return result;
+    }, {});
+  }
+
+  function englishTokenRole(token) {
+    const value = String(token || "").toLocaleLowerCase();
+    if (["a", "an", "the"].includes(value)) return "冠词";
+    if (["on", "in", "at", "to", "from", "under", "over"].includes(value)) return "介词/位置词";
+    if (["am", "is", "are", "was", "were"].includes(value)) return "be 动词";
+    if (["i", "you", "he", "she", "it", "we", "they"].includes(value)) return "主语代词";
+    return "关键词";
+  }
+
+  function englishAnswerDifferences(reference, answer) {
+    const expected = englishWords(reference);
+    const actual = englishWords(answer);
+    const expectedCounts = tokenCounts(expected);
+    const actualCounts = tokenCounts(actual);
+    const missing = [];
+    const extra = [];
+    Object.entries(expectedCounts).forEach(([token, count]) => {
+      const difference = count - (actualCounts[token] || 0);
+      for (let index = 0; index < difference; index += 1) missing.push(token);
+    });
+    Object.entries(actualCounts).forEach(([token, count]) => {
+      const difference = count - (expectedCounts[token] || 0);
+      for (let index = 0; index < difference; index += 1) extra.push(token);
+    });
+    const positional = [];
+    const limit = Math.max(expected.length, actual.length);
+    for (let index = 0; index < limit; index += 1) {
+      if (expected[index] && actual[index] && expected[index] !== actual[index]) {
+        positional.push({ position: index + 1, expected: expected[index], actual: actual[index] });
+      }
+    }
+    return { expected, actual, missing, extra, positional };
+  }
+
+  function chineseDifference(reference, answer) {
+    const expected = normalizeChinese(reference);
+    const actual = normalizeChinese(answer);
+    if (!expected || !actual) return { expected, actual, expectedPart: expected, actualPart: actual };
+    let prefix = 0;
+    while (prefix < expected.length && prefix < actual.length && expected[prefix] === actual[prefix]) prefix += 1;
+    let suffix = 0;
+    while (suffix < expected.length - prefix && suffix < actual.length - prefix
+      && expected[expected.length - suffix - 1] === actual[actual.length - suffix - 1]) suffix += 1;
+    return {
+      expected,
+      actual,
+      expectedPart: expected.slice(prefix, expected.length - suffix || undefined),
+      actualPart: actual.slice(prefix, actual.length - suffix || undefined)
+    };
+  }
+
+  function buildTranslationExplanation(input = {}) {
+    const direction = input.direction === "zh-en" ? "zh-en" : "en-zh";
+    const referenceAnswer = String(input.referenceAnswer || "").trim();
+    const answer = String(input.answer || "").trim();
+    const correct = input.correct === true;
+    const gradingStatus = String(input.gradingStatus || (correct ? "correct" : "incorrect"));
+    const providerExplanation = String(input.explanation || "").replace(/\s+/g, " ").trim();
+    const problemWords = Array.from(new Set((Array.isArray(input.problemWords) ? input.problemWords : []).flatMap(englishWords))).slice(0, 8);
+
+    if (correct && gradingStatus !== "partial") {
+      return providerExplanation || "答案与参考答案意思一致，主语、核心动作和关键位置/数量信息完整。";
+    }
+
+    const parts = [];
+    if (gradingStatus === "partial") {
+      const expected = normalizeChinese(referenceAnswer);
+      const actual = normalizeChinese(answer);
+      const expectedMeasure = expected.match(/一([个只头张支块家本辆杯条位件台把朵颗枚])/);
+      const actualMeasure = actual.match(/一([个只头张支块家本辆杯条位件台把朵颗枚])/);
+      if (expectedMeasure && actualMeasure && expectedMeasure[1] !== actualMeasure[1]) {
+        parts.push(`核心意思正确，但量词“${actualMeasure[1]}”与参考答案“${expectedMeasure[1]}”不同，建议使用“${expectedMeasure[1]}”`);
+      } else {
+        parts.push("核心意思基本正确，但有一处中文表达不够自然，请对照参考答案修正");
+      }
+    } else if (direction === "zh-en") {
+      const difference = englishAnswerDifferences(referenceAnswer, answer);
+      if (difference.missing.length) {
+        const items = difference.missing.map(token => `${englishTokenRole(token)}“${token}”`);
+        parts.push(`漏写${items.join("、")}`);
+      }
+      if (difference.extra.length) {
+        const items = difference.extra.map(token => `${englishTokenRole(token)}“${token}”`);
+        parts.push(`多写${items.join("、")}`);
+      }
+      if (difference.positional.length && !difference.missing.length && !difference.extra.length) {
+        parts.push(difference.positional.slice(0, 2).map(item => `第${item.position}个词应为“${item.expected}”，你写成“${item.actual}”`).join("；"));
+      } else if (difference.positional.length && difference.missing.length && difference.extra.length) {
+        const item = difference.positional[0];
+        parts.push(`第${item.position}个词应为“${item.expected}”，你写成“${item.actual}”`);
+      }
+      if (!parts.length) parts.push("英文拼写或词序与参考答案不一致，请逐词检查主语、动作和位置词");
+    } else {
+      const difference = chineseDifference(referenceAnswer, answer);
+      if (difference.expectedPart || difference.actualPart) {
+        const expectedPart = difference.expectedPart || "（缺少）";
+        const actualPart = difference.actualPart || "（未填写）";
+        parts.push(`中文答案在“${difference.expectedPart ? difference.expectedPart : difference.actualPart}”处与参考答案不同：应为“${expectedPart}”，你写成“${actualPart}”`);
+      } else {
+        parts.push("中文答案与参考答案不一致，请检查主语、核心动作、对象、数量/性质和位置信息是否完整");
+      }
+    }
+    if (problemWords.length) parts.push(`重点检查单词：${problemWords.join("、")}`);
+    if (providerExplanation && !parts.some(part => part === providerExplanation || part.includes(providerExplanation))) parts.push(providerExplanation);
+    return Array.from(parts.join("；")).slice(0, 300).join("");
+  }
+
   function relaxedChineseMeasureWords(value) {
     return normalizeChinese(value).replace(new RegExp(`一(?:${CHINESE_MEASURE_WORDS})(?=[\\u3400-\\u9fff])`, "g"), "一");
+  }
+
+  // In beginner location translations, Chinese may omit the optional locative
+  // particle "里": "我们在学校" and "我们在学校里" express the same place.
+  // Restrict the relaxation to a location introduced by 在/到/去 and require
+  // either a multi-character place name or a small set of one-character place
+  // nouns, so words such as "这里" are not silently changed in meaning.
+  function relaxedChineseLocation(value) {
+    return normalizeChinese(value).replace(/(在|到|去)((?:[\u3400-\u9fff]{2,}|家|店|校))里/g, "$1$2");
   }
 
   function chineseAnswerQuality(answer, acceptedAnswers) {
     const normalized = normalizeChinese(answer);
     const references = Array.isArray(acceptedAnswers) ? acceptedAnswers : [];
     if (normalized && references.some(expected => normalizeChinese(expected) === normalized)) {
+      return { correct: true, gradingStatus: "correct", score: 1 };
+    }
+    const relaxedLocation = relaxedChineseLocation(answer);
+    if (relaxedLocation && references.some(expected => relaxedChineseLocation(expected) === relaxedLocation)) {
       return { correct: true, gradingStatus: "correct", score: 1 };
     }
     const relaxed = relaxedChineseMeasureWords(answer);
@@ -343,9 +470,11 @@
     MISTAKE_AUTO_RESOLVE_STREAK,
     PARTIAL_TRANSLATION_SCORE,
     REQUIRED_ENGLISH_FUNCTION_WORDS,
+    buildTranslationExplanation,
     buildMistakePracticeQueue,
     chineseAnswerQuality,
     chineseAnswerMatches,
+    englishAnswerDifferences,
     englishAnswerMatches,
     englishFunctionWordDifferences,
     englishFunctionWordsMatch,

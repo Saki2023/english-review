@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=49">
+  <link rel="stylesheet" href="styles.css?v=51">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v49">v49</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v51">v51</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -789,7 +789,19 @@
             <i data-lucide="circle-check" aria-hidden="true"></i>
             <strong>预习练习完成</strong>
             <p id="previewPracticeCompleteNote"></p>
-            <button class="secondary-button" type="button" data-preview-practice-mode="mixed" aria-pressed="false">再练一轮</button>
+            <button class="secondary-button" type="button" id="previewPracticeAgain"><i data-lucide="rotate-ccw" aria-hidden="true"></i>再练一轮</button>
+          </section>
+          <section class="preview-history-section" aria-labelledby="previewPracticeHistoryTitle">
+            <div class="preview-history-heading">
+              <div>
+                <p class="eyebrow">PRACTICE HISTORY</p>
+                <h2 id="previewPracticeHistoryTitle">预习做题历史</h2>
+              </div>
+              <p id="previewPracticeHistorySummary">暂无预习做题记录</p>
+            </div>
+            <div class="preview-history-list" id="previewPracticeHistoryList">
+              <p class="preview-history-empty">完成一轮预习练习后，题目、答案和判定会保存在这里。</p>
+            </div>
           </section>
         </section>
 
@@ -1001,12 +1013,12 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=49"></script>
-  <script src="data.js?v=49"></script>
-  <script src="pronunciation-data.js?v=49"></script>
-  <script src="review-variants.js?v=49"></script>
-  <script src="answer-utils.js?v=49"></script>
-  <script src="study-time.js?v=49"></script>
+  <script src="vendor/lucide.min.js?v=51"></script>
+  <script src="data.js?v=51"></script>
+  <script src="pronunciation-data.js?v=51"></script>
+  <script src="review-variants.js?v=51"></script>
+  <script src="answer-utils.js?v=51"></script>
+  <script src="study-time.js?v=51"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1022,7 +1034,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=49";
+      appScript.src = "app.js?v=51";
       document.body.appendChild(appScript);
     })();
   </script>

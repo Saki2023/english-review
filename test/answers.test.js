@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
+const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
 
 test("today review accepts only formally learned content", () => {
   const today = "2026-08-03";
@@ -28,6 +28,14 @@ test("Chinese normalization does not accept changed meaning", () => {
   assert.equal(chineseAnswerMatches("一只猫坐在一张垫子里面", accepted), false);
 });
 
+test("Chinese location answers accept an optional locative 里", () => {
+  const accepted = ["我们在学校"];
+
+  assert.equal(chineseAnswerMatches("我们在学校里", accepted), true);
+  assert.equal(chineseAnswerMatches("她在一家商店", ["她在一家商店里"]), true);
+  assert.equal(chineseAnswerMatches("我们在这里", accepted), false);
+});
+
 test("Chinese measure-word mistakes preserve semantic understanding as partial credit", () => {
   const accepted = ["它是一支红色的笔", "它是一支红笔", "它是红色的笔"];
   assert.deepEqual(chineseAnswerQuality("它是一只红色的笔", accepted), { correct: true, gradingStatus: "partial", score: 0.8 });
@@ -47,6 +55,12 @@ test("English structure comparison requires every learned function word", () => 
   assert.equal(englishFunctionWordsMatch("a big pig sat in a mat", accepted), false);
   assert.equal(englishFunctionWordsMatch("the big pig sat on a mat", accepted), false);
   assert.deepEqual(englishFunctionWordDifferences("a big pig sat on mat", accepted), ["a"]);
+});
+
+test("translation feedback names the exact missing location, subject, and spelling words", () => {
+  assert.match(buildTranslationExplanation({ direction: "zh-en", referenceAnswer: "It is a big cat.", answer: "is a big cat", correct: false }), /漏写.*主语代词.*it/);
+  assert.match(buildTranslationExplanation({ direction: "zh-en", referenceAnswer: "We are in school.", answer: "We are school", correct: false }), /漏写.*介词\/位置词.*in/);
+  assert.match(buildTranslationExplanation({ direction: "zh-en", referenceAnswer: "cat", answer: "kat", correct: false }), /第1个词应为“cat”/);
 });
 
 test("review evidence repair corrects equivalent Chinese, restores daily counts, and rejects missing articles", () => {

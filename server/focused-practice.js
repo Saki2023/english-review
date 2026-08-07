@@ -187,6 +187,7 @@ function sanitizeGrade(value, question) {
     possible: question.points,
     correct: typeof source.correct === "boolean" ? source.correct : Number(source.score) >= question.points * 0.7,
     explanation: cleanText(source.explanation, 300),
+    detailedExplanation: cleanText(source.detailedExplanation, 360),
     correctAnswer: cleanText(source.correctAnswer, 500)
   };
 }
@@ -318,6 +319,7 @@ function completeFocusedSession(sessionValue, grading, provider) {
       possible: question.points,
       correct: typeof grade.correct === "boolean" ? grade.correct : score >= question.points * 0.7,
       explanation: cleanText(grade.explanation, 300),
+      detailedExplanation: cleanText(grade.detailedExplanation, 360) || cleanText(grade.explanation, 300),
       correctAnswer: displayAnswer(question)
     };
   });

@@ -61,7 +61,8 @@ function buildMessages(input) {
         "Accept harmless Chinese measure-word or location-word variants and harmless English capitalization or punctuation variants.",
         "For Chinese-to-English answers, missing or extra a, an, the, on, in, am, is, or are is an error and must never receive correct=true.",
         "Reject changes to the subject or pronoun, animal or object, size or adjective, preposition or location, negation, number, core action, or tense.",
-        "Return only a JSON object with correct (boolean), explanation (a short Simplified Chinese string no longer than 60 Chinese characters), and problemWords (an array containing only English source/reference words that were actually misunderstood, omitted, added, or misspelled).",
+        "Return only a JSON object with correct (boolean), explanation (a concrete Simplified Chinese string no longer than 120 Chinese characters), and problemWords (an array containing only English source/reference words that were actually misunderstood, omitted, added, or misspelled).",
+        "When the answer is wrong, explanation must name the exact missing, extra, misspelled, misplaced, or semantically wrong word/phrase and explain how to correct it; never return only generic advice such as 再看一次 or 需要加强.",
         "For a harmless Chinese measure-word difference, return correct=true and an empty problemWords array."
       ].join(" ")
     },

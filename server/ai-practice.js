@@ -162,7 +162,8 @@ function sanitizeQuestion(value) {
     gradingStatus: ["correct", "partial", "incorrect"].includes(source.gradingStatus) ? source.gradingStatus : (correct === null ? "" : correct ? "correct" : "incorrect"),
     problemWords: sanitizeStringArray(source.problemWords),
     wordResults: sanitizeWordResults(source.wordResults),
-    explanation: cleanText(source.explanation, 180),
+    explanation: cleanText(source.explanation, 240),
+    detailedExplanation: cleanText(source.detailedExplanation, 320),
     answeredAt: cleanText(source.answeredAt, 40)
   };
 }
@@ -216,7 +217,8 @@ function sanitizeHistoryItem(value) {
     problemWords: sanitizeStringArray(source.problemWords),
     wordResults: sanitizeWordResults(source.wordResults),
     focus: safeQuestionFocus(english),
-    explanation: cleanText(source.explanation, 180)
+    explanation: cleanText(source.explanation, 240),
+    detailedExplanation: cleanText(source.detailedExplanation, 320)
   };
 }
 

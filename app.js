@@ -5,7 +5,7 @@
   const PRONUNCIATION = window.ENGLISH_PRONUNCIATION_DATA || { concepts: [], phonemes: [] };
   const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, sanitizeGeneratedSentenceVariant: () => null };
   const STUDY_TIME = window.ENGLISH_REVIEW_STUDY_TIME || {};
-  const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
+  const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const FALLBACK_DAILY_STUDY_PLAN = [
     { id: "review", label: "旧知识复习", minutes: 10, view: "home", actionLabel: "直接开始做题" },
     { id: "phonics", label: "拼读与词汇", minutes: 15, view: "pronunciation", actionLabel: "开始发音教学", allowBackground: true },
@@ -49,6 +49,7 @@
   const AI_EFFORT_LABELS = { low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高" };
   const MAX_CLIENT_TUTOR_HISTORY = 1000;
   const MAX_CLIENT_TUTOR_RESETS = 1000;
+  const MAX_CLIENT_PREVIEW_HISTORY = 30;
   const FOCUSED_TYPE_LABELS = { listening: "听力", choice: "选择", "fill-blank": "填空", "true-false": "判断", translation: "翻译", cloze: "完形填空", reading: "材料题", essay: "作文" };
   const DEFAULT_AI_TIMEOUT_MS = 30000;
   const AI_CLIENT_TIMEOUT_MS = 125000;
@@ -142,6 +143,7 @@
   let previewPracticeRetryTimer = null;
   let previewPracticeRetryKey = "";
   let previewPracticeStatusMessage = "";
+  let previewPracticeGradingInProgress = false;
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -660,7 +662,14 @@
         <span class="dictation-position">${position}</span>
         ${speechButtonHtml(item.english, `播放 ${item.english} 的发音`)}
         <div><strong>${escapeHtml(item.english)}</strong><div class="text-muted">${escapeHtml(item.phonetic || "")} · ${escapeHtml(item.chinese || "")}</div></div>
-        <div class="dictation-item-result ${item.correct ? "is-correct" : ""}"><strong>${item.correct ? "正确" : "错误"}</strong>你的答案：${escapeHtml(item.answer || "（未填写）")}</div>
+        <div class="dictation-item-result ${item.correct ? "is-correct" : "is-review"}">${gradingFeedbackHtml({
+          answer: item.answer,
+          referenceAnswer: item.english,
+          correct: item.correct === true,
+          gradingStatus: item.correct === true ? "correct" : "incorrect",
+          explanation: item.correct ? "听写拼写与参考单词一致。" : "听写拼写与参考单词不一致。",
+          detailedExplanation: item.correct ? "拼写完整，字母顺序与参考单词一致。" : buildTranslationExplanation({ direction: "zh-en", referenceAnswer: item.english, answer: item.answer, correct: false, explanation: "听写拼写与参考单词不一致。" })
+        })}</div>
       </div>`;
   }
 
@@ -690,7 +699,7 @@
         <summary><span>${escapeHtml(formatAiHistoryTime(session.completedAt || session.createdAt))}</span><strong>${session.score} / ${session.items.length}</strong></summary>
         <div class="dictation-history-body">
           <p>${escapeHtml(session.analysis && session.analysis.summary || "听写已完成。")}</p>
-          <div class="dictation-history-words">${session.items.map(item => `<span class="dictation-history-word ${item.correct ? "" : "is-wrong"}">${escapeHtml(item.english)} · ${escapeHtml(item.answer)}</span>`).join("")}</div>
+          <div class="dictation-history-words">${session.items.map(item => `<div class="dictation-history-word ${item.correct ? "" : "is-wrong"}"><strong>${escapeHtml(item.english)}</strong><span>你的答案：${escapeHtml(item.answer || "（未填写）")}</span>${item.correct ? `<span>判定说明：拼写完整，字母顺序正确。</span>` : `<span>参考答案：${escapeHtml(item.english)}</span><span>错误原因：${escapeHtml(buildTranslationExplanation({ direction: "zh-en", referenceAnswer: item.english, answer: item.answer, correct: false, explanation: "听写拼写与参考单词不一致。" }))}</span>`}</div>`).join("")}</div>
         </div>
       </details>`).join("");
   }
@@ -911,8 +920,15 @@
     const listening = question.type === "listening" ? `<div class="exam-listening-player"><button class="secondary-button" type="button" data-focused-listen="${escapeHtml(question.id)}" ${speechSynthesisAvailable() ? "" : "disabled"}><i data-lucide="volume-2" aria-hidden="true"></i><span>播放听力</span></button></div>` : "";
     const grade = completed && question.result ? `<div class="exam-question-result ${question.result.correct ? "is-correct" : "is-review"}">
       <strong>得分 ${question.result.score} / ${question.points}</strong>
-      ${question.result.explanation ? `<p>${escapeHtml(question.result.explanation)}</p>` : ""}
-      ${question.result.correctAnswer ? `<p><span>参考答案：</span>${escapeHtml(question.result.correctAnswer)}</p>` : ""}
+      <div class="exam-grading-feedback">${gradingFeedbackHtml({
+        answer: formatExamAnswer(question, answer),
+        referenceAnswer: question.result.correctAnswer,
+        correct: question.result.correct === true,
+        gradingStatus: Number(question.result.score) > 0 && Number(question.result.score) < Number(question.points) ? "partial" : question.result.correct ? "correct" : "incorrect",
+        score: Number(question.result.score) / Math.max(1, Number(question.points)),
+        explanation: question.result.explanation,
+        detailedExplanation: question.result.detailedExplanation
+      })}</div>
       ${question.transcript ? `<div class="exam-transcript"><span>听力原文</span><p><span class="inline-english">${escapeHtml(question.transcript)}${speechButtonHtml(question.transcript, "播放听力原文")}</span></p></div>` : ""}
     </div>` : "";
     return `<article class="exam-question" data-focused-question="${escapeHtml(question.id)}">
@@ -951,10 +967,19 @@
   function renderFocusedHistory() {
     const history = [...focusedState.history].reverse();
     $("#focusedHistorySummary").textContent = history.length ? `已完成 ${history.length} 次` : "暂无专项记录";
-    $("#focusedHistoryList").innerHTML = history.map(session => `<details class="ai-history-item">
+    $("#focusedHistoryList").innerHTML = history.map(session => {
+      const answers = session.answers || {};
+      const rows = (Array.isArray(session.questions) ? session.questions : []).map((question, index) => {
+        const result = question.result || {};
+        const answer = formatExamAnswer(question, answers[question.id]);
+        const detail = result.detailedExplanation || result.explanation || "未记录具体判题说明";
+        return `<article class="focused-history-question"><strong>${index + 1}. ${escapeHtml(question.typeLabel || question.focus || "专项题")}</strong><p>${escapeHtml(question.prompt || "（题目未记录）")}</p><dl class="ai-history-answers"><div><dt>你的答案</dt><dd>${escapeHtml(answer || "（未填写）")}</dd></div><div><dt>参考答案</dt><dd>${escapeHtml(result.correctAnswer || "（未记录）")}</dd></div><div><dt>${result.correct ? "判定说明" : "错误原因"}</dt><dd>${escapeHtml(detail)}</dd></div></dl></article>`;
+      }).join("");
+      return `<details class="ai-history-item">
       <summary><span>${escapeHtml(formatAiHistoryTime(session.completedAt || session.createdAt))} · ${escapeHtml(session.label)}</span><strong>${session.result && session.result.levelScore || 0} / 5</strong></summary>
-      <div class="focused-history-body"><p>${escapeHtml(session.result && session.result.summary || "专项训练已完成。")}</p></div>
-    </details>`).join("");
+      <div class="focused-history-body"><p>${escapeHtml(session.result && session.result.summary || "专项训练已完成。")}</p><div class="focused-history-questions">${rows}</div></div>
+    </details>`;
+    }).join("");
   }
 
   function renderFocusedView() {
@@ -1152,8 +1177,11 @@
     const answers = Object.fromEntries(Object.entries(source.answers && typeof source.answers === "object" ? source.answers : {}).slice(-100).map(([key, value]) => [String(key).slice(0, 160), String(value || "").slice(0, 500)]).filter(([key]) => taskIds.has(key)));
     const results = Object.fromEntries(Object.entries(source.results && typeof source.results === "object" ? source.results : {}).slice(-100).map(([key, value]) => {
       const result = value && typeof value === "object" ? value : {};
-      return [String(key).slice(0, 160), { correct: result.correct === true, score: Math.max(0, Math.min(1, Number(result.score) || 0)), gradingStatus: ["correct", "partial", "incorrect"].includes(result.gradingStatus) ? result.gradingStatus : (result.correct === true ? "correct" : "incorrect"), explanation: String(result.explanation || "").slice(0, 240), answeredAt: String(result.answeredAt || "").slice(0, 40) }];
+      const problemWords = Array.from(new Set((Array.isArray(result.problemWords) ? result.problemWords : []).map(word => String(word || "").trim().toLocaleLowerCase()).filter(Boolean))).slice(0, 12);
+      const wordResults = (Array.isArray(result.wordResults) ? result.wordResults : []).map(word => ({ english: String(word && word.english || "").trim().toLocaleLowerCase(), correct: word && word.correct === true, issue: String(word && word.issue || "").trim().slice(0, 40) })).filter(word => word.english).slice(0, 30);
+      return [String(key).slice(0, 160), { correct: result.correct === true, score: Math.max(0, Math.min(1, Number(result.score) || 0)), gradingStatus: ["correct", "partial", "incorrect"].includes(result.gradingStatus) ? result.gradingStatus : (result.correct === true ? "correct" : "incorrect"), explanation: String(result.explanation || "").slice(0, 240), detailedExplanation: String(result.detailedExplanation || "").slice(0, 320), problemWords, wordResults, source: ["ai", "local", "local-fallback"].includes(result.source) ? result.source : "", answeredAt: String(result.answeredAt || "").slice(0, 40) }];
     }).filter(([key]) => taskIds.has(key)));
+    const pending = Object.fromEntries(Object.entries(source.pending && typeof source.pending === "object" ? source.pending : {}).slice(-100).map(([key, value]) => [String(key).slice(0, 160), String(value || "").slice(0, 240)]).filter(([key]) => taskIds.has(key)));
     return {
       key: String(source.key || "").slice(0, 240),
       currentDay: Math.max(0, Number(source.currentDay) || 0),
@@ -1163,10 +1191,48 @@
       index: Math.max(0, Math.min(Number(source.index) || 0, tasks.length)),
       answers,
       results,
+      pending,
       completed: Boolean(source.completed),
+      roundId: String(source.roundId || "").slice(0, 180),
+      historyRecorded: Boolean(source.historyRecorded),
+      startedAt: String(source.startedAt || "").slice(0, 40),
       generatedAt: String(source.generatedAt || "").slice(0, 40),
       updatedAt: String(source.updatedAt || "").slice(0, 40)
     };
+  }
+
+  function normalizeClientPreviewPracticeHistory(value) {
+    return (Array.isArray(value) ? value : []).map(item => {
+      if (!item || typeof item !== "object") return null;
+      const normalized = normalizeClientPreviewPractice({
+        tasks: item.tasks,
+        answers: item.answers,
+        results: item.results
+      });
+      if (!normalized.tasks.length) return null;
+      const total = normalized.tasks.length;
+      const completed = normalized.tasks.filter(task => normalized.results[task.id]).length;
+      const correct = normalized.tasks.filter(task => normalized.results[task.id]?.correct).length;
+      const partial = normalized.tasks.filter(task => normalized.results[task.id]?.gradingStatus === "partial").length;
+      const score = Math.max(0, Math.min(100, Number(item.score) || Math.round(normalized.tasks.reduce((sum, task) => sum + (Number(normalized.results[task.id]?.score) || 0), 0) / total * 100)));
+      return {
+        id: String(item.id || "").trim().slice(0, 180),
+        key: String(item.key || "").slice(0, 240),
+        currentDay: Math.max(0, Number(item.currentDay) || 0),
+        nextDay: Math.max(0, Number(item.nextDay) || 0),
+        mode: ["mixed", "word", "sentence"].includes(item.mode) ? item.mode : "mixed",
+        tasks: normalized.tasks,
+        answers: normalized.answers,
+        results: normalized.results,
+        total,
+        completed,
+        correct,
+        partial,
+        score,
+        startedAt: String(item.startedAt || "").slice(0, 40),
+        completedAt: String(item.completedAt || "").slice(0, 40)
+      };
+    }).filter(item => item && item.id).slice(-MAX_CLIENT_PREVIEW_HISTORY);
   }
 
   function loadModel() {
@@ -1179,6 +1245,7 @@
     next.attempts = Array.isArray(next.attempts) ? next.attempts : [];
     next.sessions = Object.fromEntries(Object.entries(next.sessions && typeof next.sessions === "object" ? next.sessions : {}).map(([date, session]) => [date, normalizeClientReviewSession(session)]));
     next.previewPractice = normalizeClientPreviewPractice(next.previewPractice);
+    next.previewPracticeHistory = normalizeClientPreviewPracticeHistory(next.previewPracticeHistory);
     next.aiPractice = normalizeClientAiPractice(next.aiPractice);
     next.schema = 1;
     allItems.forEach(item => (item.directions || ["en-zh"]).forEach(direction => {
@@ -1234,10 +1301,17 @@
       attempts: [...(local.attempts || [])],
       mistakes: [...(local.mistakes || [])],
       previewPractice: normalizeClientPreviewPractice(local.previewPractice),
+      previewPracticeHistory: normalizeClientPreviewPracticeHistory(local.previewPracticeHistory),
       aiPractice: String(remote && remote.aiPractice && remote.aiPractice.updatedAt || "") >= String(local.aiPractice && local.aiPractice.updatedAt || "") ? normalizeClientAiPractice(remote.aiPractice) : normalizeClientAiPractice(local.aiPractice)
     };
     const remotePreviewPractice = normalizeClientPreviewPractice(remote && remote.previewPractice);
     if (remotePreviewPractice.updatedAt >= merged.previewPractice.updatedAt || (!merged.previewPractice.key && remotePreviewPractice.key)) merged.previewPractice = remotePreviewPractice;
+    const historyById = new Map(merged.previewPracticeHistory.map(item => [item.id, item]));
+    normalizeClientPreviewPracticeHistory(remote && remote.previewPracticeHistory).forEach(item => {
+      const existing = historyById.get(item.id);
+      if (!existing || String(item.completedAt || "") >= String(existing.completedAt || "")) historyById.set(item.id, item);
+    });
+    merged.previewPracticeHistory = Array.from(historyById.values()).sort((left, right) => String(left.completedAt || "").localeCompare(String(right.completedAt || ""))).slice(-MAX_CLIENT_PREVIEW_HISTORY);
     Object.entries(remoteTaskStates).forEach(([taskId, remoteState]) => {
       const localState = merged.taskStates[taskId];
       if (!localState || (remoteState.reviewCount || 0) >= (localState.reviewCount || 0) || String(remoteState.lastReviewed || "") > String(localState.lastReviewed || "")) merged.taskStates[taskId] = remoteState;
@@ -2181,11 +2255,11 @@
         const number = Number(item.questionNumber) || index + 1;
         return `<article class="ai-history-question">
           <div class="ai-history-question-meta"><span>第 ${number} 题 · ${formatDirection(item.direction)}</span><div class="ai-history-question-actions"><span class="ai-history-result ${item.gradingStatus === "partial" ? "is-partial" : item.correct === true ? "is-correct" : "is-wrong"}">${item.gradingStatus === "partial" ? "部分正确" : item.correct === true ? "正确" : "错误"}</span><button class="text-button ai-history-ask" type="button" data-ai-history-ask="${escapeHtml(item.id)}"><i data-lucide="message-circle-question" aria-hidden="true"></i>询问</button></div></div>
-          <div class="ai-history-prompt"><span class="inline-english">${escapeHtml(item.prompt || "（题目未记录）")}${item.direction === "en-zh" ? speechButtonHtml(item.prompt, "播放题目发音") : ""}</span></div>
-          <dl class="ai-history-answers">
+            <div class="ai-history-prompt"><span class="inline-english">${escapeHtml(item.prompt || "（题目未记录）")}${item.direction === "en-zh" ? speechButtonHtml(item.prompt, "播放题目发音") : ""}</span></div>
+            <dl class="ai-history-answers">
             <div><dt>你的答案</dt><dd>${escapeHtml(item.userAnswer || "（未填写）")}</dd></div>
-            <div><dt>正确答案</dt><dd><span class="inline-english">${escapeHtml(item.correctAnswer || "（未记录）")}${item.direction === "zh-en" ? speechButtonHtml(item.correctAnswer, "播放正确答案") : ""}</span></dd></div>
-            ${item.explanation ? `<div><dt>讲解</dt><dd>${escapeHtml(item.explanation)}</dd></div>` : ""}
+            <div><dt>参考答案</dt><dd><span class="inline-english">${escapeHtml(item.correctAnswer || "（未记录）")}${item.direction === "zh-en" ? speechButtonHtml(item.correctAnswer, "播放参考答案") : ""}</span></dd></div>
+            <div><dt>${item.correct === true && item.gradingStatus !== "partial" ? "判定说明" : "错误原因"}</dt><dd>${escapeHtml(item.detailedExplanation || buildTranslationExplanation({ direction: item.direction, referenceAnswer: item.correctAnswer, answer: item.userAnswer, correct: item.correct === true, gradingStatus: item.gradingStatus, explanation: item.explanation, problemWords: item.problemWords }))}</dd></div>
           </dl>
         </article>`;
       }).join("");
@@ -2211,7 +2285,16 @@
     feedback.hidden = false;
     const partial = question.gradingStatus === "partial";
     feedback.className = `feedback ${partial ? "is-partial" : question.correct ? "is-correct" : "is-wrong"}`;
-    feedback.innerHTML = `<span class="feedback-title">${partial ? "基本理解正确" : question.correct ? "答对了" : "再看一次"}</span><span class="feedback-answer"><span class="inline-english">正确答案：${escapeHtml(aiCorrectAnswer(question))}${question.direction === "zh-en" ? speechButtonHtml(aiCorrectAnswer(question), "播放正确答案") : ""}</span></span>${question.correct && !partial ? "" : `<span class="feedback-note">你的答案：${escapeHtml(question.userAnswer || "（未填写）")}</span>`}${partial ? `<span class="feedback-note">本题按 ${Math.round((Number(question.score) || 0.8) * 100)}% 记录，不会清空已有掌握等级。</span>` : ""}${question.explanation ? `<span class="feedback-note">${escapeHtml(question.explanation)}</span>` : ""}`;
+    feedback.innerHTML = gradingFeedbackHtml({
+      answer: question.userAnswer,
+      referenceAnswer: aiCorrectAnswer(question),
+      correct: question.correct,
+      gradingStatus: question.gradingStatus,
+      score: question.score,
+      explanation: question.explanation,
+      detailedExplanation: question.detailedExplanation || buildTranslationExplanation({ direction: question.direction, referenceAnswer: aiCorrectAnswer(question), answer: question.userAnswer, correct: question.correct, gradingStatus: question.gradingStatus, explanation: question.explanation, problemWords: question.problemWords }),
+      referenceExtraHtml: question.direction === "zh-en" ? speechButtonHtml(aiCorrectAnswer(question), "播放参考答案") : ""
+    });
     $("#aiFeedbackActions").hidden = false;
     requestAnimationFrame(() => $("#nextAiQuestion").focus({ preventScroll: true }));
   }
@@ -2417,6 +2500,11 @@
     return `${previewWordsState.currentDay}|${previewWordsState.nextDay}|${words.map(item => item.id).sort().join(",")}`;
   }
 
+  function newPreviewPracticeRoundId() {
+    const suffix = globalThis.crypto && typeof globalThis.crypto.randomUUID === "function" ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    return `preview-round-${suffix}`;
+  }
+
   function previewWordPracticeTasks(words) {
     return words.flatMap(word => ["en-zh", "zh-en"].map(direction => ({
       id: `preview-word-${word.id}-${direction}`,
@@ -2462,6 +2550,7 @@
     const stored = model.previewPractice;
     const current = normalizeClientPreviewPractice(stored);
     if (current.key === key && current.currentDay === Number(previewWordsState.currentDay) && current.nextDay === Number(previewWordsState.nextDay)) {
+      if (!current.roundId) current.roundId = newPreviewPracticeRoundId();
       if (stored && typeof stored === "object" && !Array.isArray(stored)) {
         Object.assign(stored, current);
         model.previewPractice = stored;
@@ -2479,7 +2568,11 @@
       index: 0,
       answers: {},
       results: {},
+      pending: {},
       completed: false,
+      roundId: newPreviewPracticeRoundId(),
+      historyRecorded: false,
+      startedAt: new Date().toISOString(),
       generatedAt: "",
       updatedAt: new Date().toISOString()
     };
@@ -2576,10 +2669,47 @@
   function previewPracticeGrade(task, answer) {
     if (task.direction === "en-zh") {
       const quality = chineseAnswerQuality(answer, task.acceptedChinese || [task.chinese]);
-      return { correct: quality.gradingStatus !== "incorrect", score: quality.score, gradingStatus: quality.gradingStatus, explanation: quality.gradingStatus === "partial" ? "意思基本正确，中文表达还可以更自然。" : quality.gradingStatus === "correct" ? "中文意思对应正确。" : "请对照词义或句意再想一遍。" };
+      const explanation = quality.gradingStatus === "partial" ? "意思基本正确，中文表达还可以更自然。" : quality.gradingStatus === "correct" ? "中文意思对应正确。" : "请对照词义或句意再想一遍。";
+      return { correct: quality.gradingStatus !== "incorrect", score: quality.score, gradingStatus: quality.gradingStatus, explanation, detailedExplanation: buildTranslationExplanation({ direction: task.direction, referenceAnswer: task.chinese, answer, correct: quality.gradingStatus !== "incorrect", gradingStatus: quality.gradingStatus, explanation }) };
     }
     const correct = englishAnswerMatches(answer, task.acceptedEnglish || [task.english]);
-    return { correct, score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", explanation: correct ? "英文拼写和句子结构正确。" : "请检查单词拼写、冠词和 be 动词。" };
+    const explanation = correct ? "英文拼写和句子结构正确。" : "请检查单词拼写、冠词和 be 动词。";
+    return { correct, score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", explanation, detailedExplanation: buildTranslationExplanation({ direction: task.direction, referenceAnswer: task.english, answer, correct, explanation }) };
+  }
+
+  function previewPracticeTaskPayload(task) {
+    return {
+      id: task.id,
+      kind: task.kind,
+      direction: task.direction,
+      wordId: task.wordId,
+      requiredPreviewWordIds: task.requiredPreviewWordIds,
+      english: task.english,
+      chinese: task.chinese
+    };
+  }
+
+  async function requestPreviewPracticeGrade(task, answer) {
+    const settings = selectedAiSettings();
+    const response = await fetch("/api/preview/practice/grade", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task: previewPracticeTaskPayload(task), answer, model: settings.model, reasoningEffort: settings.reasoningEffort })
+    });
+    const result = await responseJson(response);
+    if (typeof result.correct !== "boolean" || typeof result.explanation !== "string") throw new Error("AI 预习判题返回格式异常");
+    const referenceAnswer = task.direction === "zh-en" ? task.english : task.chinese;
+    return {
+      correct: result.correct,
+      score: Number.isFinite(Number(result.score)) ? Math.max(0, Math.min(1, Number(result.score))) : (result.correct ? 1 : 0),
+      gradingStatus: ["correct", "partial", "incorrect"].includes(result.gradingStatus) ? result.gradingStatus : (result.correct ? "correct" : "incorrect"),
+      explanation: result.explanation.trim(),
+      detailedExplanation: String(result.detailedExplanation || "").trim() || buildTranslationExplanation({ direction: task.direction, referenceAnswer, answer, correct: result.correct, gradingStatus: result.gradingStatus, explanation: result.explanation, problemWords: result.problemWords }),
+      problemWords: Array.isArray(result.problemWords) ? result.problemWords : [],
+      wordResults: Array.isArray(result.wordResults) ? result.wordResults : [],
+      source: result.source === "ai" ? "ai" : "local"
+    };
   }
 
   function showPreviewPracticeFormError(message) {
@@ -2606,6 +2736,68 @@
     feedback.hidden = true;
   }
 
+  function previewPracticeModeLabel(mode) {
+    return mode === "word" ? "只练单词" : mode === "sentence" ? "只练句子" : "单词 + 句子";
+  }
+
+  function recordPreviewPracticeHistory(state) {
+    if (!state || !state.completed || state.historyRecorded) return false;
+    const tasks = previewPracticeTasksForMode(state);
+    if (!tasks.length || tasks.some(task => !state.results[task.id])) return false;
+    const completedAt = new Date().toISOString();
+    const correct = tasks.filter(task => state.results[task.id]?.correct).length;
+    const partial = tasks.filter(task => state.results[task.id]?.gradingStatus === "partial").length;
+    const score = Math.round(tasks.reduce((sum, task) => sum + (Number(state.results[task.id]?.score) || 0), 0) / tasks.length * 100);
+    const entry = normalizeClientPreviewPracticeHistory([{
+      id: state.roundId || newPreviewPracticeRoundId(),
+      key: state.key,
+      currentDay: state.currentDay,
+      nextDay: state.nextDay,
+      mode: state.mode,
+      tasks,
+      answers: state.answers,
+      results: state.results,
+      total: tasks.length,
+      completed: tasks.length,
+      correct,
+      partial,
+      score,
+      startedAt: state.startedAt || completedAt,
+      completedAt
+    }])[0];
+    if (entry) model.previewPracticeHistory = normalizeClientPreviewPracticeHistory([...(model.previewPracticeHistory || []), entry]);
+    state.historyRecorded = true;
+    state.updatedAt = completedAt;
+    saveModel();
+    return Boolean(entry);
+  }
+
+  function renderPreviewPracticeHistory() {
+    const summary = $("#previewPracticeHistorySummary");
+    const list = $("#previewPracticeHistoryList");
+    if (!summary || !list) return;
+    const history = [...normalizeClientPreviewPracticeHistory(model.previewPracticeHistory)].reverse();
+    summary.textContent = history.length ? `已完成 ${history.length} 轮` : "暂无预习做题记录";
+    if (!history.length) {
+      list.innerHTML = '<p class="preview-history-empty">完成一轮预习练习后，题目、答案和判定会保存在这里。</p>';
+      return;
+    }
+    list.innerHTML = history.map(entry => {
+      const questionRows = entry.tasks.map((task, index) => {
+        const result = entry.results[task.id] || {};
+        const answer = entry.answers[task.id] || "（未填写）";
+        const reference = task.direction === "en-zh" ? task.chinese : task.english;
+        const prompt = task.direction === "en-zh" ? task.english : task.chinese;
+        const status = result.gradingStatus === "partial" ? "部分正确" : result.correct ? "正确" : "错误";
+        const statusClass = result.gradingStatus === "partial" ? "is-partial" : result.correct ? "is-correct" : "is-wrong";
+        const explanation = result.detailedExplanation || result.explanation || (result.correct ? "答案与参考答案一致。" : "请对照参考答案复习。");
+        return `<div class="preview-history-question ${statusClass}"><div class="preview-history-question-heading"><strong>${index + 1}. ${escapeHtml(task.kind === "word" ? "单词" : "句子")} · ${escapeHtml(task.direction === "en-zh" ? "英译中" : "中译英")}</strong><span>${status}</span></div><p class="preview-history-prompt">${escapeHtml(prompt)}</p><dl class="preview-history-answers"><div><dt>你的答案</dt><dd>${escapeHtml(answer)}</dd></div><div><dt>参考答案</dt><dd>${escapeHtml(reference)}</dd></div><div><dt>说明</dt><dd>${escapeHtml(explanation)}</dd></div></dl></div>`;
+      }).join("");
+      return `<details class="preview-history-group"><summary><div class="ai-history-group-main"><strong>第 ${entry.nextDay} 天预习 · ${escapeHtml(previewPracticeModeLabel(entry.mode))}</strong><span>${escapeHtml(formatAiHistoryTime(entry.completedAt, entry.startedAt))}</span></div><div class="ai-history-score"><strong>${entry.score} 分</strong><span>${entry.correct} / ${entry.total} 正确</span></div><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div class="preview-history-body"><p class="preview-history-summary">本轮 ${entry.total} 题：${entry.correct} 题正确${entry.partial ? `，${entry.partial} 题部分正确` : ""}。预习记录不会改变正式掌握等级。</p><div class="preview-history-questions">${questionRows}</div></div></details>`;
+    }).join("");
+    refreshIcons();
+  }
+
   function renderPreviewPractice() {
     const state = ensurePreviewPracticeState();
     const words = previewPracticeWords();
@@ -2629,12 +2821,15 @@
     }
     $("#previewPracticeProgress").textContent = tasks.length ? `${Math.min(state.index + (current ? 0 : 1), tasks.length)} / ${tasks.length}` : "0 / 0";
     if (state.completed) {
+      recordPreviewPracticeHistory(state);
       const completed = tasks.filter(task => state.results[task.id]).length;
       const correct = tasks.filter(task => state.results[task.id] && state.results[task.id].correct).length;
       $("#previewPracticeCompleteNote").textContent = `本轮完成：${correct} / ${completed} 题答对。预习结果仅用于熟悉词句，不会改变正式掌握等级。`;
     }
+    renderPreviewPracticeHistory();
     if (!current) { refreshIcons(); return; }
     const result = state.results[current.id];
+    const pending = state.pending[current.id];
     $("#previewPracticeType").textContent = current.kind === "word" ? "预习单词" : "预习句子";
     $("#previewPracticeDay").textContent = `第 ${state.nextDay} 天`;
     $("#previewPracticeCount").textContent = `${state.index + 1} / ${tasks.length}`;
@@ -2642,70 +2837,120 @@
     $("#previewPracticePrompt").textContent = current.direction === "en-zh" ? current.english : current.chinese;
     $("#previewPracticeSpeech").innerHTML = current.direction === "en-zh" ? speechButtonHtml(current.english, "播放预习题目发音") : "";
     const input = $("#previewPracticeInput");
-    input.value = result ? (state.answers[current.id] || "") : "";
+    input.value = state.answers[current.id] || "";
     input.placeholder = current.direction === "en-zh" ? "输入中文意思" : "输入英文翻译";
-    input.disabled = Boolean(result);
+    // Keep the answer field focusable after grading so Enter in the field can
+    // advance directly to the next preview question.
+    input.disabled = false;
+    input.readOnly = Boolean(result) || previewPracticeGradingInProgress;
     input.classList.remove("is-invalid");
     input.removeAttribute("aria-invalid");
-    $("#previewPracticeSubmit").disabled = Boolean(result);
+    $("#previewPracticeSubmit").disabled = Boolean(result) || previewPracticeGradingInProgress;
+    $("#previewPracticeSubmit").textContent = pending ? "重试判题" : "提交答案";
     const feedback = $("#previewPracticeFeedback");
     delete feedback.dataset.previewPracticeFormError;
-    feedback.hidden = !result;
+    feedback.hidden = !result && !pending;
     $("#previewPracticeNext").hidden = !result;
     if (result) {
       const expected = current.direction === "en-zh" ? current.chinese : current.english;
       feedback.className = `feedback ${result.gradingStatus === "partial" ? "is-partial" : result.correct ? "is-correct" : "is-wrong"}`;
-      feedback.innerHTML = `<span class="feedback-title">${result.gradingStatus === "partial" ? "基本理解正确" : result.correct ? "答对了" : "再看一次"}</span><span class="feedback-answer">参考答案：${escapeHtml(expected)}</span><span class="feedback-note">${escapeHtml(result.explanation || "")}</span>`;
+      feedback.innerHTML = gradingFeedbackHtml({
+        answer: state.answers[current.id],
+        referenceAnswer: expected,
+        correct: result.correct,
+        gradingStatus: result.gradingStatus,
+        score: result.score,
+        explanation: result.explanation,
+        detailedExplanation: result.detailedExplanation
+      });
+    } else if (pending) {
+      feedback.className = "feedback is-partial";
+      feedback.innerHTML = `<span class="feedback-title">等待 AI 判题</span><span class="feedback-note">你的答案：${escapeHtml(state.answers[current.id] || "（未填写）")}</span><span class="feedback-note">答案已保存，AI 恢复后点击“重试判题”。</span><span class="feedback-note">${escapeHtml(pending)}</span>`;
     } else {
       feedback.className = "feedback";
       feedback.innerHTML = "";
     }
-    requestAnimationFrame(() => { if (!result && activeView === "preview-practice") $("#previewPracticeInput")?.focus(); });
+    requestAnimationFrame(() => {
+      if (activeView !== "preview-practice") return;
+      const focusTarget = result ? $("#previewPracticeNext") : $("#previewPracticeInput");
+      focusTarget?.focus({ preventScroll: true });
+    });
     refreshIcons();
   }
 
   function setPreviewPracticeMode(mode) {
     if (!["mixed", "word", "sentence"].includes(mode)) return;
     const state = ensurePreviewPracticeState();
+    if (state.completed) recordPreviewPracticeHistory(state);
     state.mode = mode;
     state.index = 0;
+    state.answers = {};
+    state.results = {};
+    state.pending = {};
     state.completed = false;
+    state.historyRecorded = false;
+    state.roundId = newPreviewPracticeRoundId();
+    state.startedAt = new Date().toISOString();
     state.updatedAt = new Date().toISOString();
     saveModel();
     renderPreviewPractice();
   }
 
-  function submitPreviewPractice(event) {
+  async function submitPreviewPractice(event) {
     event.preventDefault();
     const input = $("#previewPracticeInput");
+    const state = ensurePreviewPracticeState();
+    const task = currentPreviewPracticeTask(state);
+    if (!task) {
+      showPreviewPracticeFormError("当前题目尚未准备好，请刷新预习内容后重试。");
+      return;
+    }
+    if (state.results[task.id] || previewPracticeGradingInProgress) {
+      renderPreviewPractice();
+      return;
+    }
+    const answer = String(input?.value || "").trim();
+    if (!answer) {
+      showPreviewPracticeFormError("请先输入答案");
+      input?.focus();
+      return;
+    }
+    clearPreviewPracticeFormError();
+    state.answers[task.id] = answer;
+    delete state.pending[task.id];
+    state.updatedAt = new Date().toISOString();
+    previewPracticeGradingInProgress = true;
+    renderPreviewPractice();
     try {
-      const state = ensurePreviewPracticeState();
-      const task = currentPreviewPracticeTask(state);
-      if (!task) {
-        showPreviewPracticeFormError("当前题目尚未准备好，请刷新预习内容后重试。");
-        return;
-      }
-      if (state.results[task.id]) {
-        renderPreviewPractice();
-        return;
-      }
-      const answer = String(input?.value || "").trim();
-      if (!answer) {
-        showPreviewPracticeFormError("请先输入答案");
-        input?.focus();
-        return;
-      }
-      clearPreviewPracticeFormError();
-      const grading = previewPracticeGrade(task, answer);
-      state.answers[task.id] = answer;
+      const grading = API_ENABLED ? await requestPreviewPracticeGrade(task, answer) : previewPracticeGrade(task, answer);
       state.results[task.id] = { ...grading, answeredAt: new Date().toISOString() };
+      delete state.pending[task.id];
       state.updatedAt = new Date().toISOString();
       saveModel();
-      renderPreviewPractice();
     } catch (error) {
-      console.error("Preview practice submission failed", error);
-      showPreviewPracticeFormError("提交失败，请刷新页面后重试。");
-      showToast("预习答案提交失败");
+      console.warn("Preview practice grading unavailable; answer retained", error);
+      state.pending[task.id] = error && error.message ? error.message : "AI 预习判题暂不可用，请稍后重试";
+      state.updatedAt = new Date().toISOString();
+      saveModel();
+      showToast(state.pending[task.id]);
+    } finally {
+      previewPracticeGradingInProgress = false;
+      renderPreviewPractice();
+    }
+  }
+
+  function handlePreviewPracticeEnter(event) {
+    if (!shouldSubmitOnEnter(event)) return;
+    event.preventDefault();
+    const state = ensurePreviewPracticeState();
+    const task = currentPreviewPracticeTask(state);
+    if (!task) return;
+    if (state.results[task.id]) {
+      advancePreviewPractice();
+      return;
+    }
+    if (event.currentTarget?.id === "previewPracticeInput") {
+      $("#previewPracticeForm").requestSubmit();
     }
   }
 
@@ -2717,6 +2962,23 @@
     state.index += 1;
     state.completed = state.index >= tasks.length;
     state.updatedAt = new Date().toISOString();
+    if (state.completed) recordPreviewPracticeHistory(state);
+    saveModel();
+    renderPreviewPractice();
+  }
+
+  function resetPreviewPracticeRound() {
+    const state = ensurePreviewPracticeState();
+    state.index = 0;
+    state.completed = false;
+    state.answers = {};
+    state.results = {};
+    state.pending = {};
+    state.roundId = newPreviewPracticeRoundId();
+    state.historyRecorded = false;
+    state.startedAt = new Date().toISOString();
+    state.updatedAt = new Date().toISOString();
+    previewPracticeStatusMessage = "已开始新一轮，继续使用当前这批预习词句。";
     saveModel();
     renderPreviewPractice();
   }
@@ -2908,8 +3170,15 @@
     const listening = question.type === "listening" ? `<div class="exam-listening-player"><button class="secondary-button" type="button" data-exam-listen="${escapeHtml(question.id)}" data-exam-id="${escapeHtml(examState.currentExam.id)}" ${speechSynthesisAvailable() ? "" : "disabled"}><i data-lucide="volume-2" aria-hidden="true"></i><span>播放听力</span></button></div>` : "";
     const grade = completed && question.result ? `<div class="exam-question-result ${question.result.correct ? "is-correct" : "is-review"}">
       <strong>得分 ${question.result.score} / ${question.points}</strong>
-      ${question.result.explanation ? `<p>${escapeHtml(question.result.explanation)}</p>` : ""}
-      ${question.result.correctAnswer ? `<p><span>参考答案：</span>${escapeHtml(question.result.correctAnswer)}</p>` : ""}
+      <div class="exam-grading-feedback">${gradingFeedbackHtml({
+        answer: formatExamAnswer(question, examState.currentExam.answers && examState.currentExam.answers[question.id]),
+        referenceAnswer: question.result.correctAnswer,
+        correct: question.result.correct === true,
+        gradingStatus: Number(question.result.score) > 0 && Number(question.result.score) < Number(question.points) ? "partial" : question.result.correct ? "correct" : "incorrect",
+        score: Number(question.result.score) / Math.max(1, Number(question.points)),
+        explanation: question.result.explanation,
+        detailedExplanation: question.result.detailedExplanation
+      })}</div>
       ${question.type === "listening" && question.transcript ? `<div class="exam-transcript"><span>听力原文</span><p><span class="inline-english">${escapeHtml(question.transcript)}${speechButtonHtml(question.transcript, "播放听力原文")}</span></p></div>` : ""}
     </div>` : "";
     return `<article class="exam-question" data-exam-question="${escapeHtml(question.id)}" tabindex="-1">
@@ -3057,7 +3326,7 @@
           <div class="exam-history-question-heading"><strong>${index + 1}. ${escapeHtml(question.typeLabel)}</strong><span>${question.result ? question.result.score : 0} / ${question.points}</span></div>
           <p>${escapeHtml(question.prompt)}</p>
           ${question.type === "listening" && question.transcript ? `<div class="exam-transcript"><span>听力原文</span><p>${escapeHtml(question.transcript)}</p><button class="text-button" type="button" data-exam-listen="${escapeHtml(question.id)}" data-exam-id="${escapeHtml(exam.id)}"><i data-lucide="volume-2" aria-hidden="true"></i>重听</button></div>` : question.sourceText ? `<div class="exam-source-text">${escapeHtml(question.sourceText)}</div>` : ""}
-          <dl class="ai-history-answers"><div><dt>你的答案</dt><dd>${escapeHtml(formatExamAnswer(question, exam.answers && exam.answers[question.id]) || "（未填写）")}</dd></div><div><dt>参考答案</dt><dd>${escapeHtml(question.result && question.result.correctAnswer || "（未记录）")}</dd></div>${question.result && question.result.explanation ? `<div><dt>讲解</dt><dd>${escapeHtml(question.result.explanation)}</dd></div>` : ""}</dl>
+          <dl class="ai-history-answers"><div><dt>你的答案</dt><dd>${escapeHtml(formatExamAnswer(question, exam.answers && exam.answers[question.id]) || "（未填写）")}</dd></div><div><dt>参考答案</dt><dd>${escapeHtml(question.result && question.result.correctAnswer || "（未记录）")}</dd></div><div><dt>${question.result && question.result.correct ? "判定说明" : "错误原因"}</dt><dd>${escapeHtml(question.result && (question.result.detailedExplanation || question.result.explanation) || "未记录具体判题说明")}</dd></div></dl>
         </article>`;
       }).join("");
       const modelLabel = [exam.providerName, exam.model, AI_EFFORT_LABELS[exam.reasoningEffort]].filter(Boolean).join(" · ");
@@ -4846,6 +5115,7 @@
         score: Number.isFinite(Number(result.score)) ? Math.max(0, Math.min(1, Number(result.score))) : (result.correct ? 1 : 0),
         gradingStatus: ["correct", "partial", "incorrect"].includes(result.gradingStatus) ? result.gradingStatus : (result.correct ? "correct" : "incorrect"),
         explanation: result.explanation.trim(),
+        detailedExplanation: String(result.detailedExplanation || "").trim() || buildTranslationExplanation({ direction: task.direction, referenceAnswer: correctAnswer(task), answer, correct: result.correct, gradingStatus: result.gradingStatus, explanation: result.explanation, problemWords: result.problemWords }),
         problemWords: Array.isArray(result.problemWords) ? result.problemWords : [],
         wordResults: Array.isArray(result.wordResults) ? result.wordResults : [],
         source: result.source === "ai" ? "ai" : "local"
@@ -4905,12 +5175,21 @@
         setGradingState(false);
       }
     }
-    grading = {
+      grading = {
       ...grading,
       score: Number.isFinite(Number(grading.score)) ? Math.max(0, Math.min(1, Number(grading.score))) : (correct ? 1 : 0),
       gradingStatus: ["correct", "partial", "incorrect"].includes(grading.gradingStatus) ? grading.gradingStatus : (correct ? "correct" : "incorrect"),
       problemWords: Array.isArray(grading.problemWords) ? grading.problemWords : [],
-      wordResults: Array.isArray(grading.wordResults) ? grading.wordResults : []
+      wordResults: Array.isArray(grading.wordResults) ? grading.wordResults : [],
+      detailedExplanation: String(grading.detailedExplanation || "").trim() || buildTranslationExplanation({
+        direction: task.direction,
+        referenceAnswer: correctAnswer(task),
+        answer,
+        correct,
+        gradingStatus: grading.gradingStatus,
+        explanation: grading.explanation,
+        problemWords: grading.problemWords
+      })
     };
     updateSchedule(task, correct, grading.gradingStatus, grading.score);
     const today = localDate();
@@ -4921,8 +5200,8 @@
     const attemptId = newReviewAttemptId();
     const submittedAt = new Date().toISOString();
     const prompt = task.direction === "en-zh" ? task.item.english : task.item.chinese;
-    model.attempts.push({ id: attemptId, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, submittedAt, direction: task.direction, prompt, english: task.item.english, chinese: task.item.chinese, answer, correct, score: grading.score, gradingStatus: grading.gradingStatus, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation, problemWords: grading.problemWords, wordResults: grading.wordResults });
-    if (!correct) model.mistakes = [...(model.mistakes || []), { id: `mistake-${attemptId}`, attemptId, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, direction: task.direction, day: task.item.day, prompt, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: grading.explanation || "本次复习未答对。" }].slice(-80);
+    model.attempts.push({ id: attemptId, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, submittedAt, direction: task.direction, prompt, english: task.item.english, chinese: task.item.chinese, answer, correct, score: grading.score, gradingStatus: grading.gradingStatus, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation, detailedExplanation: grading.detailedExplanation, problemWords: grading.problemWords, wordResults: grading.wordResults });
+    if (!correct) model.mistakes = [...(model.mistakes || []), { id: `mistake-${attemptId}`, attemptId, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, direction: task.direction, day: task.item.day, prompt, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: grading.detailedExplanation || grading.explanation || "本次复习未答对。" }].slice(-80);
     else model.mistakes = (model.mistakes || []).filter(mistake => !mistakeIsResolved(model.attempts, mistake && mistake.taskId));
     const session = getSession();
     session.currentTaskId = task.taskId;
@@ -4938,8 +5217,15 @@
     feedback.hidden = false;
     const partial = grading.gradingStatus === "partial";
     feedback.className = `feedback ${partial ? "is-partial" : correct ? "is-correct" : "is-wrong"}`;
-    feedback.innerHTML = `<span class="feedback-title">${partial ? "基本理解正确" : correct ? "答对了" : "再看一次"}</span><span class="feedback-answer">正确答案：${escapeHtml(correctAnswer(task))}</span>${correct && !partial ? "" : `<span class="feedback-note">你的答案：${escapeHtml(answer || "（未填写）")}</span>`}${partial ? `<span class="feedback-note">本题按 ${Math.round((Number(grading.score) || 0.8) * 100)}% 记录，不会清空已有掌握等级。</span>` : ""}`;
-    if (grading.explanation) feedback.insertAdjacentHTML("beforeend", `<span class="feedback-note">${escapeHtml(grading.explanation)}</span>`);
+    feedback.innerHTML = gradingFeedbackHtml({
+      answer,
+      referenceAnswer: correctAnswer(task),
+      correct,
+      gradingStatus: grading.gradingStatus,
+      score: grading.score,
+      explanation: grading.explanation,
+      detailedExplanation: grading.detailedExplanation
+    });
     $("#answerInput").disabled = true;
     $("#submitAnswer").disabled = true;
     $("#feedbackActions").hidden = false;
@@ -4948,6 +5234,15 @@
   }
 
   function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", "\"": "&quot;" }[char])); }
+
+  function gradingFeedbackHtml({ answer = "", referenceAnswer = "", correct = false, gradingStatus = "incorrect", score = 0, explanation = "", detailedExplanation = "", referenceExtraHtml = "" } = {}) {
+    const partial = gradingStatus === "partial";
+    const title = partial ? "基本理解正确" : correct ? "答对了" : "再看一次";
+    const detail = String(detailedExplanation || explanation || (correct ? "答案与参考答案一致，关键信息完整。" : "答案与参考答案不一致，请对照参考答案逐项检查。")).trim();
+    const detailLabel = partial || !correct ? "错误原因" : "判定说明";
+    const scoreNote = partial ? `<span class="feedback-note">本题按 ${Math.round((Number(score) || 0.8) * 100)}% 记录，不会清空已有掌握等级。</span>` : "";
+    return `<span class="feedback-title">${title}</span><span class="feedback-note">你的答案：${escapeHtml(answer || "（未填写）")}</span><span class="feedback-answer">参考答案：${escapeHtml(referenceAnswer || "（未记录）")}${referenceExtraHtml}</span>${scoreNote}<span class="feedback-note">${detailLabel}：${escapeHtml(detail)}</span>`;
+  }
 
   function advance(retry = false) {
     reviewAnswerResetRequested = true;
@@ -5390,7 +5685,10 @@
     $$('[data-preview-practice-mode]').forEach(button => button.addEventListener("click", () => setPreviewPracticeMode(button.dataset.previewPracticeMode)));
     $("#previewPracticeForm").addEventListener("submit", submitPreviewPractice);
     $("#previewPracticeInput").addEventListener("input", clearPreviewPracticeFormError);
+    $("#previewPracticeInput").addEventListener("keydown", handlePreviewPracticeEnter);
     $("#previewPracticeNext").addEventListener("click", advancePreviewPractice);
+    $("#previewPracticeNext").addEventListener("keydown", handlePreviewPracticeEnter);
+    $("#previewPracticeAgain").addEventListener("click", resetPreviewPracticeRound);
     $("#aiModelSelect").addEventListener("change", event => {
       aiStatusMessage = "";
       updateAiPreferences({ model: event.target.value });
@@ -5572,7 +5870,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=49", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=51", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

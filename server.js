@@ -5,7 +5,7 @@ const vm = require("vm");
 const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
-const { chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
+const { buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
 const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
@@ -26,7 +26,7 @@ const {
   sanitizeReviewVariantPool,
   storeReviewVariantPoolResults
 } = require("./server/review-variant-pool");
-const { sanitizePreviewPractice } = require("./server/preview-practice");
+const { sanitizePreviewPractice, sanitizePreviewPracticeHistory } = require("./server/preview-practice");
 const { repairLearningEvidence } = require("./server/evidence-repair");
 const { normalizeStudyTime } = require("./study-time");
 const {
@@ -203,6 +203,7 @@ function sanitizeState(value) {
     mistakes: Array.isArray(source.mistakes) ? source.mistakes.slice(-80) : [],
     studyTime: normalizeStudyTime(source.studyTime),
     previewPractice: sanitizePreviewPractice(source.previewPractice),
+    previewPracticeHistory: sanitizePreviewPracticeHistory(source.previewPracticeHistory),
     aiPractice: sanitizeAiPractice(source.aiPractice),
     aiExam: sanitizeAiExamState(source.aiExam),
     dictation: sanitizeDictationState(source.dictation),
@@ -760,6 +761,111 @@ async function handlePreviewPracticeSentences(req, res, user) {
       reasonCode: failure.reasonCode,
       providerStatus: failure.providerStatus
     }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
+  }
+}
+
+function previewWordsForPracticeGrade() {
+  const currentDay = Number(content.currentDay) || 1;
+  const nextDay = currentDay + 1;
+  const learnedEnglish = new Set(content.words.filter(item => !item.preview).map(item => String(item.english || "").toLocaleLowerCase()).filter(Boolean));
+  const words = content.words.filter(item => item.preview === true
+    && Number(item.day) === nextDay
+    && !String(item.learned || "").trim()
+    && !learnedEnglish.has(String(item.english || "").toLocaleLowerCase()));
+  return { currentDay, nextDay, words };
+}
+
+function previewPracticeGradeTask(rawTask, previewData) {
+  const source = rawTask && typeof rawTask === "object" ? rawTask : {};
+  const direction = source.direction === "zh-en" ? "zh-en" : source.direction === "en-zh" ? "en-zh" : "";
+  const kind = source.kind === "word" ? "word" : source.kind === "sentence" ? "sentence" : "";
+  const wordId = String(source.wordId || "").trim();
+  const target = previewData.words.find(item => item.id === wordId);
+  if (!direction || !kind || !wordId || !target) return null;
+  if (kind === "word") {
+    return {
+      id: String(source.id || `preview-word-${wordId}-${direction}`).trim().slice(0, 160),
+      kind,
+      direction,
+      wordId,
+      english: target.english,
+      chinese: target.chinese,
+      acceptedEnglish: [target.english],
+      acceptedChinese: Array.from(new Set([target.chinese, ...(Array.isArray(target.acceptedChinese) ? target.acceptedChinese : [])])).slice(0, 8)
+    };
+  }
+
+  const english = String(source.english || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+  const chinese = String(source.chinese || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+  const requiredIds = Array.from(new Set((Array.isArray(source.requiredPreviewWordIds) ? source.requiredPreviewWordIds : []).map(value => String(value || "").trim()).filter(Boolean)));
+  if (!english || !chinese || !requiredIds.includes(wordId)) return null;
+  const learnedWords = content.words
+    .filter(item => !item.preview && item.learned && String(item.learned) <= today())
+    .flatMap(item => previewEnglishTokens(item.english));
+  const allowedWords = new Set([...learnedWords, ...previewData.words.flatMap(item => previewEnglishTokens(item.english))]);
+  const tokens = previewEnglishTokens(english);
+  const targetTokens = previewEnglishTokens(target.english);
+  if (!tokens.length || tokens.some(token => !allowedWords.has(token)) || !targetTokens.every(token => tokens.includes(token))) return null;
+  return {
+    id: String(source.id || `preview-sentence-${wordId}`).trim().slice(0, 160),
+    kind,
+    direction,
+    wordId,
+    requiredPreviewWordIds: [wordId],
+    english,
+    chinese,
+    acceptedEnglish: [english],
+    acceptedChinese: [chinese]
+  };
+}
+
+async function handlePreviewPracticeGrade(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "POST") return sendError(res, 404, "preview practice grade endpoint not found");
+  const unavailable = (message = "AI 预习判题暂不可用，答案已保存，请稍后重试") => sendJson(res, 503, { error: message, retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
+  try {
+    refreshContent();
+    const previewData = previewWordsForPracticeGrade();
+    const body = await readBody(req);
+    const task = previewPracticeGradeTask(body.task, previewData);
+    if (!task) return sendError(res, 400, "预习题目已失效或不属于当前下一天预习内容");
+    const answer = String(body.answer || "").trim();
+    if (!answer) return sendError(res, 400, "answer is required");
+    if (answer.length > MAX_AI_ANSWER_LENGTH) return sendError(res, 400, "answer is too long");
+    const acceptedAnswers = task.direction === "zh-en" ? task.acceptedEnglish : task.acceptedChinese;
+    const localGrade = localTranslationGrade(task.direction, task.english, answer, acceptedAnswers);
+    if (localGrade) {
+      return sendJson(res, 200, {
+        ...localGrade,
+        referenceAnswer: task.direction === "zh-en" ? task.english : task.chinese,
+        detailedExplanation: localGrade.detailedExplanation || buildTranslationExplanation({
+          direction: task.direction,
+          referenceAnswer: task.direction === "zh-en" ? task.english : task.chinese,
+          answer,
+          correct: localGrade.correct,
+          gradingStatus: localGrade.gradingStatus,
+          explanation: localGrade.explanation
+        })
+      });
+    }
+    if (!aiConfigured()) return unavailable("AI 尚未配置，答案已保存；配置完成后可重试判题");
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) return sendJson(res, 429, { error: "AI 请求过于频繁，答案已保存，请稍后重试", retryAfterMs: rate.retryAfterSeconds * 1000 }, { "Retry-After": String(rate.retryAfterSeconds) });
+    const state = getUserState(user);
+    const selection = aiSelectionForState(state, body);
+    persistUserStates();
+    const sourceText = task.direction === "zh-en" ? task.chinese : task.english;
+    const routed = await runAiRoute(selection.route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: task.direction, sourceText }));
+    const referenceAnswer = task.direction === "zh-en" ? task.english : task.chinese;
+    return sendJson(res, 200, {
+      ...completeTranslationGrade(task.direction, task.english, answer, routed.value, referenceAnswer),
+      referenceAnswer,
+      source: "ai"
+    });
+  } catch (error) {
+    if (error && [400, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
+    console.warn(`AI preview practice grading failed; answer will remain saved: ${error && error.message ? error.message : "unknown error"}`);
+    return unavailable("AI 预习判题暂不可用，答案已保存，请稍后重试");
   }
 }
 
@@ -1784,28 +1890,39 @@ function aiQuestionMatches(question, answer) {
 function localTranslationGrade(direction, english, answer, acceptedAnswers) {
   if (direction === "zh-en") {
     if (!englishAnswerMatches(answer, acceptedAnswers)) return null;
-    return { correct: true, score: 1, gradingStatus: "correct", explanation: "本地规则已接受这个答案。", problemWords: [], wordResults: englishWordResults(english, answer), source: "local" };
+    const explanation = "本地规则已接受这个答案。";
+    return { correct: true, score: 1, gradingStatus: "correct", explanation, detailedExplanation: buildTranslationExplanation({ direction, referenceAnswer: acceptedAnswers[0] || english, answer, correct: true, explanation }), problemWords: [], wordResults: englishWordResults(english, answer), source: "local" };
   }
   const quality = chineseAnswerQuality(answer, acceptedAnswers);
   if (!quality.correct) return null;
   const partial = quality.gradingStatus === "partial";
+  const explanation = partial ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。" : "本地规则已接受这个答案。";
   return {
     ...quality,
-    explanation: partial ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。" : "本地规则已接受这个答案。",
+    explanation,
+    detailedExplanation: buildTranslationExplanation({ direction, referenceAnswer: acceptedAnswers[0] || "", answer, correct: true, gradingStatus: quality.gradingStatus, explanation }),
     problemWords: [],
     wordResults: englishSourceWordResults(english, true),
     source: "local"
   };
 }
 
-function completeTranslationGrade(direction, english, answer, result) {
+function completeTranslationGrade(direction, english, answer, result, referenceAnswer = "") {
   const score = Number.isFinite(Number(result.score)) ? Math.max(0, Math.min(1, Number(result.score))) : (result.correct ? 1 : 0);
   const gradingStatus = ["correct", "partial", "incorrect"].includes(result.gradingStatus) ? result.gradingStatus : (result.correct ? "correct" : "incorrect");
   const problemWords = Array.isArray(result.problemWords) ? result.problemWords : [];
   const wordResults = direction === "zh-en"
     ? englishWordResults(english, answer)
     : englishSourceWordResults(english, result.correct, problemWords);
-  return { ...result, score, gradingStatus, problemWords, wordResults };
+  const expected = referenceAnswer || (direction === "zh-en" ? english : String(result.referenceAnswer || ""));
+  return {
+    ...result,
+    score,
+    gradingStatus,
+    problemWords,
+    wordResults,
+    detailedExplanation: result.detailedExplanation || buildTranslationExplanation({ direction, referenceAnswer: expected, answer, correct: result.correct === true, gradingStatus, explanation: result.explanation, problemWords })
+  };
 }
 
 function saveAiQuestionResult(state, setId, questionId, answer, result) {
@@ -1815,6 +1932,16 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
   const question = set.questions.find(item => item.id === questionId);
   if (!question) throw Object.assign(new Error("AI question not found"), { statusCode: 404 });
   const now = new Date().toISOString();
+  const correctAnswer = question.direction === "zh-en" ? question.english : question.chinese;
+  const detailedExplanation = result.detailedExplanation || buildTranslationExplanation({
+    direction: question.direction,
+    referenceAnswer: correctAnswer,
+    answer,
+    correct: result.correct === true,
+    gradingStatus: result.gradingStatus,
+    explanation: result.explanation,
+    problemWords: result.problemWords
+  });
   question.userAnswer = answer;
   question.correct = result.correct;
   question.score = result.score;
@@ -1822,9 +1949,9 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
   question.problemWords = result.problemWords;
   question.wordResults = result.wordResults;
   question.explanation = result.explanation;
+  question.detailedExplanation = detailedExplanation;
   question.answeredAt = now;
   const prompt = question.direction === "en-zh" ? question.english : question.chinese;
-  const correctAnswer = question.direction === "zh-en" ? question.english : question.chinese;
   const historyId = `${set.id}:${question.id}`;
   const questionNumber = set.questions.findIndex(item => item.id === question.id) + 1;
   practice.history = [...practice.history.filter(item => item.id !== historyId), {
@@ -1849,7 +1976,8 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
     problemWords: result.problemWords,
     wordResults: result.wordResults,
     focus: question.focus,
-    explanation: result.explanation
+    explanation: result.explanation,
+    detailedExplanation
   }].slice(-MAX_AI_HISTORY);
   practice.updatedAt = now;
   state.aiPractice = practice;
@@ -1885,7 +2013,7 @@ async function handleAiGrade(req, res, user) {
     persistUserStates();
     const sourceText = task.direction === "zh-en" ? task.item.chinese : task.item.english;
     const routed = await runAiRoute(selection.route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: task.direction, sourceText }));
-    return sendJson(res, 200, { ...completeTranslationGrade(task.direction, task.item.english, answer, routed.value), source: "ai" });
+    return sendJson(res, 200, { ...completeTranslationGrade(task.direction, task.item.english, answer, routed.value, task.direction === "zh-en" ? task.item.english : (task.item.chinese || acceptedAnswers[0])), source: "ai" });
   } catch (error) {
     if (error && [400, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI grading failed: ${error && error.message ? error.message : "unknown error"}`);
@@ -2119,7 +2247,7 @@ async function handleAiQuestionGrade(req, res, user) {
       const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: set.reasoningEffort });
       const sourceText = question.direction === "zh-en" ? question.chinese : question.english;
       const routed = await runAiRoute(route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: question.direction, sourceText }));
-      result = { ...completeTranslationGrade(question.direction, question.english, answer, routed.value), source: "ai" };
+      result = { ...completeTranslationGrade(question.direction, question.english, answer, routed.value, question.direction === "zh-en" ? question.english : question.chinese), source: "ai" };
     }
     const savedQuestion = saveAiQuestionResult(state, set.id, question.id, answer, result);
     return sendJson(res, 200, { ...result, question: savedQuestion, practice: state.aiPractice });
@@ -2608,6 +2736,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/ai/options" && req.method === "GET") return user ? sendJson(res, 200, publicAiOptions(user)) : sendError(res, 401, "login required");
   if (url.pathname === "/api/preview/words") return handlePreviewWords(req, res, user);
   if (url.pathname === "/api/preview/practice/sentences") return handlePreviewPracticeSentences(req, res, user);
+  if (url.pathname === "/api/preview/practice/grade") return handlePreviewPracticeGrade(req, res, user);
   if (url.pathname === "/api/preview") return handlePreview(req, res, user);
   if (url.pathname === "/api/abilities") return handleAbilities(req, res, user);
   if (url.pathname === "/api/review/sentence-variants") return handleReviewSentenceVariants(req, res, user);
