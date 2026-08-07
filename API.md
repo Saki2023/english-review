@@ -49,6 +49,16 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | GET | `/api/export` | 导出当前账号的词库和复习记录，需要登录 |
 | GET | `/api/sync/profile?username=账号名` | 获取供本地学习窗口使用的学习档案，需要只读同步令牌 |
 | PUT | `/api/sync/teaching-profile?username=账号名` | 上传本地教学档案，需要独立的教学写入令牌 |
+| PUT | `/api/sync/self-study-lessons?username=账号名` | 幂等上传出门完整自学课程包，需要独立的教学写入令牌 |
+| GET | `/api/self-study` | 获取当前账号的出门自学模式、顺序解锁状态和当前唯一步骤；不返回未作答参考答案 |
+| POST | `/api/self-study/mode` | 手动开启或关闭出门自学模式 |
+| POST | `/api/self-study/start` | 开始当前顺序解锁课程，开始后固定课程版本快照 |
+| PUT | `/api/self-study/draft` | 保存当前步骤未提交草稿和活动时间 |
+| POST | `/api/self-study/submit` | 使用稳定 `attemptId` 提交教学确认或答案；错答保留原题并要求订正 |
+| POST | `/api/self-study/continue` | 正确反馈显示后，使用稳定 `continueId` 进入下一步骤 |
+| POST | `/api/self-study/pause` | 保存当前步骤并暂停，不把未作答记错 |
+| POST | `/api/self-study/resume` | 从原课程、阶段、步骤继续 |
+| POST | `/api/self-study/question` | 对当前步骤提问；不计错且不得泄露后续答案 |
 | GET | `/api/preview` | 获取当前账号最新及近期预习，需要登录 |
 | GET | `/api/preview/words` | 获取当前课程紧邻下一天的未学预习词，需要登录 |
 | POST | `/api/preview/practice/sentences` | 按当前预习词生成预习句子练习，需要登录及已配置的 AI |
@@ -72,7 +82,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | POST | `/api/ai/focused/listening` | 获取听力专项的受控英文朗读文本，需要登录 |
 | POST | `/api/ai/focused/submit` | 完成专项后统一分析，需要登录 |
 
-登录和复习状态使用 HTTP-only Cookie。网页不提供注册接口，账号只能在服务器终端创建。普通内容新增、修改、删除只允许管理员账号，或使用服务器配置的 `API_TOKEN`。本地学习档案使用由 `API_TOKEN` 派生的只读令牌；独立的教学写入令牌只能上传教学档案，以及通过 `PUT /api/content/batch` 幂等同步每日词句和结构化笔记，不能调用其他管理接口。
+登录和复习状态使用 HTTP-only Cookie。网页不提供注册接口，账号只能在服务器终端创建。普通内容新增、修改、删除只允许管理员账号，或使用服务器配置的 `API_TOKEN`。本地学习档案使用由 `API_TOKEN` 派生的只读令牌；独立的教学写入令牌只能上传教学档案、通过 `PUT /api/content/batch` 幂等同步每日词句和结构化笔记，以及向指定账号上传完整自学课程包，不能调用其他管理接口。课程包格式和状态边界见 [自学课程格式.md](自学课程格式.md)。
 
 ## 创建账号
 

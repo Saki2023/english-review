@@ -4,6 +4,7 @@
   [string]$SyncToken = "",
   [string]$WriteToken = "",
   [string]$ConfigPath = "",
+  [string]$SelfStudyCoursePath = "",
   [string]$OutputPath = "",
   [string]$StatusPath = "",
   [switch]$PreviewPracticeOnly,
@@ -14,6 +15,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $workspaceRoot = Split-Path -Parent $repoRoot
 $sharedDirectory = Join-Path $workspaceRoot "学习同步"
+if (-not $SelfStudyCoursePath) { $SelfStudyCoursePath = Join-Path $sharedDirectory "网站自学课程.json" }
 
 if (-not $ConfigPath) { $ConfigPath = Join-Path $sharedDirectory ".sync.env" }
 if (-not $OutputPath) {
@@ -66,6 +68,8 @@ $syncStatus = [ordered]@{
   teachingUploadSuccess = $null
   courseUploadAttempted = $false
   courseUploadSuccess = $null
+  selfStudyUploadAttempted = $false
+  selfStudyUploadSuccess = $null
   uploadSuccess = $null
   downloadAttempted = $false
   downloadSuccess = $false
@@ -440,7 +444,32 @@ if ($WriteToken) {
   } else {
     Write-Warning "未找到 学习同步\网站课程内容.json，本次未更新词句库。"
   }
-  $syncStatus.uploadSuccess = ([bool]$syncStatus.teachingUploadSuccess -and (-not [bool]$syncStatus.courseUploadAttempted -or [bool]$syncStatus.courseUploadSuccess))
+
+  if (Test-Path -LiteralPath $SelfStudyCoursePath) {
+    $syncStatus.selfStudyUploadAttempted = $true
+    try {
+      $selfStudyJson = [IO.File]::ReadAllText($SelfStudyCoursePath, [Text.Encoding]::UTF8)
+      $null = $selfStudyJson | ConvertFrom-Json
+      $selfStudyUri = "$base/api/sync/self-study-lessons?username=$encodedUsername"
+      $selfStudyUpload = Invoke-SyncRequest -Phase "上传完整自学课程" -Method Put -Uri $selfStudyUri -Headers $writeHeaders -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($selfStudyJson))
+      $syncStatus.selfStudyUploadSuccess = [bool]$selfStudyUpload.success
+      if ($selfStudyUpload.success) {
+        $selfStudyResult = $selfStudyUpload.value
+        Write-Host "完整自学课程已同步：本次接收 $($selfStudyResult.received) 天，网站共保存 $($selfStudyResult.lessons) 天；已开始课程继续使用原版本快照 $($selfStudyResult.activeSnapshotsRetained) 天。"
+      } else {
+        Add-SyncError "upload-self-study-lessons" $selfStudyUpload.error $selfStudyUpload.attempts
+        Write-Warning "完整自学课程上传失败：$($selfStudyUpload.error.message) 下载网站档案仍会继续。"
+      }
+    } catch {
+      $syncStatus.selfStudyUploadSuccess = $false
+      $localError = New-LocalSyncError "准备完整自学课程失败：$($_.Exception.Message)"
+      Add-SyncError "prepare-self-study-lessons" $localError 1
+      Write-Warning $localError.message
+    }
+  } else {
+    Write-Host "未找到 学习同步\网站自学课程.json，本次不更新出门自学课程。"
+  }
+  $syncStatus.uploadSuccess = ([bool]$syncStatus.teachingUploadSuccess -and (-not [bool]$syncStatus.courseUploadAttempted -or [bool]$syncStatus.courseUploadSuccess) -and (-not [bool]$syncStatus.selfStudyUploadAttempted -or [bool]$syncStatus.selfStudyUploadSuccess))
 } else {
   if ($PreviewPracticeOnly) {
     Write-Host "仅同步预习练习：本次只下载已完成记录，不上传课程、笔记、进度或错题。"
@@ -508,6 +537,16 @@ if ($downloadResult.success) {
       previewPracticePartiallyCorrect = if ($profileSummary) { [int]$profileSummary.previewPracticePartiallyCorrect } else { 0 }
       previewPracticeIncorrect = if ($profileSummary) { [int]$profileSummary.previewPracticeIncorrect } else { 0 }
       previewPracticeAverageScore = if ($profileSummary -and $null -ne $profileSummary.previewPracticeAverageScore) { [int]$profileSummary.previewPracticeAverageScore } else { $null }
+      selfStudyCompletedLessons = if ($profileSummary) { [int]$profileSummary.selfStudyCompletedLessons } else { 0 }
+      selfStudyCurrentLessonId = if ($profileSummary) { [string]$profileSummary.selfStudyCurrentLessonId } else { "" }
+      selfStudyCurrentStageId = if ($profileSummary) { [string]$profileSummary.selfStudyCurrentStageId } else { "" }
+      selfStudyCurrentStepId = if ($profileSummary) { [string]$profileSummary.selfStudyCurrentStepId } else { "" }
+      selfStudyFormalAttempts = if ($profileSummary) { [int]$profileSummary.selfStudyFormalAttempts } else { 0 }
+      selfStudyFirstCorrect = if ($profileSummary) { [int]$profileSummary.selfStudyFirstCorrect } else { 0 }
+      selfStudyCorrections = if ($profileSummary) { [int]$profileSummary.selfStudyCorrections } else { 0 }
+      selfStudyUnattempted = if ($profileSummary) { [int]$profileSummary.selfStudyUnattempted } else { 0 }
+      selfStudyPending = if ($profileSummary) { [int]$profileSummary.selfStudyPending } else { 0 }
+      selfStudyLastStudiedAt = if ($profileSummary) { [string]$profileSummary.selfStudyLastStudiedAt } else { "" }
       exams = if ($profileSummary) { [int]$profileSummary.exams } else { 0 }
       latestExamScore = if ($profileSummary) { $profileSummary.latestExamScore } else { $null }
       latestExamPossible = if ($profileSummary) { $profileSummary.latestExamPossible } else { $null }
@@ -531,6 +570,7 @@ if ($downloadResult.success) {
     Write-Host "网站 AI 做题：$($profile.summary.aiQuestions) 题，正确率 $($profile.summary.aiAccuracy)%"
     Write-Host "网站 AI 问答：$($profile.summary.tutorQuestions) 次"
     Write-Host "网站预习练习：$($profile.summary.previewPracticeRounds) 轮、$($profile.summary.previewPracticeQuestions) 题（完全正确 $($profile.summary.previewPracticeFullyCorrect)、部分正确 $($profile.summary.previewPracticePartiallyCorrect)、错误 $($profile.summary.previewPracticeIncorrect)；仅供预习回顾，不计入正式能力）。"
+    Write-Host "出门自学课程：已完成 $($profile.summary.selfStudyCompletedLessons) 天；当前课程/阶段/步骤：$($profile.summary.selfStudyCurrentLessonId) / $($profile.summary.selfStudyCurrentStageId) / $($profile.summary.selfStudyCurrentStepId)；正式作答 $($profile.summary.selfStudyFormalAttempts) 次、首次答对 $($profile.summary.selfStudyFirstCorrect) 次、订正 $($profile.summary.selfStudyCorrections) 次、未作答 $($profile.summary.selfStudyUnattempted) 项、待判 $($profile.summary.selfStudyPending) 项。"
     if ($profile.summary.exams -gt 0) {
       Write-Host "网站试卷：$($profile.summary.exams) 份，最近 $($profile.summary.latestExamScore)/$($profile.summary.latestExamPossible) 分，平均百分比 $($profile.summary.examAveragePercentage)%"
     } else {

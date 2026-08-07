@@ -31,6 +31,10 @@ test("sync center provides a safe visible report and headless entry point", () =
   assert.doesNotMatch(script, /if \(\$exitCode -eq 0 -and \$profileAvailable\) \{ \$downloadedFiles/);
   assert.match(script, /网站课程内容\.json/);
   assert.match(script, /"网站课程内容"/);
+  assert.match(script, /网站自学课程\.json/);
+  assert.match(script, /"完整自学课程"/);
+  assert.match(script, /selfStudyUploadAttempted/);
+  assert.match(script, /selfStudyUploadSuccess/);
   assert.match(script, /courseDay/);
   assert.match(script, /coursePreviewWords/);
   assert.match(script, /previewPracticeRounds/);
@@ -42,6 +46,7 @@ test("sync center provides a safe visible report and headless entry point", () =
   assert.match(script, /Where-Object \{ \$_\.mode -ne "preview-practice" -and \$_\.mode -ne "dry-run" \}/);
   assert.match(script, /课程：第 \$\(\$summary\.courseDay\) 天/);
   assert.match(script, /预习练习：\$\(\$summary\.previewPracticeRounds\) 轮/);
+  assert.match(script, /出门自学：完成 \$\(\$summary\.selfStudyCompletedLessons\) 天/);
   assert.match(script, /function Get-DecimalValue/);
   assert.match(script, /aiCorrect = Get-DecimalValue/);
   assert.match(script, /网站课程已同步：第 \$\(\$websiteSummary\.courseDay\) 天/);
@@ -51,5 +56,6 @@ test("sync center provides a safe visible report and headless entry point", () =
   assert.doesNotMatch(script, /Write-Host\s+\"[^\"]*(SYNC_READ_TOKEN|SYNC_WRITE_TOKEN|API_TOKEN)/i);
   assert.match(readme, /最近 50 次同步记录/);
   assert.match(readme, /预览模式/);
+  assert.match(readme, /网站自学课程\.json/);
   assert.equal(fs.existsSync(path.join(ROOT, "sync-center", "启动同步中心.cmd")), true);
 });

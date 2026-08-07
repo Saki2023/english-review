@@ -162,7 +162,7 @@ test("learning sync includes normalized exam scores and weakness evidence withou
   };
   const profile = buildLearningSyncProfile({ currentDay: 2, words: [], sentences: [] }, state, { username: "learner", role: "member" });
 
-  assert.equal(profile.schemaVersion, 6);
+  assert.equal(profile.schemaVersion, 7);
   assert.equal(profile.summary.exams, 1);
   assert.equal(profile.summary.latestExamScore, 0);
   assert.equal(profile.summary.latestExamPossible, 150);

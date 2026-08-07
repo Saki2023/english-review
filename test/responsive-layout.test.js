@@ -40,8 +40,13 @@ test("mobile styles keep AI, exam, ability, dictation, focused, pronunciation, n
   assert.match(mobile, /\.preview-toolbar\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(mobile, /\.preview-toolbar \.notes-day-picker,\s*\.preview-toolbar \.secondary-button\s*\{[^}]*width:\s*100%/s);
   assert.match(tablet, /\.preview-heading,\s*\.preview-words-heading,\s*\.preview-practice-heading\s*\{[^}]*flex-direction:\s*column/s);
+  assert.match(tablet, /\.self-study-heading\s*\{[^}]*flex-direction:\s*column/s);
+  assert.match(tablet, /\.self-study-stage-list\s*\{[^}]*repeat\(3, minmax\(0, 1fr\)\)/s);
   assert.match(mobile, /\.preview-words-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.preview-words-heading \.secondary-button,\s*\.preview-words-actions\s*\{[^}]*width:\s*100%/s);
+  assert.match(mobile, /\.self-study-stage-list\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/s);
+  assert.match(mobile, /\.self-study-answer-form \.primary-button\s*\{[^}]*width:\s*100%/s);
+  assert.match(mobile, /\.self-study-complete\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(tablet, /\.ai-provider-workspace\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.ai-routing-settings\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.ai-provider-list\s*\{[^}]*grid-template-columns:\s*1fr/s);

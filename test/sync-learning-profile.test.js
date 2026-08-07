@@ -29,6 +29,15 @@ function runPowerShell(args, timeoutMs = 30000) {
   });
 }
 
+function readRequestBody(request) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    request.on("data", chunk => chunks.push(chunk));
+    request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    request.on("error", reject);
+  });
+}
+
 test("a failed upload does not prevent downloading a fresh website learning profile", { skip: process.platform !== "win32" }, async () => {
   const requests = [];
   const server = http.createServer((request, response) => {
@@ -42,6 +51,11 @@ test("a failed upload does not prevent downloading a fresh website learning prof
     if (request.method === "PUT" && request.url === "/api/content/batch") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ currentDay: 4, words: 1, sentences: 1, notes: 1, added: 0, updated: 0, notesAdded: 0, notesUpdated: 0, previewWords: 0 }));
+      return;
+    }
+    if (request.method === "PUT" && request.url.startsWith("/api/sync/self-study-lessons")) {
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: "invalid self-study package" }));
       return;
     }
     if (request.method === "GET" && request.url.startsWith("/api/sync/profile")) {
@@ -61,7 +75,9 @@ test("a failed upload does not prevent downloading a fresh website learning prof
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "english-review-sync-test-"));
   const outputPath = path.join(temporaryDirectory, "profile.json");
   const statusPath = path.join(temporaryDirectory, "status.json");
+  const selfStudyCoursePath = path.join(temporaryDirectory, "self-study.json");
   try {
+    fs.writeFileSync(selfStudyCoursePath, JSON.stringify({ lessons: [{ lessonId: "must-not-appear-in-report", acceptedAnswers: ["hidden-reference"] }] }), "utf8");
     const address = server.address();
     const result = await runPowerShell([
       "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(ROOT, "scripts", "sync-learning-profile.ps1"),
@@ -70,6 +86,7 @@ test("a failed upload does not prevent downloading a fresh website learning prof
       "-SyncToken", "test-read-token",
       "-WriteToken", "test-write-token",
       "-ConfigPath", path.join(temporaryDirectory, "missing.env"),
+      "-SelfStudyCoursePath", selfStudyCoursePath,
       "-OutputPath", outputPath,
       "-StatusPath", statusPath
     ]);
@@ -80,10 +97,13 @@ test("a failed upload does not prevent downloading a fresh website learning prof
     assert.equal(status.uploadAttempted, true);
     assert.equal(status.teachingUploadSuccess, false);
     assert.equal(status.courseUploadSuccess, true);
+    assert.equal(status.selfStudyUploadAttempted, true);
+    assert.equal(status.selfStudyUploadSuccess, false);
     assert.equal(status.uploadSuccess, false);
     assert.equal(status.downloadSuccess, true);
     assert.equal(status.success, false);
     assert.equal(status.errors[0].category, "authorization");
+    assert.ok(status.errors.some(error => error.phase === "upload-self-study-lessons" && error.category === "http"));
     assert.equal(status.summary.aiQuestions, 9);
     assert.equal(status.summary.aiAccuracy, 78);
     assert.equal(status.summary.tutorQuestions, 2);
@@ -95,6 +115,113 @@ test("a failed upload does not prevent downloading a fresh website learning prof
     assert.deepEqual(status.profileSummary, status.summary);
     assert.equal(profile.marker, "fresh-download-after-upload-failure");
     assert.ok(requests.some(entry => entry.startsWith("GET /api/sync/profile")));
+    const serializedStatus = JSON.stringify(status);
+    assert.equal(serializedStatus.includes("test-write-token"), false);
+    assert.equal(serializedStatus.includes("hidden-reference"), false);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("full sync uploads a self-study package with the write token and reports its exported progress", { skip: process.platform !== "win32" }, async () => {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const body = await readRequestBody(request);
+    requests.push({ method: request.method, url: request.url, authorization: request.headers.authorization || "", body });
+    if (request.method === "PUT" && request.url.startsWith("/api/sync/teaching-profile")) {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (request.method === "PUT" && request.url === "/api/content/batch") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ currentDay: 8, words: 20, previewWords: 2, sentences: 12, notes: 8, added: 0, updated: 0, notesAdded: 0, notesUpdated: 0 }));
+      return;
+    }
+    if (request.method === "PUT" && request.url === "/api/sync/self-study-lessons?username=self-study-sync-user") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ received: 2, lessons: 2, activeSnapshotsRetained: 1 }));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/api/sync/profile?username=self-study-sync-user") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        schemaVersion: 7,
+        course: { currentDay: 8, words: 20, previewWords: 2, sentences: 12, notes: 8 },
+        summary: {
+          aiQuestions: 0,
+          aiCorrect: 0,
+          aiAccuracy: 0,
+          tutorQuestions: 0,
+          previewPracticeRounds: 0,
+          previewPracticeQuestions: 0,
+          selfStudyCompletedLessons: 1,
+          selfStudyCurrentLessonId: "trip-day-9",
+          selfStudyCurrentStageId: "reading",
+          selfStudyCurrentStepId: "reading-2",
+          selfStudyFormalAttempts: 7,
+          selfStudyFirstCorrect: 6,
+          selfStudyCorrections: 1,
+          selfStudyUnattempted: 8,
+          selfStudyPending: 0,
+          selfStudyLastStudiedAt: "2026-08-07T10:00:00.000Z"
+        },
+        abilities: { totalEvidence: 6, comprehensiveScore: 12 },
+        selfStudyHistory: [{ lessonId: "trip-day-8", status: "completed" }],
+        selfStudyPlannedLessons: [{ lessonId: "trip-day-10", plannedContent: { status: "planned" } }]
+      }));
+      return;
+    }
+    response.writeHead(404, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: "not found" }));
+  });
+
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "english-self-study-sync-test-"));
+  const outputPath = path.join(temporaryDirectory, "profile.json");
+  const statusPath = path.join(temporaryDirectory, "status.json");
+  const selfStudyCoursePath = path.join(temporaryDirectory, "self-study.json");
+  const hiddenReference = "answer-that-must-not-enter-status";
+  fs.writeFileSync(selfStudyCoursePath, JSON.stringify({
+    updatedAt: "2026-08-07T09:00:00.000Z",
+    lessons: [{ lessonId: "trip-day-9", acceptedAnswers: [hiddenReference] }]
+  }), "utf8");
+  try {
+    const address = server.address();
+    const result = await runPowerShell([
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(ROOT, "scripts", "sync-learning-profile.ps1"),
+      "-BaseUrl", `http://127.0.0.1:${address.port}`,
+      "-Username", "self-study-sync-user",
+      "-SyncToken", "self-study-read-token",
+      "-WriteToken", "self-study-write-token",
+      "-ConfigPath", path.join(temporaryDirectory, "missing.env"),
+      "-SelfStudyCoursePath", selfStudyCoursePath,
+      "-OutputPath", outputPath,
+      "-StatusPath", statusPath
+    ]);
+
+    assert.equal(result.code, 0, result.stderr || result.stdout);
+    const status = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+    const profile = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    const upload = requests.find(entry => entry.url === "/api/sync/self-study-lessons?username=self-study-sync-user");
+    assert.ok(upload);
+    assert.equal(upload.authorization, "Bearer self-study-write-token");
+    assert.equal(JSON.parse(upload.body).lessons[0].acceptedAnswers[0], hiddenReference);
+    assert.equal(status.selfStudyUploadAttempted, true);
+    assert.equal(status.selfStudyUploadSuccess, true);
+    assert.equal(status.uploadSuccess, true);
+    assert.equal(status.downloadSuccess, true);
+    assert.equal(status.summary.selfStudyCompletedLessons, 1);
+    assert.equal(status.summary.selfStudyCurrentStageId, "reading");
+    assert.equal(status.summary.selfStudyFormalAttempts, 7);
+    assert.equal(status.summary.selfStudyCorrections, 1);
+    assert.equal(profile.selfStudyPlannedLessons[0].plannedContent.status, "planned");
+    const serializedStatus = JSON.stringify(status);
+    assert.equal(serializedStatus.includes("self-study-sync-user"), false);
+    assert.equal(serializedStatus.includes("self-study-read-token"), false);
+    assert.equal(serializedStatus.includes("self-study-write-token"), false);
+    assert.equal(serializedStatus.includes(hiddenReference), false);
   } finally {
     await new Promise(resolve => server.close(resolve));
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
@@ -127,7 +254,9 @@ test("preview-practice-only sync downloads a filtered file and never uploads loc
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "english-preview-practice-sync-test-"));
   const outputPath = path.join(temporaryDirectory, "preview-practice.json");
   const statusPath = path.join(temporaryDirectory, "status.json");
+  const selfStudyCoursePath = path.join(temporaryDirectory, "self-study-that-must-not-upload.json");
   try {
+    fs.writeFileSync(selfStudyCoursePath, JSON.stringify({ lessons: [{ lessonId: "must-not-upload" }] }), "utf8");
     const address = server.address();
     const result = await runPowerShell([
       "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(ROOT, "scripts", "sync-learning-profile.ps1"),
@@ -136,6 +265,7 @@ test("preview-practice-only sync downloads a filtered file and never uploads loc
       "-SyncToken", "test-read-token",
       "-WriteToken", "test-write-token-that-must-be-ignored",
       "-ConfigPath", path.join(temporaryDirectory, "missing.env"),
+      "-SelfStudyCoursePath", selfStudyCoursePath,
       "-OutputPath", outputPath,
       "-StatusPath", statusPath,
       "-PreviewPracticeOnly"

@@ -68,6 +68,7 @@ function Get-InputSnapshot {
   $documents += New-DocumentRecord (Join-Path $workspaceRoot "学习进度.md") "学习进度"
   $documents += New-DocumentRecord (Join-Path $workspaceRoot "错题本.md") "错题本"
   $documents += New-DocumentRecord (Join-Path $sharedDirectory "网站课程内容.json") "网站课程内容"
+  $documents += New-DocumentRecord (Join-Path $sharedDirectory "网站自学课程.json") "完整自学课程"
 
   $notesDirectory = Join-Path $workspaceRoot "每日笔记"
   if (Test-Path -LiteralPath $notesDirectory) {
@@ -157,6 +158,16 @@ function Read-WebsiteSummary([string]$ProfilePath = $fullProfilePath) {
       itemsNeedingReview = Get-NumberValue $summary "itemsNeedingReview"
       dictations = Get-NumberValue $summary "dictations"
       focusedSessions = Get-NumberValue $summary "focusedSessions"
+      selfStudyCompletedLessons = Get-NumberValue $summary "selfStudyCompletedLessons"
+      selfStudyCurrentLessonId = [string](Get-ObjectValue $summary "selfStudyCurrentLessonId" "")
+      selfStudyCurrentStageId = [string](Get-ObjectValue $summary "selfStudyCurrentStageId" "")
+      selfStudyCurrentStepId = [string](Get-ObjectValue $summary "selfStudyCurrentStepId" "")
+      selfStudyFormalAttempts = Get-NumberValue $summary "selfStudyFormalAttempts"
+      selfStudyFirstCorrect = Get-NumberValue $summary "selfStudyFirstCorrect"
+      selfStudyCorrections = Get-NumberValue $summary "selfStudyCorrections"
+      selfStudyUnattempted = Get-NumberValue $summary "selfStudyUnattempted"
+      selfStudyPending = Get-NumberValue $summary "selfStudyPending"
+      selfStudyLastStudiedAt = [string](Get-ObjectValue $summary "selfStudyLastStudiedAt" "")
       evidence = Get-NumberValue $abilities "totalEvidence"
       abilityScore = Get-NumberValue $abilities "comprehensiveScore"
     }
@@ -191,7 +202,7 @@ function Get-OutputMessages([string[]]$Lines) {
   $messages = @()
   foreach ($line in $Lines) {
     if (-not $line) { continue }
-    if ($line -match "已上传|已同步|预习练习|网站 AI|网站试卷|待复习|听写：|专项训练") {
+    if ($line -match "已上传|已同步|预习练习|完整自学|出门自学|网站 AI|网站试卷|待复习|听写：|专项训练") {
       $messages += Redact-SensitiveText $line
     }
   }
@@ -203,7 +214,7 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly, [switch]$PreviewPracticeOnl
   $snapshot = Get-InputSnapshot
   if ($PreviewOnly) {
     $report = [ordered]@{
-      schemaVersion = 2
+      schemaVersion = 3
       mode = "dry-run"
       success = $true
       partialSuccess = $false
@@ -258,18 +269,25 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly, [switch]$PreviewPracticeOnl
   $profileAvailable = Test-Path -LiteralPath $profilePath
   $uploadAttempted = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "uploadAttempted" $configState.hasWriteToken) } else { [bool]$configState.hasWriteToken }
   $uploadSucceeded = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "uploadSuccess" $false) } else { ($exitCode -eq 0 -and $configState.hasWriteToken) }
+  $teachingUploadAttempted = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "teachingUploadAttempted" $false) } else { [bool]$configState.hasWriteToken }
   $teachingUploadSucceeded = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "teachingUploadSuccess" $false) } else { $uploadSucceeded }
+  $courseUploadAttempted = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "courseUploadAttempted" $false) } else { [bool]$configState.hasWriteToken }
   $courseUploadSucceeded = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "courseUploadSuccess" $false) } else { $uploadSucceeded }
+  $selfStudyUploadAttempted = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "selfStudyUploadAttempted" $false) } else { $false }
+  $selfStudyUploadSucceeded = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "selfStudyUploadSuccess" $false) } else { $false }
   $downloadAttempted = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "downloadAttempted" $false) } else { $true }
   $downloadSucceeded = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "downloadSuccess" $false) } else { ($exitCode -eq 0 -and $profileAvailable) }
   $compatibilityTransportUsed = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "compatibilityTransportUsed" $false) } else { $false }
   $preparedFiles = if ($PreviewPracticeOnly) { @() } else { @($snapshot.documents | Where-Object { $_.exists } | ForEach-Object { $_.path }) }
   $uploadedFiles = @()
   if ($teachingUploadSucceeded) {
-    $uploadedFiles += @($snapshot.documents | Where-Object { $_.exists -and $_.kind -ne "网站课程内容" } | ForEach-Object { $_.path })
+    $uploadedFiles += @($snapshot.documents | Where-Object { $_.exists -and $_.kind -notin @("网站课程内容", "完整自学课程") } | ForEach-Object { $_.path })
   }
   if ($courseUploadSucceeded) {
     $uploadedFiles += @($snapshot.documents | Where-Object { $_.exists -and $_.kind -eq "网站课程内容" } | ForEach-Object { $_.path })
+  }
+  if ($selfStudyUploadSucceeded) {
+    $uploadedFiles += @($snapshot.documents | Where-Object { $_.exists -and $_.kind -eq "完整自学课程" } | ForEach-Object { $_.path })
   }
   $uploadedFiles = @($uploadedFiles | Select-Object -Unique)
   $previewFiles = @()
@@ -299,6 +317,9 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly, [switch]$PreviewPracticeOnl
   if ($courseUploadSucceeded -and $websiteSummary -and ($preparedFiles -contains "学习同步\网站课程内容.json")) {
     $messages += "网站课程已同步：第 $($websiteSummary.courseDay) 天，$($websiteSummary.courseWords) 个正式单词、$($websiteSummary.coursePreviewWords) 个预习单词、$($websiteSummary.courseSentences) 个句子、$($websiteSummary.courseNotes) 份笔记。"
   }
+  if ($selfStudyUploadSucceeded -and ($preparedFiles -contains "学习同步\网站自学课程.json")) {
+    $messages += "完整自学课程包已上传；已开始课程仍使用原版本快照。"
+  }
   if ($downloadedFiles.Count -gt 0) {
     $messages += $(if ($PreviewPracticeOnly) { "预习练习记录已单独下载到本地；本次没有上传任何内容。" } else { "网站学习档案已下载到本地。" })
   }
@@ -307,14 +328,18 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly, [switch]$PreviewPracticeOnl
   $overallSuccess = ($downloadSucceeded -and (-not $uploadAttempted -or $uploadSucceeded))
   $partialSuccess = (($downloadSucceeded -and $uploadAttempted -and -not $uploadSucceeded) -or ($uploadSucceeded -and -not $downloadSucceeded))
   $report = [ordered]@{
-    schemaVersion = 2
+    schemaVersion = 3
     mode = if ($PreviewPracticeOnly) { "preview-practice" } else { "sync" }
     success = $overallSuccess
     partialSuccess = $partialSuccess
     uploadAttempted = $uploadAttempted
     uploadSuccess = if ($uploadAttempted) { $uploadSucceeded } else { $null }
+    teachingUploadAttempted = $teachingUploadAttempted
     teachingUploadSuccess = if ($uploadAttempted) { $teachingUploadSucceeded } else { $null }
+    courseUploadAttempted = $courseUploadAttempted
     courseUploadSuccess = if ($uploadAttempted) { $courseUploadSucceeded } else { $null }
+    selfStudyUploadAttempted = $selfStudyUploadAttempted
+    selfStudyUploadSuccess = if ($selfStudyUploadAttempted) { $selfStudyUploadSucceeded } else { $null }
     downloadAttempted = $downloadAttempted
     downloadSuccess = $downloadSucceeded
     compatibilityTransportUsed = $compatibilityTransportUsed
@@ -387,6 +412,14 @@ function Get-ReportText($Report) {
       $(if ($previewPracticeMode) { "失败，本地旧预习练习记录已保留" } else { "失败，本地旧快照已保留" })
     }
     $lines += "上传阶段：$uploadState"
+    if (-not $previewPracticeMode -and $uploadAttempted) {
+      $teachingState = if ([bool](Get-ObjectValue $Report "teachingUploadAttempted" $false)) { $(if ([bool](Get-ObjectValue $Report "teachingUploadSuccess" $false)) { "成功" } else { "失败" }) } else { "未执行" }
+      $courseState = if ([bool](Get-ObjectValue $Report "courseUploadAttempted" $false)) { $(if ([bool](Get-ObjectValue $Report "courseUploadSuccess" $false)) { "成功" } else { "失败" }) } else { "无课程文件，已跳过" }
+      $selfStudyState = if ([bool](Get-ObjectValue $Report "selfStudyUploadAttempted" $false)) { $(if ([bool](Get-ObjectValue $Report "selfStudyUploadSuccess" $false)) { "成功" } else { "失败" }) } else { "无自学课程文件，已跳过" }
+      $lines += "  教学档案：$teachingState"
+      $lines += "  网站课程内容：$courseState"
+      $lines += "  完整自学课程：$selfStudyState"
+    }
     $lines += "下载阶段：$downloadState"
     if ([bool](Get-ObjectValue $Report "compatibilityTransportUsed" $false)) { $lines += "网络通道：已自动使用兼容 HTTPS 通道" }
     $category = Redact-SensitiveText ([string](Get-ObjectValue $Report "errorCategory" ""))
@@ -415,6 +448,7 @@ function Get-ReportText($Report) {
   if ($null -eq $summary) { $lines += "  （暂无可读取的学习档案统计）" }
   elseif ($Report.mode -eq "preview-practice") {
     $lines += "  · 预习练习：$($summary.previewPracticeRounds) 轮、$($summary.previewPracticeQuestions) 题，完全正确 $($summary.previewPracticeFullyCorrect)、部分正确 $($summary.previewPracticePartiallyCorrect)、错误 $($summary.previewPracticeIncorrect)，平均 $($summary.previewPracticeAverageScore) 分（不计入正式能力）"
+    $lines += "  · 出门自学：完成 $($summary.selfStudyCompletedLessons) 天；当前 $($summary.selfStudyCurrentLessonId) / $($summary.selfStudyCurrentStageId) / $($summary.selfStudyCurrentStepId)；正式作答 $($summary.selfStudyFormalAttempts)、首次正确 $($summary.selfStudyFirstCorrect)、订正 $($summary.selfStudyCorrections)、未作答 $($summary.selfStudyUnattempted)、待判 $($summary.selfStudyPending)"
   }
   else {
     $lines += "  · 课程：第 $($summary.courseDay) 天，$($summary.courseWords) 个正式单词、$($summary.coursePreviewWords) 个预习单词、$($summary.courseSentences) 个句子、$($summary.courseNotes) 份笔记"
@@ -631,7 +665,7 @@ function Show-SyncCenter {
       $script:detailBox.Text = "正在单独同步预习练习……`r`n`r`n本次只从网站下载已完成的预习练习，不读取或上传课程、笔记、进度和错题。"
       $script:syncWorker.RunWorkerAsync("preview-practice")
     } else {
-      $script:detailBox.Text = "正在正式同步……`r`n`r`n正在读取学习进度、错题本、每日课程内容、学习笔记和预习，并与网站交换完整学习档案。"
+      $script:detailBox.Text = "正在正式同步……`r`n`r`n正在读取学习进度、错题本、每日课程内容、完整自学课程、学习笔记和预习，并与网站交换完整学习档案。"
       $script:syncWorker.RunWorkerAsync("full")
     }
   }

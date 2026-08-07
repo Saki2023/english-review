@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=54">
+  <link rel="stylesheet" href="styles.css?v=55">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v54">v54</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v55">v55</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -58,6 +58,9 @@
       <nav class="side-nav" aria-label="主要功能">
         <button class="nav-item is-active" type="button" data-view="home" aria-current="page">
           <i data-lucide="layout-dashboard" aria-hidden="true"></i><span>今日复习</span>
+        </button>
+        <button class="nav-item self-study-nav-item" type="button" data-view="self-study" id="selfStudyNavItem" hidden>
+          <i data-lucide="graduation-cap" aria-hidden="true"></i><span>出门自学</span>
         </button>
         <button class="nav-item" type="button" data-view="ai" id="aiNavItem">
           <i data-lucide="sparkles" aria-hidden="true"></i><span>AI 出题</span>
@@ -125,6 +128,18 @@
               <strong id="goalReadout">0 / 10</strong>
             </div>
           </div>
+
+          <section class="self-study-mode-card" id="selfStudyModeCard" hidden aria-labelledby="selfStudyModeTitle">
+            <div>
+              <span class="stat-label">仅在出门期间使用</span>
+              <h2 id="selfStudyModeTitle">完整自学课程</h2>
+              <p id="selfStudyModeStatus">正在读取已预装课程…</p>
+            </div>
+            <div class="self-study-mode-actions">
+              <button class="secondary-button" type="button" id="selfStudyModeToggle">开启出门自学</button>
+              <button class="primary-button" type="button" id="openSelfStudyButton" hidden>进入当前课程<i data-lucide="arrow-right" aria-hidden="true"></i></button>
+            </div>
+          </section>
 
           <div class="stats-grid" aria-label="今日统计">
             <article class="stat-card">
@@ -217,6 +232,73 @@
               <p id="completeNote">今日目标已完成。</p>
             </div>
             <button class="secondary-button" type="button" id="moreReviewButton">再练 10 题<i data-lucide="arrow-right" aria-hidden="true"></i></button>
+          </div>
+        </section>
+
+        <section class="view" id="view-self-study" aria-labelledby="selfStudyTitle" hidden>
+          <div class="page-heading compact-heading self-study-heading">
+            <div>
+              <p class="eyebrow">TRAVEL SELF-STUDY</p>
+              <h1 id="selfStudyTitle">出门完整自学课程</h1>
+              <p class="heading-note" id="selfStudyStatus">正在读取课程进度…</p>
+            </div>
+            <button class="secondary-button" type="button" id="disableSelfStudyButton">关闭出门模式</button>
+          </div>
+
+          <section class="self-study-overview" id="selfStudyOverview" hidden>
+            <div class="self-study-overview-head">
+              <div>
+                <span class="type-badge" id="selfStudyLessonDay">待开始</span>
+                <h2 id="selfStudyLessonTitle">完整自学课程</h2>
+              </div>
+              <strong id="selfStudyActiveTime">有效学习 00:00</strong>
+            </div>
+            <ol class="self-study-stage-list" id="selfStudyStageList" aria-label="六阶段课程进度"></ol>
+          </section>
+
+          <div class="self-study-empty" id="selfStudyEmpty">
+            <i data-lucide="luggage" aria-hidden="true"></i>
+            <h2>课程尚未开始</h2>
+            <p id="selfStudyEmptyText">学习窗口上传课程后，可以在这里按六个阶段逐步学习。</p>
+            <button class="primary-button" type="button" id="startSelfStudyButton" hidden>开始当前课程</button>
+          </div>
+
+          <article class="self-study-step-card" id="selfStudyStepCard" hidden>
+            <header class="self-study-step-header">
+              <div>
+                <span class="type-badge" id="selfStudyStageBadge">阶段</span>
+                <span class="question-count" id="selfStudyStepCount">第 1 项</span>
+              </div>
+              <button class="secondary-button compact-button" type="button" id="pauseSelfStudyButton"><i data-lucide="pause" aria-hidden="true"></i>暂停学习</button>
+            </header>
+            <div class="self-study-step-body" id="selfStudyStepBody"></div>
+            <form class="self-study-answer-form" id="selfStudyAnswerForm">
+              <div id="selfStudyAnswerControl"></div>
+              <p class="self-study-form-error" id="selfStudyFormError" hidden></p>
+              <button class="primary-button" type="submit" id="submitSelfStudyButton">提交答案</button>
+            </form>
+            <div class="feedback self-study-feedback" id="selfStudyFeedback" aria-live="polite" hidden></div>
+            <section class="self-study-question-panel" aria-labelledby="selfStudyQuestionTitle">
+              <button class="secondary-button compact-button" type="button" id="toggleSelfStudyQuestion"><i data-lucide="message-circle-question" aria-hidden="true"></i>我不明白 / 提问</button>
+              <div id="selfStudyQuestionArea" hidden>
+                <h3 id="selfStudyQuestionTitle">只询问当前内容</h3>
+                <div class="self-study-question-history" id="selfStudyQuestionHistory"></div>
+                <form id="selfStudyQuestionForm">
+                  <label class="sr-only" for="selfStudyQuestionInput">输入你的疑问</label>
+                  <textarea id="selfStudyQuestionInput" rows="3" maxlength="500" placeholder="例如：这里为什么要用 in？"></textarea>
+                  <button class="secondary-button" type="submit" id="submitSelfStudyQuestion">发送问题</button>
+                </form>
+              </div>
+            </section>
+          </article>
+
+          <div class="review-complete self-study-complete" id="selfStudyComplete" hidden>
+            <div class="complete-icon" aria-hidden="true"><i data-lucide="check"></i></div>
+            <div>
+              <h2>当天六阶段已全部完成</h2>
+              <p id="selfStudyCompleteText">新词和句子已经转为正式已学内容，并安排首次复习。</p>
+            </div>
+            <button class="primary-button" type="button" id="nextSelfStudyLessonButton" hidden>开始下一天<i data-lucide="arrow-right" aria-hidden="true"></i></button>
           </div>
         </section>
 
@@ -1022,12 +1104,12 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=54"></script>
-  <script src="data.js?v=54"></script>
-  <script src="pronunciation-data.js?v=54"></script>
-  <script src="review-variants.js?v=54"></script>
-  <script src="answer-utils.js?v=54"></script>
-  <script src="study-time.js?v=54"></script>
+  <script src="vendor/lucide.min.js?v=55"></script>
+  <script src="data.js?v=55"></script>
+  <script src="pronunciation-data.js?v=55"></script>
+  <script src="review-variants.js?v=55"></script>
+  <script src="answer-utils.js?v=55"></script>
+  <script src="study-time.js?v=55"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1043,7 +1125,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=54";
+      appScript.src = "app.js?v=55";
       document.body.appendChild(appScript);
     })();
   </script>

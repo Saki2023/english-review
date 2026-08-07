@@ -30,6 +30,23 @@ const { normalizePreviewSchoolSentence, sanitizePreviewPractice, sanitizePreview
 const { repairLearningEvidence } = require("./server/evidence-repair");
 const { normalizeStudyTime } = require("./study-time");
 const {
+  addTutorQuestion,
+  continueSelfStudyStep,
+  localStepGrade,
+  markLessonCompleted,
+  mergeSelfStudyLessons,
+  pauseSelfStudy,
+  publicSelfStudyState,
+  referenceLeaked,
+  resolveTutorQuestion,
+  resumeSelfStudy,
+  sanitizeSelfStudyState,
+  saveSelfStudyDraft,
+  selfStudyHistory,
+  startSelfStudyLesson,
+  submitSelfStudyStep
+} = require("./server/self-study");
+const {
   completeDictation,
   createAiDictationAnalyzer,
   createDictationSession,
@@ -77,6 +94,7 @@ const CONTENT_FILE = path.join(DATA_DIR, "content-store.json");
 const LEGACY_STATE_FILE = path.join(DATA_DIR, "state.json");
 const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
 const USER_STATES_FILE = path.join(DATA_DIR, "user-states.json");
+const SELF_STUDY_TRANSACTION_FILE = path.join(DATA_DIR, "self-study-transaction.json");
 const PORT = Number(process.env.PORT || 8080);
 const API_TOKEN = String(process.env.API_TOKEN || "").trim();
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
@@ -96,6 +114,7 @@ const REVIEW_VARIANT_UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000;
 const REVIEW_VARIANT_POOL_AUTOFILL = process.env.REVIEW_VARIANT_POOL_AUTOFILL !== "false";
 
 ensureDataDir();
+recoverSelfStudyTransaction();
 const aiSettingsStore = createAiSettingsStore(DATA_DIR);
 let aiSettings = aiSettingsStore.load();
 let takeAiRequest = createRateLimiter(aiSettings ? aiSettings.rateLimitPerMinute : 20);
@@ -108,6 +127,7 @@ const reviewVariantJobsById = new Map();
 const reviewVariantJobIdsByKey = new Map();
 const reviewVariantPoolJobsByUserId = new Map();
 const reviewVariantPoolRetryTimersByUserId = new Map();
+const selfStudyLocksByUserId = new Map();
 const legacyState = repairLearningEvidence(content, sanitizeState(readJson(LEGACY_STATE_FILE, {}))).state;
 repairStoredUserStates();
 
@@ -117,7 +137,28 @@ function readJson(filePath, fallback) {
   try { return JSON.parse(fs.readFileSync(filePath, "utf8")); } catch (_) { return fallback; }
 }
 
-function writeJson(filePath, value) { fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8"); }
+function writeJson(filePath, value) {
+  const temporary = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  fs.renameSync(temporary, filePath);
+}
+
+function recoverSelfStudyTransaction() {
+  const transaction = readJson(SELF_STUDY_TRANSACTION_FILE, null);
+  if (!transaction || transaction.schema !== 1 || !transaction.content || !transaction.userStates) return;
+  writeJson(CONTENT_FILE, transaction.content);
+  writeJson(USER_STATES_FILE, transaction.userStates);
+  fs.rmSync(SELF_STUDY_TRANSACTION_FILE, { force: true });
+}
+
+function persistSelfStudyTransaction(nextContent, nextUserStates) {
+  writeJson(SELF_STUDY_TRANSACTION_FILE, { schema: 1, createdAt: new Date().toISOString(), content: nextContent, userStates: nextUserStates });
+  writeJson(CONTENT_FILE, nextContent);
+  writeJson(USER_STATES_FILE, nextUserStates);
+  fs.rmSync(SELF_STUDY_TRANSACTION_FILE, { force: true });
+}
+
+function deepClone(value) { return JSON.parse(JSON.stringify(value)); }
 
 function today() {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: APP_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
@@ -209,12 +250,13 @@ function sanitizeState(value) {
     dictation: sanitizeDictationState(source.dictation),
     focusedPractice: sanitizeFocusedState(source.focusedPractice),
     teachingProfile: sanitizeTeachingProfile(source.teachingProfile),
-    reviewVariantPool: sanitizeReviewVariantPool(source.reviewVariantPool)
+    reviewVariantPool: sanitizeReviewVariantPool(source.reviewVariantPool),
+    selfStudy: sanitizeSelfStudyState(source.selfStudy)
   };
 }
 
 function publicReviewState(value) {
-  const { aiExam, dictation, focusedPractice, teachingProfile, reviewVariantPool, ...reviewState } = sanitizeState(value);
+  const { aiExam, dictation, focusedPractice, teachingProfile, reviewVariantPool, selfStudy, ...reviewState } = sanitizeState(value);
   return { ...reviewState, reviewVariantPool: reviewVariantPoolSummary(reviewVariantPool) };
 }
 
@@ -611,7 +653,7 @@ function handleState(req, res, user) {
     const aiPractice = Object.hasOwn(incomingAiPractice, "queuedSets")
       ? incomingAiPractice
       : { ...incomingAiPractice, queuedSets: sanitizeAiPractice(existing.aiPractice).queuedSets };
-    userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({ ...body, aiPractice, aiExam: existing.aiExam, dictation: existing.dictation, focusedPractice: existing.focusedPractice, teachingProfile: existing.teachingProfile, reviewVariantPool: existing.reviewVariantPool })).state;
+    userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({ ...body, aiPractice, aiExam: existing.aiExam, dictation: existing.dictation, focusedPractice: existing.focusedPractice, teachingProfile: existing.teachingProfile, reviewVariantPool: existing.reviewVariantPool, selfStudy: existing.selfStudy })).state;
     persistUserStates();
     sendJson(res, 200, publicReviewState(userStates.users[user.id]));
   }).catch(error => sendError(res, error.statusCode || 400, error.message));
@@ -644,6 +686,314 @@ function handleTeachingProfileSync(req, res, url) {
     persistUserStates();
     sendJson(res, 200, { ok: true, teachingProfile: publicTeachingProfile(state.teachingProfile) });
   }).catch(error => sendError(res, error.statusCode || 400, error.message));
+}
+
+function withSelfStudyLock(userId, operation) {
+  const previous = selfStudyLocksByUserId.get(userId) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  selfStudyLocksByUserId.set(userId, current);
+  return current.finally(() => {
+    if (selfStudyLocksByUserId.get(userId) === current) selfStudyLocksByUserId.delete(userId);
+  });
+}
+
+function selfStudyLearnedWords() {
+  return content.words
+    .filter(item => !item.preview && item.learned && String(item.learned) <= today())
+    .flatMap(item => previewEnglishTokens(item.english));
+}
+
+function handleSelfStudyLessonSync(req, res, url) {
+  if (req.method !== "PUT") return sendError(res, 404, "self-study lesson sync endpoint not found");
+  if (!isTeachingProfileWriteToken(req)) return sendError(res, 401, "valid teaching profile write token required");
+  const username = String(url.searchParams.get("username") || "").trim();
+  if (!username) return sendError(res, 400, "username is required");
+  refreshUsers();
+  refreshContent();
+  const target = users.users.find(item => item.usernameKey === normalizeUsername(username));
+  if (!target) return sendError(res, 404, "user not found");
+  return readBody(req).then(body => withSelfStudyLock(target.id, async () => {
+    const state = getUserState(target);
+    const merged = mergeSelfStudyLessons(state.selfStudy, body, { learnedWords: selfStudyLearnedWords() });
+    state.selfStudy = merged.state;
+    userStates.users[target.id] = sanitizeState(state);
+    persistUserStates();
+    sendJson(res, 200, { ok: true, ...merged.result, enabled: state.selfStudy.enabled });
+  })).catch(error => sendError(res, error.statusCode || 400, error.message));
+}
+
+function nextStudyDate(value) {
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? new Date(`${value}T12:00:00Z`) : new Date();
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+function promoteSelfStudyContent(targetContent, targetState, progress, completedAt) {
+  const lesson = progress.snapshot;
+  const learnedAt = completedAt.toISOString();
+  const learnedDate = lesson.formalDate || today();
+  const firstReviewDue = nextStudyDate(learnedDate);
+  const promotedIds = [];
+  const idMap = new Map();
+
+  lesson.plannedContent.words.forEach(planned => {
+    const englishKey = String(planned.english || "").toLocaleLowerCase();
+    const existingById = targetContent.words.find(item => item.id === planned.id);
+    const existingFormal = targetContent.words.find(item => !item.preview && String(item.english || "").toLocaleLowerCase() === englishKey);
+    const existing = existingById || existingFormal || null;
+    const actualId = existing && !existing.preview ? existing.id : planned.id;
+    targetContent.words = targetContent.words.filter(item => {
+      if (!item.preview) return true;
+      return item.id !== planned.id && String(item.english || "").toLocaleLowerCase() !== englishKey;
+    });
+    const formal = {
+      ...planned,
+      id: actualId,
+      status: "learned",
+      preview: false,
+      learned: existing && !existing.preview && existing.learned ? existing.learned : learnedDate,
+      learnedAt: existing && !existing.preview && existing.learnedAt ? existing.learnedAt : learnedAt,
+      sourceLessonId: existing && !existing.preview && existing.sourceLessonId ? existing.sourceLessonId : lesson.lessonId,
+      firstReviewDue: existing && !existing.preview && existing.firstReviewDue ? existing.firstReviewDue : firstReviewDue
+    };
+    const index = targetContent.words.findIndex(item => item.id === actualId);
+    if (index >= 0) targetContent.words[index] = { ...targetContent.words[index], ...formal };
+    else targetContent.words.push(formal);
+    promotedIds.push(actualId);
+    idMap.set(planned.id, actualId);
+  });
+
+  lesson.plannedContent.sentences.forEach(planned => {
+    const englishKey = normalizeVariantEnglish(planned.english);
+    const existingById = targetContent.sentences.find(item => item.id === planned.id);
+    const existingFormal = targetContent.sentences.find(item => !item.preview && normalizeVariantEnglish(item.english) === englishKey);
+    const existing = existingById || existingFormal || null;
+    const actualId = existing ? existing.id : planned.id;
+    const formal = {
+      ...planned,
+      id: actualId,
+      status: "learned",
+      preview: false,
+      learned: existing && existing.learned ? existing.learned : learnedDate,
+      learnedAt: existing && existing.learnedAt ? existing.learnedAt : learnedAt,
+      sourceLessonId: existing && existing.sourceLessonId ? existing.sourceLessonId : lesson.lessonId,
+      firstReviewDue: existing && existing.firstReviewDue ? existing.firstReviewDue : firstReviewDue
+    };
+    const index = targetContent.sentences.findIndex(item => item.id === actualId);
+    if (index >= 0) targetContent.sentences[index] = { ...targetContent.sentences[index], ...formal };
+    else targetContent.sentences.push(formal);
+    promotedIds.push(actualId);
+    idMap.set(planned.id, actualId);
+  });
+
+  const note = { ...lesson.plannedContent.note, day: lesson.studyDay, date: lesson.plannedContent.note.date || learnedDate, sourceLessonId: lesson.lessonId, learnedAt };
+  const noteIndex = targetContent.notes.findIndex(item => Number(item.day) === Number(note.day));
+  if (noteIndex >= 0) targetContent.notes[noteIndex] = { ...targetContent.notes[noteIndex], ...note };
+  else targetContent.notes.push(note);
+  targetContent.notes.sort((left, right) => Number(left.day) - Number(right.day));
+  targetContent.deletedIds = (targetContent.deletedIds || []).filter(id => !promotedIds.includes(id));
+  targetContent.updatedAt = learnedDate;
+  recalculateCurrentDay(targetContent, readSeedContent().currentDay);
+
+  [...lesson.plannedContent.words, ...lesson.plannedContent.sentences].forEach(planned => {
+    const actualId = idMap.get(planned.id) || planned.id;
+    const directions = Array.isArray(planned.directions) && planned.directions.length ? planned.directions : ["en-zh"];
+    directions.forEach(direction => {
+      const taskId = `${actualId}:${direction}`;
+      const previous = targetState.taskStates[taskId] && typeof targetState.taskStates[taskId] === "object" ? targetState.taskStates[taskId] : {};
+      targetState.taskStates[taskId] = {
+        level: Number(previous.level) || 0,
+        lastResult: typeof previous.lastResult === "boolean" ? previous.lastResult : null,
+        reviewCount: Number(previous.reviewCount) || 0,
+        lastReviewed: String(previous.lastReviewed || ""),
+        nextDue: String(previous.nextDue || firstReviewDue)
+      };
+    });
+  });
+  return { learnedAt, firstReviewDue, contentIds: Array.from(new Set(promotedIds)) };
+}
+
+function completeSelfStudyLesson(user, accountState, selfStudyState, lessonId, completedAt = new Date()) {
+  const nextContent = deepClone(content);
+  const nextAccountState = sanitizeState({ ...accountState, selfStudy: selfStudyState });
+  const progress = nextAccountState.selfStudy.progress[lessonId];
+  if (!progress) throw Object.assign(new Error("self-study progress not found"), { statusCode: 404 });
+  if (progress.status === "completed") return { accountState: nextAccountState, promotion: progress.promotion, duplicate: true };
+  const promotion = promoteSelfStudyContent(nextContent, nextAccountState, progress, completedAt);
+  nextAccountState.selfStudy = markLessonCompleted(nextAccountState.selfStudy, lessonId, promotion, completedAt);
+  const repairedState = repairLearningEvidence(nextContent, sanitizeState(nextAccountState)).state;
+  const nextUserStates = deepClone(userStates);
+  nextUserStates.users[user.id] = repairedState;
+  persistSelfStudyTransaction(nextContent, nextUserStates);
+  content = nextContent;
+  userStates = nextUserStates;
+  return { accountState: repairedState, promotion, duplicate: false };
+}
+
+function selfStudyAiGrade(accountState, user, context) {
+  const local = localStepGrade(context.step, context.answer);
+  if (local.correct && local.gradingStatus === "correct") return Promise.resolve(local);
+  if (!aiConfigured()) return Promise.reject(Object.assign(new Error("AI grading is not configured"), { statusCode: 503 }));
+  const rate = takeAiRequest(user.id);
+  if (!rate.allowed) return Promise.reject(Object.assign(new Error("AI grading rate limit reached"), { statusCode: 429, retryAfterSeconds: rate.retryAfterSeconds }));
+  const selection = aiSelectionForState(accountState, {});
+  const direction = context.step.direction || (context.step.type === "zh-en" ? "zh-en" : "en-zh");
+  const sourceText = direction === "zh-en" ? (context.step.chinese || context.step.prompt) : (context.step.english || context.step.prompt || context.step.passage);
+  return runAiRoute(selection.route, config => createAiGrader(config).grade({ answer: context.answer, acceptedAnswers: context.step.acceptedAnswers, direction, sourceText })).then(routed => ({
+    ...completeTranslationGrade(direction, context.step.english || context.step.referenceAnswer, context.answer, routed.value, context.step.referenceAnswer),
+    source: "ai",
+    providerName: routed.config.providerName,
+    model: selection.route.model,
+    reasoningEffort: selection.route.reasoningEffort
+  }));
+}
+
+function selfStudyTutorInput(accountState, context, message) {
+  const stepState = context.progress.steps[context.step.stepId] || { attempts: [], questions: [], status: "unattempted" };
+  const allowedWords = Array.from(new Set([
+    ...selfStudyLearnedWords(),
+    ...previewEnglishTokens(context.step.prompt),
+    ...previewEnglishTokens(context.step.passage),
+    ...previewEnglishTokens(context.step.english),
+    ...previewEnglishTokens(message)
+  ]));
+  const currentWordMeanings = context.lesson.plannedContent.words.filter(word => allowedWords.includes(String(word.english || "").toLocaleLowerCase()));
+  const wordMeanings = Object.fromEntries([
+    ...content.words.filter(item => !item.preview).map(item => [String(item.english || "").toLocaleLowerCase(), Array.from(new Set([item.chinese, ...(item.acceptedChinese || [])])).filter(Boolean)]),
+    ...currentWordMeanings.map(item => [String(item.english || "").toLocaleLowerCase(), Array.from(new Set([item.chinese, ...(item.acceptedChinese || [])])).filter(Boolean)])
+  ]);
+  const history = (stepState.questions || []).filter(item => item.status === "answered" && item.answer).slice(-6).flatMap(item => [
+    { role: "user", content: item.question },
+    { role: "assistant", content: item.answer }
+  ]);
+  return {
+    exercise: {
+      direction: context.step.direction,
+      prompt: context.step.prompt || context.step.content,
+      english: context.step.english || context.step.passage,
+      chinese: context.step.chinese,
+      correctAnswer: context.step.referenceAnswer,
+      answered: stepState.status === "completed"
+    },
+    history,
+    message,
+    allowedWords,
+    wordMeanings
+  };
+}
+
+async function answerSelfStudyQuestion(accountState, user, context, message) {
+  if (!aiConfigured()) throw Object.assign(new Error("AI is not configured"), { statusCode: 503 });
+  const rate = takeAiRequest(user.id);
+  if (!rate.allowed) throw Object.assign(new Error("AI rate limit reached"), { statusCode: 429, retryAfterSeconds: rate.retryAfterSeconds });
+  const practice = sanitizeAiPractice(accountState.aiPractice);
+  const availableModels = getAvailableModels(aiSettings);
+  const route = selectAiCandidates(aiSettings, {
+    providerId: practice.tutorSettings.providerId,
+    model: availableModels.includes(practice.tutorSettings.model) ? practice.tutorSettings.model : aiSettings.defaultModel,
+    reasoningEffort: practice.tutorSettings.reasoningEffort
+  });
+  const routed = await runAiRoute(route, config => createAiTutor(config).answer(selfStudyTutorInput(accountState, context, message)));
+  const stepState = context.progress.steps[context.step.stepId] || {};
+  const answer = stepState.status !== "completed" && referenceLeaked(routed.value, context.step)
+    ? "我先不给出完整答案：请只检查当前题目的主语、关键词和位置关系，再自己试一次。你也可以只问其中一个词。"
+    : routed.value;
+  return { answer, providerName: routed.config.providerName, model: route.model, reasoningEffort: route.reasoningEffort };
+}
+
+async function handleSelfStudy(req, res, url, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method === "GET" && url.pathname === "/api/self-study") {
+    return sendJson(res, 200, publicSelfStudyState(getUserState(user).selfStudy));
+  }
+  return withSelfStudyLock(user.id, async () => {
+    let accountState = deepClone(getUserState(user));
+    let selfStudy = sanitizeSelfStudyState(accountState.selfStudy);
+    try {
+      if (url.pathname === "/api/self-study/mode" && req.method === "POST") {
+        const body = await readBody(req);
+        if (body.enabled === true && !selfStudy.lessons.length && !Object.keys(selfStudy.progress).length) return sendError(res, 409, "no self-study lessons are available");
+        selfStudy.enabled = body.enabled === true;
+        selfStudy.updatedAt = new Date().toISOString();
+      } else if (url.pathname === "/api/self-study/start" && req.method === "POST") {
+        if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
+        selfStudy = startSelfStudyLesson(selfStudy);
+      } else if (url.pathname === "/api/self-study/draft" && (req.method === "PUT" || req.method === "PATCH")) {
+        if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
+        selfStudy = saveSelfStudyDraft(selfStudy, await readBody(req));
+      } else if (url.pathname === "/api/self-study/pause" && req.method === "POST") {
+        selfStudy = pauseSelfStudy(selfStudy, await readBody(req));
+      } else if (url.pathname === "/api/self-study/resume" && req.method === "POST") {
+        if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
+        selfStudy = resumeSelfStudy(selfStudy, await readBody(req));
+      } else if (url.pathname === "/api/self-study/submit" && req.method === "POST") {
+        if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
+        const body = await readBody(req);
+        const submission = await submitSelfStudyStep(selfStudy, body, {
+          async onPending(pendingState) {
+            selfStudy = pendingState;
+            accountState.selfStudy = selfStudy;
+            userStates.users[user.id] = sanitizeState(accountState);
+            persistUserStates();
+          },
+          grade: context => selfStudyAiGrade(accountState, user, context)
+        });
+        selfStudy = submission.state;
+        accountState.selfStudy = selfStudy;
+        if (submission.completionReady) {
+          const completion = completeSelfStudyLesson(user, accountState, selfStudy, body.lessonId);
+          prepareReviewVariantPoolsAfterCourseSync(true);
+          return sendJson(res, 200, { ...publicSelfStudyState(completion.accountState.selfStudy), duplicate: submission.duplicate, promoted: completion.promotion });
+        }
+        userStates.users[user.id] = sanitizeState(accountState);
+        persistUserStates();
+        return sendJson(res, 200, { ...publicSelfStudyState(selfStudy), duplicate: submission.duplicate });
+      } else if (url.pathname === "/api/self-study/continue" && req.method === "POST") {
+        if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
+        const body = await readBody(req);
+        const continued = continueSelfStudyStep(selfStudy, body);
+        selfStudy = continued.state;
+        accountState.selfStudy = selfStudy;
+        if (continued.completionReady) {
+          const completion = completeSelfStudyLesson(user, accountState, selfStudy, body.lessonId);
+          prepareReviewVariantPoolsAfterCourseSync(true);
+          return sendJson(res, 200, { ...publicSelfStudyState(completion.accountState.selfStudy), duplicate: continued.duplicate, promoted: completion.promotion });
+        }
+        userStates.users[user.id] = sanitizeState(accountState);
+        persistUserStates();
+        return sendJson(res, 200, { ...publicSelfStudyState(selfStudy), duplicate: continued.duplicate });
+      } else if (url.pathname === "/api/self-study/question" && req.method === "POST") {
+        if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
+        const body = await readBody(req);
+        const added = addTutorQuestion(selfStudy, body);
+        selfStudy = added.state;
+        accountState.selfStudy = selfStudy;
+        userStates.users[user.id] = sanitizeState(accountState);
+        persistUserStates();
+        if (added.question.status === "answered") return sendJson(res, 200, publicSelfStudyState(selfStudy));
+        const answerData = await answerSelfStudyQuestion(accountState, user, added.context, added.question.question);
+        selfStudy = resolveTutorQuestion(selfStudy, { ...body, questionId: added.question.id }, answerData);
+      } else {
+        return sendError(res, 404, "self-study endpoint not found");
+      }
+      accountState.selfStudy = selfStudy;
+      userStates.users[user.id] = sanitizeState(accountState);
+      persistUserStates();
+      return sendJson(res, 200, publicSelfStudyState(selfStudy));
+    } catch (error) {
+      if (error && error.selfStudyState) {
+        selfStudy = error.selfStudyState;
+        accountState.selfStudy = selfStudy;
+        userStates.users[user.id] = sanitizeState(accountState);
+        persistUserStates();
+      }
+      const statusCode = error && [400, 401, 404, 409, 413, 429].includes(error.statusCode) ? error.statusCode : 503;
+      const message = statusCode === 503
+        ? (error && error.pendingAttempt ? "AI 判题暂时不可用，答案已保存，请稍后重试" : "AI 问答暂时不可用，问题已保存，请稍后重试")
+        : error.message;
+      return sendJson(res, statusCode, { error: message, selfStudy: publicSelfStudyState(selfStudy), retryAfterSeconds: Number(error && error.retryAfterSeconds) || undefined });
+    }
+  });
 }
 
 function handlePreview(req, res, user) {
@@ -2798,6 +3148,8 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/ai/questions/grade") return handleAiQuestionGrade(req, res, user);
   if (url.pathname === "/api/sync/profile") return handleLearningSync(req, res, url);
   if (url.pathname === "/api/sync/teaching-profile") return handleTeachingProfileSync(req, res, url);
+  if (url.pathname === "/api/sync/self-study-lessons") return handleSelfStudyLessonSync(req, res, url);
+  if (url.pathname === "/api/self-study" || url.pathname.startsWith("/api/self-study/")) return handleSelfStudy(req, res, url, user);
   if (url.pathname === "/api/export" && req.method === "GET") return user ? sendJson(res, 200, { content, state: publicReviewState(getUserState(user)), user: publicUser(user) }) : sendError(res, 401, "login required");
   if (url.pathname === "/api/state") return handleState(req, res, user);
   if (url.pathname === "/api/content" || url.pathname.startsWith("/api/content/")) return handleContent(req, res, url, user);

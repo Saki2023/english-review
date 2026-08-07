@@ -145,6 +145,14 @@
   let previewPracticeRetryKey = "";
   let previewPracticeStatusMessage = "";
   let previewPracticeGradingInProgress = false;
+  let selfStudyState = { enabled: false, hasLessons: false, entryVisible: false, lessonCount: 0, completedLessons: 0, current: null, availableLesson: null, waitingUntil: "", updatedAt: "" };
+  let selfStudyLoaded = false;
+  let selfStudyLoading = false;
+  let selfStudyRequestInProgress = false;
+  let selfStudyStatusMessage = "";
+  let selfStudyDraftSaveTimer = null;
+  let selfStudyQuestionOpen = false;
+  let selfStudyLastPromotion = null;
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -1530,11 +1538,15 @@
       previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
       selectedPreviewName = "";
       previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
+      selfStudyState = normalizeClientSelfStudy(null);
+      selfStudyLoaded = false;
+      selfStudyLastPromotion = null;
       remoteReady = false;
       showAppView();
       bindAppEvents();
       renderHome();
       loadPreviewWords();
+      loadSelfStudy();
       loadAiOptions();
       loadAiExams();
       syncRemoteState();
@@ -1551,6 +1563,9 @@
     previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
     selectedPreviewName = "";
     previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
+    selfStudyState = normalizeClientSelfStudy(null);
+    selfStudyLoaded = false;
+    selfStudyLastPromotion = null;
     remoteReady = !API_ENABLED;
     if (API_ENABLED) showAuthView();
   }
@@ -4967,6 +4982,379 @@
     return session;
   }
 
+  function normalizeClientSelfStudy(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const current = source.current && typeof source.current === "object" ? source.current : null;
+    return {
+      enabled: source.enabled === true,
+      hasLessons: source.hasLessons === true,
+      entryVisible: source.entryVisible === true,
+      lessonCount: Math.max(0, Number(source.lessonCount) || 0),
+      completedLessons: Math.max(0, Number(source.completedLessons) || 0),
+      current,
+      availableLesson: source.availableLesson && typeof source.availableLesson === "object" ? source.availableLesson : null,
+      waitingUntil: String(source.waitingUntil || ""),
+      updatedAt: String(source.updatedAt || "")
+    };
+  }
+
+  function selfStudyStoragePrefix(lessonId = "", stepId = "") {
+    return `daily-english-self-study-${currentUser && currentUser.id || "anonymous"}-${lessonId}-${stepId}`;
+  }
+
+  function readSelfStudyLocal(key) {
+    try { return JSON.parse(localStorage.getItem(key) || "null"); } catch (_) { return null; }
+  }
+
+  function writeSelfStudyLocal(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
+  }
+
+  function removeSelfStudyStepLocal(lessonId, stepId) {
+    const prefix = selfStudyStoragePrefix(lessonId, stepId);
+    ["-draft", "-attempt", "-continue", "-question"].forEach(suffix => localStorage.removeItem(`${prefix}${suffix}`));
+  }
+
+  function selfStudyCurrentStep() {
+    return selfStudyState.current && selfStudyState.current.step ? selfStudyState.current.step : null;
+  }
+
+  function setSelfStudyFromResponse(data) {
+    const state = data && data.selfStudy && typeof data.selfStudy === "object" ? data.selfStudy : data;
+    if (state && typeof state === "object" && Object.hasOwn(state, "enabled")) {
+      selfStudyState = normalizeClientSelfStudy(state);
+      selfStudyLoaded = true;
+    }
+    if (data && data.promoted) selfStudyLastPromotion = data.promoted;
+  }
+
+  async function selfStudyRequest(path, options = {}) {
+    const response = await fetch(`/api/self-study${path}`, {
+      method: options.method || "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body)
+    });
+    const text = await response.text().catch(() => "");
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
+    setSelfStudyFromResponse(data);
+    if (options.render !== false) {
+      renderSelfStudyModeCard();
+      renderSelfStudyView();
+    }
+    if (!response.ok) {
+      const error = new Error(typeof data.error === "string" && data.error ? data.error : "自学课程请求失败，请稍后重试");
+      error.statusCode = response.status;
+      throw error;
+    }
+    return data;
+  }
+
+  async function loadSelfStudy(force = false) {
+    if (!API_ENABLED || !currentUser || selfStudyLoading || (selfStudyLoaded && !force)) {
+      renderSelfStudyModeCard();
+      renderSelfStudyView();
+      return;
+    }
+    selfStudyLoading = true;
+    try {
+      const response = await fetch("/api/self-study", { credentials: "same-origin", cache: "no-store" });
+      setSelfStudyFromResponse(await responseJson(response));
+      selfStudyStatusMessage = "";
+    } catch (error) {
+      selfStudyStatusMessage = error && error.message ? error.message : "无法读取自学课程";
+    } finally {
+      selfStudyLoading = false;
+      renderSelfStudyModeCard();
+      renderSelfStudyView();
+    }
+  }
+
+  function renderSelfStudyModeCard() {
+    const card = $("#selfStudyModeCard");
+    const nav = $("#selfStudyNavItem");
+    if (!card || !nav) return;
+    card.hidden = !selfStudyState.hasLessons;
+    nav.hidden = !selfStudyState.entryVisible;
+    if (!selfStudyState.hasLessons) return;
+    const current = selfStudyState.current;
+    const available = selfStudyState.availableLesson;
+    const status = $("#selfStudyModeStatus");
+    if (current) {
+      const stage = current.stage ? current.stage.title : "准备完成";
+      status.textContent = `${current.title} · ${stage} · 已完成 ${selfStudyState.completedLessons} 天`;
+    } else if (available) {
+      status.textContent = `${available.title} 已准备好；共预装 ${selfStudyState.lessonCount} 天，按完成顺序解锁。`;
+    } else if (selfStudyState.waitingUntil) {
+      status.textContent = `下一课将在 ${new Date(selfStudyState.waitingUntil).toLocaleString("zh-CN")} 后开放。`;
+    } else {
+      status.textContent = `已完成 ${selfStudyState.completedLessons} 天，当前没有待学课程。`;
+    }
+    const toggle = $("#selfStudyModeToggle");
+    toggle.textContent = selfStudyState.enabled ? "关闭出门自学" : "开启出门自学";
+    $("#openSelfStudyButton").hidden = !selfStudyState.enabled;
+    refreshIcons();
+  }
+
+  function selfStudyDraftValue(current, step) {
+    const key = `${selfStudyStoragePrefix(current.lessonId, step.stepId)}-draft`;
+    const local = readSelfStudyLocal(key);
+    return local && typeof local.value === "string" ? local.value : String(step.draft || "");
+  }
+
+  function selfStudyLatestAttempt(step) {
+    return Array.isArray(step && step.attempts) && step.attempts.length ? step.attempts[step.attempts.length - 1] : null;
+  }
+
+  function selfStudyStepBodyHtml(step) {
+    const pronunciationText = step.english || (step.type === "read-aloud" ? step.content : "");
+    const pronunciation = step.phonetic || step.pronunciation || pronunciationText
+      ? `<div class="self-study-pronunciation">${step.phonetic ? `<span>${escapeHtml(step.phonetic)}</span>` : ""}${step.pronunciation ? `<span>中文辅助：${escapeHtml(step.pronunciation)}</span>` : ""}${speechButtonHtml(pronunciationText, "播放当前英文")}</div>`
+      : "";
+    return `
+      ${step.title ? `<h2>${escapeHtml(step.title)}</h2>` : ""}
+      ${step.instruction ? `<p class="self-study-instruction">${escapeHtml(step.instruction)}</p>` : ""}
+      ${step.passage ? `<div class="self-study-passage">${escapeHtml(step.passage)}</div>` : ""}
+      ${step.content ? `<div class="self-study-content">${escapeHtml(step.content)}</div>` : ""}
+      ${step.prompt ? `<div class="self-study-prompt">${escapeHtml(step.prompt)}</div>` : ""}
+      ${pronunciation}`;
+  }
+
+  function selfStudyAnswerControlHtml(current, step) {
+    if (step.status === "completed" && ["choice", "short-answer", "en-zh", "zh-en", "reading-question", "correction"].includes(step.type)) return "";
+    if (["teach", "read-aloud"].includes(step.type)) return "";
+    const draft = selfStudyDraftValue(current, step);
+    if (step.type === "summary") return `<label class="sr-only" for="selfStudyAnswerInput">你的总结</label><textarea id="selfStudyAnswerInput" rows="5" maxlength="2000" placeholder="请用中文写下今天学到的内容">${escapeHtml(draft)}</textarea>`;
+    if (step.type === "choice") {
+      return `<div class="self-study-choice-list" role="radiogroup" aria-label="选择答案">${(step.choices || []).map(choice => `<label class="self-study-choice"><input type="radio" name="selfStudyChoice" value="${escapeHtml(choice.id)}" ${draft === choice.id ? "checked" : ""}><span><strong>${escapeHtml(choice.id)}.</strong> ${escapeHtml(choice.text)}</span></label>`).join("")}</div>`;
+    }
+    return `<label class="sr-only" for="selfStudyAnswerInput">你的答案</label><input id="selfStudyAnswerInput" type="text" maxlength="2000" autocomplete="off" spellcheck="false" placeholder="输入答案" value="${escapeHtml(draft)}">`;
+  }
+
+  function renderSelfStudyFeedback(step) {
+    const feedback = $("#selfStudyFeedback");
+    const latest = selfStudyLatestAttempt(step);
+    if (!latest) { feedback.hidden = true; feedback.className = "feedback self-study-feedback"; return; }
+    feedback.hidden = false;
+    if (latest.status === "pending") {
+      feedback.className = "feedback self-study-feedback is-partial";
+      feedback.innerHTML = `<strong class="feedback-title">答案已保存，等待 AI 判定</strong><span class="feedback-note">网络或 AI 恢复后点击“重新判定”；这条记录目前不算答错，也不进入能力证据。</span>`;
+      return;
+    }
+    const correct = latest.correct === true && latest.gradingStatus === "correct";
+    feedback.className = `feedback self-study-feedback ${correct ? "is-correct" : latest.gradingStatus === "partial" ? "is-partial" : "is-wrong"}`;
+    feedback.innerHTML = `<strong class="feedback-title">${correct ? "回答正确" : "当前答案还需要订正"}</strong><span class="feedback-answer">你的答案：${escapeHtml(latest.answer || "（未填写）")}</span>${correct && step.referenceAnswer ? `<span class="feedback-answer">参考答案：${escapeHtml(step.referenceAnswer)}</span>` : ""}<span class="feedback-note">${escapeHtml(latest.detailedExplanation || latest.explanation || "请重新检查当前题目。")}</span>${!correct ? `<span class="feedback-note">请修改后重新提交同一道题；不会提前显示完整答案。</span>` : ""}`;
+  }
+
+  function renderSelfStudyQuestionHistory(step) {
+    const rows = Array.isArray(step && step.questions) ? step.questions : [];
+    $("#selfStudyQuestionHistory").innerHTML = rows.length ? rows.map(item => `<div class="self-study-question-entry"><strong>你问：${escapeHtml(item.question)}</strong><span>${item.status === "answered" ? escapeHtml(item.answer) : "问题已保存，等待 AI 回答；这不会算作答错。"}</span></div>`).join("") : `<p class="empty-note">还没有提问。提问只会作为疑惑线索，不计入错误。</p>`;
+  }
+
+  function renderSelfStudyView() {
+    const status = $("#selfStudyStatus");
+    if (!status) return;
+    status.textContent = selfStudyStatusMessage || (selfStudyLoading ? "正在读取课程进度…" : "六个阶段一次只显示一个内容或一道题；全部完成后新内容才转为正式已学。");
+    $("#disableSelfStudyButton").hidden = !selfStudyState.enabled;
+    const overview = $("#selfStudyOverview");
+    const empty = $("#selfStudyEmpty");
+    const card = $("#selfStudyStepCard");
+    const complete = $("#selfStudyComplete");
+    const current = selfStudyState.current;
+    overview.hidden = !current;
+    card.hidden = !current || !current.step;
+    complete.hidden = !selfStudyLastPromotion || Boolean(current);
+    empty.hidden = Boolean(current) || !complete.hidden;
+
+    if (!current) {
+      const start = $("#startSelfStudyButton");
+      start.hidden = !selfStudyState.enabled || !selfStudyState.availableLesson;
+      if (!selfStudyState.enabled && selfStudyState.hasLessons) $("#selfStudyEmptyText").textContent = "请先在首页手动开启“出门自学”，正常复习和预习页面不会受影响。";
+      else if (selfStudyState.availableLesson) $("#selfStudyEmptyText").textContent = `${selfStudyState.availableLesson.title} 已准备好；完成当天六阶段后才会解锁下一天。`;
+      else if (selfStudyState.waitingUntil) $("#selfStudyEmptyText").textContent = `下一课尚未到启用时间：${new Date(selfStudyState.waitingUntil).toLocaleString("zh-CN")}。`;
+      else $("#selfStudyEmptyText").textContent = "当前没有待学课程；已完成记录会保留在同步档案中。";
+      $("#nextSelfStudyLessonButton").hidden = !selfStudyState.enabled || !selfStudyState.availableLesson;
+      if (selfStudyLastPromotion) $("#selfStudyCompleteText").textContent = `新内容已原子转为正式已学，首次复习安排在 ${selfStudyLastPromotion.firstReviewDue || "下一学习日"}。`;
+      refreshIcons();
+      return;
+    }
+
+    $("#selfStudyLessonDay").textContent = `第 ${current.studyDay} 天`;
+    $("#selfStudyLessonTitle").textContent = current.title;
+    $("#selfStudyActiveTime").textContent = `有效学习 ${formatStudyDuration(current.activeSeconds || 0)}`;
+    $("#selfStudyStageList").innerHTML = (current.stages || []).map(stage => `<li class="is-${escapeHtml(stage.status)}"><strong>${escapeHtml(stage.title)}</strong><span>${stage.completedSteps} / ${stage.totalSteps}</span></li>`).join("");
+    if (!current.step) { refreshIcons(); return; }
+    const step = current.step;
+    $("#selfStudyStageBadge").textContent = current.stage ? current.stage.title : "当前阶段";
+    $("#selfStudyStepCount").textContent = `第 ${current.stepIndex + 1} / ${current.stages[current.stageIndex]?.totalSteps || 1} 项`;
+    $("#selfStudyStepBody").innerHTML = selfStudyStepBodyHtml(step);
+    $("#selfStudyAnswerControl").innerHTML = selfStudyAnswerControlHtml(current, step);
+    const submit = $("#submitSelfStudyButton");
+    const isQuestion = ["choice", "short-answer", "en-zh", "zh-en", "reading-question", "correction"].includes(step.type);
+    if (isQuestion && step.status === "completed") submit.textContent = "继续下一项";
+    else if (step.status === "pending") submit.textContent = "重新判定";
+    else if (step.status === "needs-correction") submit.textContent = "提交订正";
+    else if (step.type === "teach") submit.textContent = "我已理解，继续";
+    else if (step.type === "read-aloud") submit.textContent = "我已朗读，继续";
+    else if (step.type === "summary") submit.textContent = "提交总结并完成";
+    else submit.textContent = "提交答案";
+    submit.disabled = current.status === "paused" || selfStudyRequestInProgress;
+    const pause = $("#pauseSelfStudyButton");
+    pause.innerHTML = current.status === "paused" ? `<i data-lucide="play" aria-hidden="true"></i>继续学习` : `<i data-lucide="pause" aria-hidden="true"></i>暂停学习`;
+    renderSelfStudyFeedback(step);
+    renderSelfStudyQuestionHistory(step);
+    $("#selfStudyQuestionArea").hidden = !selfStudyQuestionOpen;
+    $("#selfStudyFormError").hidden = true;
+    refreshIcons();
+  }
+
+  async function setSelfStudyMode(enabled) {
+    if (selfStudyRequestInProgress) return;
+    selfStudyRequestInProgress = true;
+    try {
+      await selfStudyRequest("/mode", { body: { enabled } });
+      if (!enabled && activeView === "self-study") setView("home");
+      showToast(enabled ? "出门自学模式已开启" : "出门自学模式已关闭；学习记录仍会保留");
+    } catch (error) { showToast(error.message); }
+    finally { selfStudyRequestInProgress = false; renderSelfStudyModeCard(); renderSelfStudyView(); }
+  }
+
+  async function startCurrentSelfStudyLesson() {
+    if (selfStudyRequestInProgress) return;
+    selfStudyRequestInProgress = true;
+    selfStudyLastPromotion = null;
+    try {
+      await selfStudyRequest("/start", { body: {} });
+      setView("self-study");
+    } catch (error) { showToast(error.message); }
+    finally { selfStudyRequestInProgress = false; renderSelfStudyView(); }
+  }
+
+  function currentSelfStudyAnswer() {
+    const step = selfStudyCurrentStep();
+    if (!step) return "";
+    if (step.type === "choice") return $("input[name='selfStudyChoice']:checked")?.value || "";
+    return String($("#selfStudyAnswerInput")?.value || "").trim();
+  }
+
+  function persistSelfStudyDraftLocally() {
+    const current = selfStudyState.current;
+    const step = selfStudyCurrentStep();
+    if (!current || !step || step.status === "completed") return;
+    const value = currentSelfStudyAnswer();
+    const key = `${selfStudyStoragePrefix(current.lessonId, step.stepId)}-draft`;
+    writeSelfStudyLocal(key, { value, updatedAt: new Date().toISOString() });
+    clearTimeout(selfStudyDraftSaveTimer);
+    selfStudyDraftSaveTimer = setTimeout(() => {
+      selfStudyRequest("/draft", { method: "PUT", body: { lessonId: current.lessonId, stepId: step.stepId, draft: value }, render: false }).catch(() => {});
+    }, 450);
+  }
+
+  function stableSelfStudyAttempt(current, step, answer) {
+    const key = `${selfStudyStoragePrefix(current.lessonId, step.stepId)}-attempt`;
+    const existing = readSelfStudyLocal(key);
+    if (existing && existing.answer === answer && existing.attemptId) return existing.attemptId;
+    const attemptId = `self-${Date.now().toString(36)}-${cryptoRandomId()}`;
+    writeSelfStudyLocal(key, { answer, attemptId });
+    return attemptId;
+  }
+
+  function cryptoRandomId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+    return `${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  async function continueSelfStudyQuestion(current, step) {
+    const key = `${selfStudyStoragePrefix(current.lessonId, step.stepId)}-continue`;
+    let record = readSelfStudyLocal(key);
+    if (!record || !record.continueId) {
+      record = { continueId: `continue-${cryptoRandomId()}` };
+      writeSelfStudyLocal(key, record);
+    }
+    const previousLessonId = current.lessonId;
+    const previousStepId = step.stepId;
+    await selfStudyRequest("/continue", { body: { lessonId: current.lessonId, stepId: step.stepId, continueId: record.continueId } });
+    removeSelfStudyStepLocal(previousLessonId, previousStepId);
+  }
+
+  async function submitSelfStudyAnswer(event) {
+    event.preventDefault();
+    if (selfStudyRequestInProgress) return;
+    const current = selfStudyState.current;
+    const step = selfStudyCurrentStep();
+    if (!current || !step) return;
+    if (current.status === "paused") return showToast("请先继续学习");
+    selfStudyRequestInProgress = true;
+    $("#selfStudyFormError").hidden = true;
+    try {
+      if (step.status === "completed" && ["choice", "short-answer", "en-zh", "zh-en", "reading-question", "correction"].includes(step.type)) {
+        await continueSelfStudyQuestion(current, step);
+      } else {
+        const answer = currentSelfStudyAnswer();
+        if (!["teach", "read-aloud"].includes(step.type) && !answer) {
+          $("#selfStudyFormError").textContent = "请先填写或选择答案。";
+          $("#selfStudyFormError").hidden = false;
+          $("#selfStudyAnswerInput")?.focus();
+          return;
+        }
+        const latest = selfStudyLatestAttempt(step);
+        const attemptId = latest && latest.status === "pending" ? latest.attemptId : stableSelfStudyAttempt(current, step, answer || "已确认");
+        const previousLessonId = current.lessonId;
+        const previousStepId = step.stepId;
+        await selfStudyRequest("/submit", { body: { lessonId: current.lessonId, stepId: step.stepId, answer: answer || "已确认", attemptId, retry: Boolean(latest && latest.status === "pending") } });
+        const after = selfStudyCurrentStep();
+        if (!after || after.stepId !== previousStepId) removeSelfStudyStepLocal(previousLessonId, previousStepId);
+      }
+    } catch (error) {
+      selfStudyStatusMessage = error.message;
+      showToast(error.message);
+    } finally {
+      selfStudyRequestInProgress = false;
+      renderSelfStudyView();
+    }
+  }
+
+  async function toggleSelfStudyPause() {
+    if (selfStudyRequestInProgress || !selfStudyState.current) return;
+    selfStudyRequestInProgress = true;
+    try {
+      const current = selfStudyState.current;
+      await selfStudyRequest(current.status === "paused" ? "/resume" : "/pause", { body: { lessonId: current.lessonId, reason: current.status === "paused" ? "" : "用户主动暂停" } });
+      showToast(current.status === "paused" ? "已继续学习" : "已保存当前步骤并暂停");
+    } catch (error) { showToast(error.message); }
+    finally { selfStudyRequestInProgress = false; renderSelfStudyView(); }
+  }
+
+  async function submitSelfStudyQuestion(event) {
+    event.preventDefault();
+    if (selfStudyRequestInProgress) return;
+    const current = selfStudyState.current;
+    const step = selfStudyCurrentStep();
+    const input = $("#selfStudyQuestionInput");
+    const question = String(input.value || "").trim();
+    if (!current || !step || !question) return;
+    const key = `${selfStudyStoragePrefix(current.lessonId, step.stepId)}-question`;
+    let saved = readSelfStudyLocal(key);
+    if (!saved || saved.question !== question || !saved.questionId) {
+      saved = { question, questionId: `question-${cryptoRandomId()}` };
+      writeSelfStudyLocal(key, saved);
+    }
+    selfStudyRequestInProgress = true;
+    try {
+      await selfStudyRequest("/question", { body: { lessonId: current.lessonId, stepId: step.stepId, question, questionId: saved.questionId } });
+      localStorage.removeItem(key);
+      input.value = "";
+    } catch (error) {
+      showToast(error.message);
+    } finally {
+      selfStudyRequestInProgress = false;
+      selfStudyQuestionOpen = true;
+      renderSelfStudyView();
+    }
+  }
+
   function setView(view) {
     activeView = view;
     if (view !== "home") clearReviewVariantPoolStatusPolling();
@@ -4981,6 +5369,7 @@
       section.hidden = !active;
     });
     if (view === "home") renderHome();
+    if (view === "self-study") { renderSelfStudyView(); loadSelfStudy(); }
     if (view === "ai") renderAiView();
     if (view === "exam") renderExamView();
     if (view === "abilities") { renderAbilityView(); loadAbilities(); }
@@ -5060,6 +5449,7 @@
   }
 
   function renderHome() {
+    renderSelfStudyModeCard();
     const answerInput = $("#answerInput");
     const submitButton = $("#submitAnswer");
     const feedback = $("#feedback");
@@ -5769,6 +6159,33 @@
     document.addEventListener("visibilitychange", handleStudyVisibility);
     window.addEventListener("pagehide", () => stopStudyClock("页面关闭", true));
     $$("[data-view]").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
+    $("#selfStudyModeToggle").addEventListener("click", () => setSelfStudyMode(!selfStudyState.enabled));
+    $("#disableSelfStudyButton").addEventListener("click", () => setSelfStudyMode(false));
+    $("#openSelfStudyButton").addEventListener("click", () => setView("self-study"));
+    $("#startSelfStudyButton").addEventListener("click", startCurrentSelfStudyLesson);
+    $("#nextSelfStudyLessonButton").addEventListener("click", startCurrentSelfStudyLesson);
+    $("#pauseSelfStudyButton").addEventListener("click", toggleSelfStudyPause);
+    $("#selfStudyAnswerForm").addEventListener("submit", submitSelfStudyAnswer);
+    $("#selfStudyAnswerForm").addEventListener("keydown", event => {
+      // Keep Enter ergonomic for short answers while preserving normal newlines in the summary textarea.
+      if (event.target.matches("textarea") && !event.ctrlKey && !event.metaKey) return;
+      if (!shouldSubmitOnEnter(event)) return;
+      event.preventDefault();
+      $("#selfStudyAnswerForm").requestSubmit();
+    });
+    $("#selfStudyAnswerForm").addEventListener("input", persistSelfStudyDraftLocally);
+    $("#selfStudyAnswerForm").addEventListener("change", persistSelfStudyDraftLocally);
+    $("#toggleSelfStudyQuestion").addEventListener("click", () => {
+      selfStudyQuestionOpen = !selfStudyQuestionOpen;
+      renderSelfStudyView();
+      if (selfStudyQuestionOpen) $("#selfStudyQuestionInput").focus();
+    });
+    $("#selfStudyQuestionForm").addEventListener("submit", submitSelfStudyQuestion);
+    $("#selfStudyQuestionInput").addEventListener("keydown", event => {
+      if (!shouldSubmitOnEnter(event)) return;
+      event.preventDefault();
+      $("#selfStudyQuestionForm").requestSubmit();
+    });
     $$("[data-mode]").forEach(button => button.addEventListener("click", () => setReviewMode(button.dataset.mode)));
     $$("[data-library-type]").forEach(button => button.addEventListener("click", () => { libraryType = button.dataset.libraryType; libraryPage = 1; renderLibrary(); }));
     $("#librarySearch").addEventListener("input", () => { libraryPage = 1; renderLibrary(); });
@@ -5983,7 +6400,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=54", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=55", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
@@ -5999,6 +6416,7 @@
   bindAppEvents();
   renderHome();
   loadPreviewWords();
+  loadSelfStudy();
   refreshIcons();
   await loadAiOptions();
   await loadAiExams();

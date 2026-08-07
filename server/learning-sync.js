@@ -7,6 +7,7 @@ const { analyzeAbilities } = require("./ability-analysis");
 const { sanitizeDictationState } = require("./dictation");
 const { sanitizeFocusedState, skillSummaries } = require("./focused-practice");
 const { sanitizePreviewPracticeHistory } = require("./preview-practice");
+const { selfStudyHistory } = require("./self-study");
 const { publicTeachingProfile } = require("./teaching-profile");
 const { DAILY_STUDY_PLAN, normalizeStudyTime, STUDY_TIME_TARGET_SECONDS } = require("../study-time");
 
@@ -344,9 +345,10 @@ function buildLearningSyncProfile(content, state, user) {
   const dictationWrong = dictation.sessions.flatMap(session => session.items).filter(item => item.correct === false).length;
   const focusedWeakPoints = focused.sessions.flatMap(session => session.weakPoints);
   const studyTime = normalizeStudyTime(state.studyTime);
+  const selfStudy = selfStudyHistory(state.selfStudy);
 
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
     generatedAt: new Date().toISOString(),
     user: { username: user.username, role: user.role },
     course: {
@@ -373,6 +375,16 @@ function buildLearningSyncProfile(content, state, user) {
       previewPracticeIncorrect: previewPracticeQuestions.filter(question => question.gradingStatus === "incorrect").length,
       previewPracticeAverageScore: previewPracticeHistory.length ? Math.round(previewPracticeHistory.reduce((sum, round) => sum + round.score, 0) / previewPracticeHistory.length) : null,
       latestPreviewPracticeAt: previewPracticeHistory.length ? previewPracticeHistory[previewPracticeHistory.length - 1].completedAt : "",
+      selfStudyCompletedLessons: selfStudy.summary.completedLessons,
+      selfStudyCurrentLessonId: selfStudy.summary.currentLessonId,
+      selfStudyCurrentStageId: selfStudy.summary.currentStageId,
+      selfStudyCurrentStepId: selfStudy.summary.currentStepId,
+      selfStudyFormalAttempts: selfStudy.summary.formalAttempts,
+      selfStudyFirstCorrect: selfStudy.summary.firstCorrect,
+      selfStudyCorrections: selfStudy.summary.corrections,
+      selfStudyUnattempted: selfStudy.summary.unattempted,
+      selfStudyPending: selfStudy.summary.pending,
+      selfStudyLastStudiedAt: selfStudy.summary.lastStudiedAt,
       exams: examHistory.length,
       examAveragePercentage: examPercentages.length ? Math.round(examPercentages.reduce((sum, value) => sum + value, 0) / examPercentages.length) : null,
       latestExamScore: latestExam ? latestExam.score : null,
@@ -411,6 +423,7 @@ function buildLearningSyncProfile(content, state, user) {
       aiSets,
       tutorQuestions: tutorHistory.map(item => ({ id: item.id, setId: item.setId, questionId: item.questionId, askedAt: item.askedAt })),
       previewPractice: previewPracticeHistory.map(round => ({ id: round.id, previewDay: round.previewDay, mode: round.mode, completedAt: round.completedAt, total: round.total, fullyCorrect: round.fullyCorrect, partiallyCorrect: round.partiallyCorrect, incorrect: round.incorrect, score: round.score, formalEvidence: false })),
+      selfStudy: selfStudy.lessons.map(lesson => ({ lessonId: lesson.lessonId, lessonVersion: lesson.lessonVersion, studyDay: lesson.studyDay, status: lesson.status, startedAt: lesson.startedAt, completedAt: lesson.completedAt, activeSeconds: lesson.activeSeconds, testSummary: lesson.testSummary })),
       exams: examHistory.map(exam => ({ id: exam.id, title: exam.title, submittedAt: exam.submittedAt, score: exam.score, possible: exam.possible, percentage: exam.percentage })),
       dictations: dictation.sessions.map(session => ({ id: session.id, completedAt: session.completedAt, score: session.score, possible: session.possible, percentage: session.percentage })),
       focusedSessions: focused.sessions.map(session => ({ id: session.id, focusedType: session.focusedType, completedAt: session.completedAt, levelScore: session.levelScore }))
@@ -421,6 +434,9 @@ function buildLearningSyncProfile(content, state, user) {
     aiHistory,
     tutorHistory,
     previewPracticeHistory,
+    selfStudyHistory: selfStudy.lessons,
+    selfStudyPlannedLessons: selfStudy.plannedLessons,
+    selfStudySummary: selfStudy.summary,
     examHistory,
     dictationHistory: dictation.sessions,
     dictationWeights: dictation.weights,
