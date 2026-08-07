@@ -6,6 +6,7 @@ const { sanitizeAiExamState } = require("./ai-exam");
 const { analyzeAbilities } = require("./ability-analysis");
 const { sanitizeDictationState } = require("./dictation");
 const { sanitizeFocusedState, skillSummaries } = require("./focused-practice");
+const { sanitizePreviewPracticeHistory } = require("./preview-practice");
 const { publicTeachingProfile } = require("./teaching-profile");
 const { DAILY_STUDY_PLAN, normalizeStudyTime, STUDY_TIME_TARGET_SECONDS } = require("../study-time");
 
@@ -265,6 +266,58 @@ function tutorEvidence(state) {
   }));
 }
 
+function previewPracticeEvidence(state) {
+  return sanitizePreviewPracticeHistory(state.previewPracticeHistory).filter(round => (
+    round.total > 0
+    && round.completed >= round.total
+    && Boolean(round.completedAt)
+  )).map(round => {
+    const questions = round.tasks.map((task, index) => {
+      const result = round.results[task.id] || {};
+      const gradingStatus = ["correct", "partial", "incorrect"].includes(result.gradingStatus)
+        ? result.gradingStatus
+        : (result.correct === true ? "correct" : "incorrect");
+      return {
+        id: task.id,
+        number: index + 1,
+        kind: task.kind,
+        direction: task.direction,
+        english: task.english,
+        chinese: task.chinese,
+        prompt: task.direction === "en-zh" ? task.english : task.chinese,
+        learnerAnswer: round.answers[task.id] || "",
+        referenceAnswer: task.direction === "en-zh" ? task.chinese : task.english,
+        correct: result.correct === true,
+        gradingStatus,
+        score: evidenceScore(result),
+        explanation: result.explanation || "",
+        detailedExplanation: result.detailedExplanation || result.explanation || "",
+        problemWords: result.problemWords || [],
+        wordResults: result.wordResults || [],
+        gradingSource: result.source || "",
+        answeredAt: result.answeredAt || "",
+        formalEvidence: false
+      };
+    });
+    return {
+      id: round.id,
+      sourceCurrentDay: round.currentDay,
+      previewDay: round.nextDay,
+      mode: round.mode,
+      total: questions.length,
+      fullyCorrect: questions.filter(question => question.gradingStatus === "correct").length,
+      partiallyCorrect: questions.filter(question => question.gradingStatus === "partial").length,
+      incorrect: questions.filter(question => question.gradingStatus === "incorrect").length,
+      accepted: questions.filter(question => question.correct).length,
+      score: round.score,
+      startedAt: round.startedAt,
+      completedAt: round.completedAt,
+      formalEvidence: false,
+      questions
+    };
+  });
+}
+
 function buildLearningSyncProfile(content, state, user) {
   const aiPractice = sanitizeAiPractice(state.aiPractice);
   const aiHistory = aiPractice.history;
@@ -285,13 +338,15 @@ function buildLearningSyncProfile(content, state, user) {
   const dictation = dictationEvidence(state);
   const focused = focusedEvidence(state);
   const tutorHistory = tutorEvidence(state);
+  const previewPracticeHistory = previewPracticeEvidence(state);
+  const previewPracticeQuestions = previewPracticeHistory.flatMap(round => round.questions);
   const dictationScores = dictation.sessions.map(session => session.percentage).filter(value => Number.isFinite(value));
   const dictationWrong = dictation.sessions.flatMap(session => session.items).filter(item => item.correct === false).length;
   const focusedWeakPoints = focused.sessions.flatMap(session => session.weakPoints);
   const studyTime = normalizeStudyTime(state.studyTime);
 
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     generatedAt: new Date().toISOString(),
     user: { username: user.username, role: user.role },
     course: {
@@ -311,6 +366,13 @@ function buildLearningSyncProfile(content, state, user) {
       aiCorrect,
       aiAccuracy: accuracy(aiCorrect, aiHistory.length),
       tutorQuestions: tutorHistory.length,
+      previewPracticeRounds: previewPracticeHistory.length,
+      previewPracticeQuestions: previewPracticeQuestions.length,
+      previewPracticeFullyCorrect: previewPracticeQuestions.filter(question => question.gradingStatus === "correct").length,
+      previewPracticePartiallyCorrect: previewPracticeQuestions.filter(question => question.gradingStatus === "partial").length,
+      previewPracticeIncorrect: previewPracticeQuestions.filter(question => question.gradingStatus === "incorrect").length,
+      previewPracticeAverageScore: previewPracticeHistory.length ? Math.round(previewPracticeHistory.reduce((sum, round) => sum + round.score, 0) / previewPracticeHistory.length) : null,
+      latestPreviewPracticeAt: previewPracticeHistory.length ? previewPracticeHistory[previewPracticeHistory.length - 1].completedAt : "",
       exams: examHistory.length,
       examAveragePercentage: examPercentages.length ? Math.round(examPercentages.reduce((sum, value) => sum + value, 0) / examPercentages.length) : null,
       latestExamScore: latestExam ? latestExam.score : null,
@@ -348,6 +410,7 @@ function buildLearningSyncProfile(content, state, user) {
       studyPlan: DAILY_STUDY_PLAN.map(stage => ({ id: stage.id, label: stage.label, minutes: stage.minutes, targetSeconds: stage.minutes * 60, canContinueInLearningWindow: stage.allowBackground === true })),
       aiSets,
       tutorQuestions: tutorHistory.map(item => ({ id: item.id, setId: item.setId, questionId: item.questionId, askedAt: item.askedAt })),
+      previewPractice: previewPracticeHistory.map(round => ({ id: round.id, previewDay: round.previewDay, mode: round.mode, completedAt: round.completedAt, total: round.total, fullyCorrect: round.fullyCorrect, partiallyCorrect: round.partiallyCorrect, incorrect: round.incorrect, score: round.score, formalEvidence: false })),
       exams: examHistory.map(exam => ({ id: exam.id, title: exam.title, submittedAt: exam.submittedAt, score: exam.score, possible: exam.possible, percentage: exam.percentage })),
       dictations: dictation.sessions.map(session => ({ id: session.id, completedAt: session.completedAt, score: session.score, possible: session.possible, percentage: session.percentage })),
       focusedSessions: focused.sessions.map(session => ({ id: session.id, focusedType: session.focusedType, completedAt: session.completedAt, levelScore: session.levelScore }))
@@ -357,6 +420,7 @@ function buildLearningSyncProfile(content, state, user) {
     localTeachingProfile: publicTeachingProfile(state.teachingProfile),
     aiHistory,
     tutorHistory,
+    previewPracticeHistory,
     examHistory,
     dictationHistory: dictation.sessions,
     dictationWeights: dictation.weights,
@@ -365,4 +429,4 @@ function buildLearningSyncProfile(content, state, user) {
   };
 }
 
-module.exports = { accuracy, aiWordSignals, buildLearningSyncProfile, dictationEvidence, examEvidence, focusedEvidence, summarizeAiSets, tutorEvidence };
+module.exports = { accuracy, aiWordSignals, buildLearningSyncProfile, dictationEvidence, examEvidence, focusedEvidence, previewPracticeEvidence, summarizeAiSets, tutorEvidence };

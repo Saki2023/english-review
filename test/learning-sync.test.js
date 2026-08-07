@@ -162,7 +162,7 @@ test("learning sync includes normalized exam scores and weakness evidence withou
   };
   const profile = buildLearningSyncProfile({ currentDay: 2, words: [], sentences: [] }, state, { username: "learner", role: "member" });
 
-  assert.equal(profile.schemaVersion, 5);
+  assert.equal(profile.schemaVersion, 6);
   assert.equal(profile.summary.exams, 1);
   assert.equal(profile.summary.latestExamScore, 0);
   assert.equal(profile.summary.latestExamPossible, 150);
@@ -170,4 +170,55 @@ test("learning sync includes normalized exam scores and weakness evidence withou
   assert.equal(profile.weakPoints.recentExamWeakPoints[0].category, "listening");
   assert.equal(profile.abilities.abilities.find(item => item.id === "listening").evidenceCount, 1);
   assert.equal(JSON.stringify(profile).includes("answerKey"), false);
+});
+
+test("learning sync exports only completed preview practice as non-formal evidence", () => {
+  const completedRound = {
+    id: "preview-round-1",
+    currentDay: 7,
+    nextDay: 8,
+    mode: "mixed",
+    tasks: [
+      { id: "preview-word-sun-en-zh", kind: "word", direction: "en-zh", english: "sun", chinese: "太阳" },
+      { id: "preview-sentence-sun-zh-en", kind: "sentence", direction: "zh-en", english: "It is in the sun.", chinese: "它在阳光下。" }
+    ],
+    answers: {
+      "preview-word-sun-en-zh": "太阳",
+      "preview-sentence-sun-zh-en": "It is on the sun."
+    },
+    results: {
+      "preview-word-sun-en-zh": { correct: true, score: 1, gradingStatus: "correct", explanation: "词义正确。", answeredAt: "2026-08-07T09:01:00.000Z" },
+      "preview-sentence-sun-zh-en": { correct: true, score: 0.8, gradingStatus: "partial", explanation: "介词需要调整。", detailedExplanation: "这里表示处于阳光下，参考答案使用 in。", problemWords: ["in"], answeredAt: "2026-08-07T09:02:00.000Z" }
+    },
+    startedAt: "2026-08-07T09:00:00.000Z",
+    completedAt: "2026-08-07T09:02:00.000Z"
+  };
+  const profile = buildLearningSyncProfile({ currentDay: 7, words: [], sentences: [] }, {
+    previewPractice: {
+      tasks: [{ id: "unfinished", kind: "sentence", direction: "en-zh", english: "unfinished-secret", chinese: "未完成" }],
+      answers: { unfinished: "草稿答案" }
+    },
+    previewPracticeHistory: [
+      { ...completedRound, id: "incomplete-round", results: {}, completedAt: "2026-08-07T08:00:00.000Z" },
+      completedRound
+    ]
+  }, { username: "learner", role: "member" });
+
+  assert.equal(profile.summary.previewPracticeRounds, 1);
+  assert.equal(profile.summary.previewPracticeQuestions, 2);
+  assert.equal(profile.summary.previewPracticeFullyCorrect, 1);
+  assert.equal(profile.summary.previewPracticePartiallyCorrect, 1);
+  assert.equal(profile.summary.previewPracticeIncorrect, 0);
+  assert.equal(profile.summary.previewPracticeAverageScore, 90);
+  assert.equal(profile.summary.recordedMistakes, 0);
+  assert.equal(profile.activity.previewPractice[0].formalEvidence, false);
+  assert.equal(profile.previewPracticeHistory[0].previewDay, 8);
+  assert.equal(profile.previewPracticeHistory[0].formalEvidence, false);
+  assert.equal(profile.previewPracticeHistory[0].questions[1].prompt, "它在阳光下。");
+  assert.equal(profile.previewPracticeHistory[0].questions[1].learnerAnswer, "It is on the sun.");
+  assert.equal(profile.previewPracticeHistory[0].questions[1].referenceAnswer, "It is in the sun.");
+  assert.equal(profile.previewPracticeHistory[0].questions[1].detailedExplanation, "这里表示处于阳光下，参考答案使用 in。");
+  assert.equal(profile.previewPracticeHistory[0].questions[1].formalEvidence, false);
+  assert.equal(JSON.stringify(profile).includes("unfinished-secret"), false);
+  assert.equal(JSON.stringify(profile).includes("草稿答案"), false);
 });

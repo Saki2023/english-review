@@ -462,6 +462,12 @@ if ($downloadResult.success) {
     aiCorrect = if ($profileSummary) { [double]$profileSummary.aiCorrect } else { 0 }
     aiAccuracy = if ($profileSummary) { [int]$profileSummary.aiAccuracy } else { 0 }
     tutorQuestions = if ($profileSummary) { [int]$profileSummary.tutorQuestions } else { 0 }
+    previewPracticeRounds = if ($profileSummary) { [int]$profileSummary.previewPracticeRounds } else { 0 }
+    previewPracticeQuestions = if ($profileSummary) { [int]$profileSummary.previewPracticeQuestions } else { 0 }
+    previewPracticeFullyCorrect = if ($profileSummary) { [int]$profileSummary.previewPracticeFullyCorrect } else { 0 }
+    previewPracticePartiallyCorrect = if ($profileSummary) { [int]$profileSummary.previewPracticePartiallyCorrect } else { 0 }
+    previewPracticeIncorrect = if ($profileSummary) { [int]$profileSummary.previewPracticeIncorrect } else { 0 }
+    previewPracticeAverageScore = if ($profileSummary -and $null -ne $profileSummary.previewPracticeAverageScore) { [int]$profileSummary.previewPracticeAverageScore } else { $null }
     exams = if ($profileSummary) { [int]$profileSummary.exams } else { 0 }
     latestExamScore = if ($profileSummary) { $profileSummary.latestExamScore } else { $null }
     latestExamPossible = if ($profileSummary) { $profileSummary.latestExamPossible } else { $null }
@@ -479,6 +485,7 @@ if ($downloadResult.success) {
   Write-Host "学习档案已同步：$OutputPath"
   Write-Host "网站 AI 做题：$($profile.summary.aiQuestions) 题，正确率 $($profile.summary.aiAccuracy)%"
   Write-Host "网站 AI 问答：$($profile.summary.tutorQuestions) 次"
+  Write-Host "网站预习练习：$($profile.summary.previewPracticeRounds) 轮、$($profile.summary.previewPracticeQuestions) 题（完全正确 $($profile.summary.previewPracticeFullyCorrect)、部分正确 $($profile.summary.previewPracticePartiallyCorrect)、错误 $($profile.summary.previewPracticeIncorrect)；仅供预习回顾，不计入正式能力）。"
   if ($profile.summary.exams -gt 0) {
     Write-Host "网站试卷：$($profile.summary.exams) 份，最近 $($profile.summary.latestExamScore)/$($profile.summary.latestExamPossible) 分，平均百分比 $($profile.summary.examAveragePercentage)%"
   } else {

@@ -47,7 +47,7 @@ test("a failed upload does not prevent downloading a fresh website learning prof
     if (request.method === "GET" && request.url.startsWith("/api/sync/profile")) {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({
-        summary: { aiQuestions: 9, aiAccuracy: 78, tutorQuestions: 2, exams: 0, itemsNeedingReview: 3, dictations: 1, focusedSessions: 1 },
+        summary: { aiQuestions: 9, aiAccuracy: 78, tutorQuestions: 2, previewPracticeRounds: 2, previewPracticeQuestions: 12, previewPracticeFullyCorrect: 8, previewPracticePartiallyCorrect: 1, previewPracticeIncorrect: 3, previewPracticeAverageScore: 74, exams: 0, itemsNeedingReview: 3, dictations: 1, focusedSessions: 1 },
         abilities: { totalEvidence: 12 },
         marker: "fresh-download-after-upload-failure"
       }));
@@ -87,6 +87,10 @@ test("a failed upload does not prevent downloading a fresh website learning prof
     assert.equal(status.summary.aiQuestions, 9);
     assert.equal(status.summary.aiAccuracy, 78);
     assert.equal(status.summary.tutorQuestions, 2);
+    assert.equal(status.summary.previewPracticeRounds, 2);
+    assert.equal(status.summary.previewPracticeQuestions, 12);
+    assert.equal(status.summary.previewPracticePartiallyCorrect, 1);
+    assert.equal(status.summary.previewPracticeAverageScore, 74);
     assert.equal(status.summary.evidence, 12);
     assert.deepEqual(status.profileSummary, status.summary);
     assert.equal(profile.marker, "fresh-download-after-upload-failure");
