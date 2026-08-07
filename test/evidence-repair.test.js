@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { repairLearningEvidence } = require("../server/evidence-repair");
+const { analyzeAbilities } = require("../server/ability-analysis");
 
 test("learning evidence repair is idempotent across review, AI history, current question, and saved exam", () => {
   const content = {
@@ -100,7 +101,104 @@ test("evidence repair grades a saved AI review variant against its immutable sna
   };
   const repaired = require("../answer-utils").repairReviewEvidence(content, state);
   assert.equal(repaired.state.attempts[0].correct, true);
-  assert.equal(repaired.state.attempts[0].gradingSource, "evidence-repair-v3");
+  assert.equal(repaired.state.attempts[0].gradingSource, "evidence-repair-v4");
   assert.equal(repaired.state.mistakes.length, 0);
   assert.equal(repaired.state.history["2026-08-06"].correct, 1);
+});
+
+test("optional Chinese classifier omission repairs review, AI history, mistakes, and ability evidence", () => {
+  const content = {
+    words: ["it", "is", "a", "full", "cup"].map((english, index) => ({ id: `full-word-${index}`, english, chinese: english })),
+    sentences: [{ id: "full-base", english: "It is full.", chinese: "它是满的。", directions: ["en-zh"] }]
+  };
+  const variant = {
+    id: "ai-full-cup",
+    source: "ai",
+    family: "description",
+    english: "It is a full cup.",
+    chinese: "它是一个满的杯子。",
+    acceptedEnglish: ["it is a full cup"],
+    acceptedChinese: ["它是一个满的杯子"]
+  };
+  const state = {
+    evidenceRepairVersion: 3,
+    taskStates: { "full-base:en-zh": { level: 0, lastResult: false, reviewCount: 1, lastReviewed: "2026-08-07" } },
+    history: { "2026-08-07": { reviewed: 1, correct: 0 } },
+    attempts: [{
+      id: "full-attempt",
+      taskId: "full-base:en-zh",
+      variantId: variant.id,
+      reviewVariant: variant,
+      date: "2026-08-07",
+      answer: "它是满的杯子",
+      correct: false,
+      score: 0,
+      gradingStatus: "incorrect",
+      problemWords: ["a"],
+      explanation: "漏掉了冠词 a。",
+      detailedExplanation: "重点检查冠词 a。"
+    }],
+    mistakes: [{ id: "wrong-full", attemptId: "full-attempt", taskId: "full-base:en-zh", variantId: variant.id, reviewVariant: variant, userAnswer: "它是满的杯子" }],
+    aiPractice: {
+      currentSet: { id: "full-set", questions: [{ id: "q1", correct: false, score: 0, gradingStatus: "incorrect", problemWords: ["a"] }] },
+      history: [{
+        id: "full-set:q1",
+        direction: "en-zh",
+        prompt: "It is a full cup.",
+        userAnswer: "它是满的杯子",
+        correctAnswer: "它是一个满的杯子。",
+        correct: false,
+        score: 0,
+        gradingStatus: "incorrect",
+        problemWords: ["a"],
+        explanation: "漏掉了冠词 a。",
+        answeredAt: "2026-08-07T01:00:00.000Z"
+      }]
+    }
+  };
+
+  const repaired = repairLearningEvidence(content, state);
+  const attempt = repaired.state.attempts[0];
+  const aiItem = repaired.state.aiPractice.history[0];
+  assert.equal(attempt.correct, true);
+  assert.equal(attempt.score, 1);
+  assert.equal(attempt.gradingStatus, "correct");
+  assert.deepEqual(attempt.problemWords, []);
+  assert.match(attempt.detailedExplanation, /省略了可选/);
+  assert.equal(repaired.state.history["2026-08-07"].correct, 1);
+  assert.equal(repaired.state.taskStates["full-base:en-zh"].lastResult, true);
+  assert.equal(repaired.state.mistakes.length, 0);
+  assert.equal(aiItem.correct, true);
+  assert.deepEqual(aiItem.problemWords, []);
+  assert.equal(repaired.state.aiPractice.currentSet.questions[0].correct, true);
+  assert.match(repaired.state.aiPractice.currentSet.questions[0].detailedExplanation, /省略了可选/);
+
+  const abilities = analyzeAbilities(content, repaired.state).abilities;
+  assert.equal(abilities.find(item => item.id === "reading").measuredAccuracy, 100);
+  assert.equal(abilities.find(item => item.id === "vocabulary").measuredAccuracy, 100);
+
+  const secondPass = repairLearningEvidence(content, repaired.state);
+  assert.equal(secondPass.changed, false);
+  assert.deepEqual(secondPass.state, repaired.state);
+});
+
+test("evidence repair keeps explicit pair quantities wrong", () => {
+  const repaired = repairLearningEvidence({ words: [], sentences: [] }, {
+    aiPractice: { history: [{
+      id: "boot-set:q1",
+      direction: "en-zh",
+      prompt: "It is a boot.",
+      userAnswer: "它是一双靴子",
+      correctAnswer: "它是一只靴子。",
+      correct: true,
+      score: 1,
+      gradingStatus: "correct",
+      problemWords: []
+    }] }
+  });
+  const item = repaired.state.aiPractice.history[0];
+  assert.equal(item.correct, false);
+  assert.equal(item.score, 0);
+  assert.equal(item.gradingStatus, "incorrect");
+  assert.match(item.detailedExplanation, /一双|数量/);
 });

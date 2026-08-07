@@ -67,6 +67,12 @@ function variantCandidates(family) {
   return Array.from(new Set(values));
 }
 
+function mockChineseForSentence(sentence, suffix) {
+  const subject = normalizeEnglish(sentence).match(/^(it|he|she|i|we|sam|tom)\b/)?.[1] || "";
+  const prefix = { it: "它", he: "他", she: "她", i: "我", we: "我们", sam: "萨姆", tom: "汤姆" }[subject] || "测试";
+  return `${prefix}的测试句子 ${suffix}`;
+}
+
 function createProvider({ delayMs = 0 } = {}) {
   const calls = [];
   const provider = http.createServer(async (req, res) => {
@@ -86,7 +92,8 @@ function createProvider({ delayMs = 0 } = {}) {
       const family = target.grammarFamily;
       const chosen = variantCandidates(family).find(sentence => !excluded.has(normalizeEnglish(sentence))) || variantCandidates(family)[index % variantCandidates(family).length];
       excluded.add(normalizeEnglish(chosen));
-      return { taskId: target.taskId, english: chosen, chinese: `句子 ${calls.length}-${index}`, acceptedChinese: [`句子 ${calls.length}-${index}`] };
+      const chinese = mockChineseForSentence(chosen, `${calls.length}-${index}`);
+      return { taskId: target.taskId, english: chosen, chinese, acceptedChinese: [chinese] };
     });
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ variants }) } }] }));

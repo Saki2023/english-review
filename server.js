@@ -5,7 +5,7 @@ const vm = require("vm");
 const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
-const { buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
+const { OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
 const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
@@ -1896,7 +1896,12 @@ function localTranslationGrade(direction, english, answer, acceptedAnswers) {
   const quality = chineseAnswerQuality(answer, acceptedAnswers);
   if (!quality.correct) return null;
   const partial = quality.gradingStatus === "partial";
-  const explanation = partial ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。" : "本地规则已接受这个答案。";
+  const optionalMeasureOmission = chineseOptionalMeasureOmissionMatches(answer, acceptedAnswers);
+  const explanation = partial
+    ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
+    : optionalMeasureOmission
+      ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
+      : "本地规则已接受这个答案。";
   return {
     ...quality,
     explanation,

@@ -1,8 +1,13 @@
 "use strict";
 
 const {
+  OPTIONAL_MEASURE_OMISSION_EXPLANATION,
+  QUANTITY_CONFLICT_EXPLANATION,
+  buildTranslationExplanation,
   chineseAnswerQuality,
   chineseAnswerMatches,
+  chineseOptionalMeasureOmissionMatches,
+  chineseQuantityConflict,
   englishAnswerMatches,
   englishFunctionWordDifferences,
   englishFunctionWordsMatch,
@@ -19,6 +24,7 @@ function correctedAiHistoryItem(value) {
   let score = Number.isFinite(Number(item.score)) ? Math.max(0, Math.min(1, Number(item.score))) : (correct ? 1 : 0);
   let gradingStatus = ["correct", "partial", "incorrect"].includes(item.gradingStatus) ? item.gradingStatus : (correct ? "correct" : "incorrect");
   let explanation = String(item.explanation || "");
+  let detailedExplanation = String(item.detailedExplanation || "");
   let problemWords = Array.isArray(item.problemWords) ? item.problemWords : [];
   if (item.direction === "en-zh") {
     const quality = chineseAnswerQuality(item.userAnswer, acceptedAnswers);
@@ -27,9 +33,20 @@ function correctedAiHistoryItem(value) {
       score = quality.score;
       gradingStatus = quality.gradingStatus;
       problemWords = [];
+      const optionalMeasureOmission = chineseOptionalMeasureOmissionMatches(item.userAnswer, acceptedAnswers);
       explanation = quality.gradingStatus === "partial"
         ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
-        : (explanation || "中文表达与参考答案等义，已按当前规则修正。");
+        : optionalMeasureOmission
+          ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
+          : (item.correct ? (explanation || "中文表达与参考答案等义。") : "中文表达与参考答案等义，已按当前规则修正。");
+      detailedExplanation = buildTranslationExplanation({ direction: item.direction, referenceAnswer: item.correctAnswer, answer: item.userAnswer, correct: true, gradingStatus, explanation, problemWords });
+    } else if (correct && chineseQuantityConflict(item.userAnswer, acceptedAnswers)) {
+      correct = false;
+      score = 0;
+      gradingStatus = "incorrect";
+      problemWords = [];
+      explanation = QUANTITY_CONFLICT_EXPLANATION;
+      detailedExplanation = buildTranslationExplanation({ direction: item.direction, referenceAnswer: item.correctAnswer, answer: item.userAnswer, correct: false, gradingStatus, explanation, problemWords });
     }
   }
   if (!correct && item.direction === "zh-en" && englishAnswerMatches(item.userAnswer, acceptedAnswers)) {
@@ -54,6 +71,7 @@ function correctedAiHistoryItem(value) {
     score,
     gradingStatus,
     explanation,
+    detailedExplanation,
     problemWords,
     wordResults
   };
@@ -80,6 +98,7 @@ function repairAiPractice(value) {
         score: historyItem.score,
         gradingStatus: historyItem.gradingStatus,
         explanation: historyItem.explanation,
+        detailedExplanation: historyItem.detailedExplanation,
         problemWords: historyItem.problemWords,
         wordResults: historyItem.wordResults
       };

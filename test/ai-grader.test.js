@@ -119,6 +119,28 @@ test("AI grader cannot approve a Chinese-to-English answer with a missing articl
   assert.match(requestBody.messages[0].content, /missing or extra a, an, the/);
 });
 
+test("AI grader cannot approve an explicit pair quantity for singular English", async () => {
+  let requestBody;
+  const fetchImpl = async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ correct: true, explanation: "意思相同。" }) } }] }), { status: 200 });
+  };
+  const grader = createAiGrader(aiConfig(), { fetchImpl });
+  const result = await grader.grade({
+    direction: "en-zh",
+    sourceText: "It is a boot.",
+    acceptedAnswers: ["它是一只靴子。"],
+    answer: "它是一双靴子"
+  });
+
+  assert.equal(result.correct, false);
+  assert.equal(result.score, 0);
+  assert.deepEqual(result.problemWords, []);
+  assert.match(result.explanation, /一双|数量/);
+  assert.match(requestBody.messages[0].content, /omitting an optional singular classifier/);
+  assert.match(requestBody.messages[0].content, /Never accept 一双/);
+});
+
 test("AI grader retries once without JSON mode when a compatible proxy rejects it", async () => {
   const requests = [];
   const fetchImpl = async (_url, options) => {
@@ -321,6 +343,17 @@ test("generated questions reject unlearned English words and duplicates", () => 
   assert.throws(() => parseGeneratedQuestions(payload, { allowedWords: ["big", "cat"], count: 3 }), /too few valid/);
 });
 
+test("generated questions reject a Chinese subject that does not match the English pronoun", () => {
+  const payload = { choices: [{ message: { content: JSON.stringify({ questions: [
+    { direction: "zh-en", english: "It is a big cat.", chinese: "这是一只大猫。", acceptedEnglish: ["it is a big cat"], acceptedChinese: ["这是一只大猫"] },
+    { direction: "zh-en", english: "It is a big cat.", chinese: "它是一只大猫。", acceptedEnglish: ["it is a big cat"], acceptedChinese: ["它是一只大猫", "这是一只大猫"] }
+  ] }) } }] };
+  const questions = parseGeneratedQuestions(payload, { allowedWords: ["it", "is", "a", "big", "cat"], count: 1 });
+  assert.equal(questions.length, 1);
+  assert.equal(questions[0].chinese, "它是一只大猫。");
+  assert.deepEqual(questions[0].acceptedChinese, ["它是一只大猫。", "它是一只大猫"]);
+});
+
 test("generated question labels never expose model-provided answer hints", () => {
   const payload = { choices: [{ message: { content: JSON.stringify({ questions: [
     { direction: "en-zh", english: "cat in mat", chinese: "猫在垫子里面", acceptedEnglish: ["cat in mat"], acceptedChinese: ["猫在垫子里面"], focus: "in 表示在里面" }
@@ -482,6 +515,20 @@ test("admin configures AI on the web and progress-based questions use the select
     });
     assert.equal(localGrade.status, 200);
     assert.equal((await localGrade.json()).source, "local");
+    assert.equal(providerRequests.length, 1);
+
+    const omittedMeasureGrade = await fetch(`${baseUrl}/api/ai/grade`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ taskId: "d2-s4:en-zh", variantId: "description-big-box", answer: "它是大箱子" })
+    });
+    assert.equal(omittedMeasureGrade.status, 200);
+    const omittedMeasureBody = await omittedMeasureGrade.json();
+    assert.equal(omittedMeasureBody.correct, true);
+    assert.equal(omittedMeasureBody.score, 1);
+    assert.equal(omittedMeasureBody.gradingStatus, "correct");
+    assert.equal(omittedMeasureBody.source, "local");
+    assert.match(omittedMeasureBody.detailedExplanation, /省略了可选/);
     assert.equal(providerRequests.length, 1);
 
     const partialGrade = await fetch(`${baseUrl}/api/ai/grade`, {

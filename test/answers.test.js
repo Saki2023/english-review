@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
+const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseOptionalMeasureOmissionMatches, chineseQuantityConflict, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
 
 test("today review accepts only formally learned content", () => {
   const today = "2026-08-03";
@@ -41,6 +41,16 @@ test("Chinese measure-word mistakes preserve semantic understanding as partial c
   assert.deepEqual(chineseAnswerQuality("它是一只红色的笔", accepted), { correct: true, gradingStatus: "partial", score: 0.8 });
   assert.equal(chineseAnswerMatches("它是一只红色的笔", accepted), false);
   assert.deepEqual(chineseAnswerQuality("它是一只红色的猫", accepted), { correct: false, gradingStatus: "incorrect", score: 0 });
+});
+
+test("Chinese answers may omit optional singular classifiers without changing number", () => {
+  assert.deepEqual(chineseAnswerQuality("它是满的杯子", ["它是一个满的杯子"]), { correct: true, gradingStatus: "correct", score: 1 });
+  assert.deepEqual(chineseAnswerQuality("他在商店里", ["他在一家商店里"]), { correct: true, gradingStatus: "correct", score: 1 });
+  assert.equal(chineseOptionalMeasureOmissionMatches("一只猫坐在垫子上", ["一只猫坐在一张垫子上"]), true);
+  assert.equal(chineseOptionalMeasureOmissionMatches("它是一只红色的笔", ["它是一支红色的笔"]), false, "a wrong classifier is partial, not an omission");
+  assert.deepEqual(chineseAnswerQuality("它是一双靴子", ["它是一只靴子"]), { correct: false, gradingStatus: "incorrect", score: 0 });
+  assert.equal(chineseQuantityConflict("它是一双靴子", ["它是一只靴子"]), true);
+  assert.equal(chineseQuantityConflict("它是靴子", ["它是一只靴子"]), false);
 });
 
 test("English matching remains case and punctuation tolerant", () => {

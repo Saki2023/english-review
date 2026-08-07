@@ -6,11 +6,15 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  const EVIDENCE_REPAIR_VERSION = 3;
+  const EVIDENCE_REPAIR_VERSION = 4;
   const MISTAKE_AUTO_RESOLVE_STREAK = 2;
   const PARTIAL_TRANSLATION_SCORE = 0.8;
   const REQUIRED_ENGLISH_FUNCTION_WORDS = ["a", "an", "the", "on", "in", "am", "is", "are"];
   const CHINESE_MEASURE_WORDS = "个|只|头|张|支|块|家|本|辆|杯|条|位|件|台|把|朵|颗|枚";
+  const OPTIONAL_CHINESE_SINGULAR_MEASURE_WORDS = "个|只|头|张|支|块|家|本|辆|条|位|件|台|把|朵|颗|枚";
+  const CHINESE_QUANTITY_MEASURE_WORDS = `${CHINESE_MEASURE_WORDS}|双|对|碗|瓶|套|群`;
+  const OPTIONAL_MEASURE_OMISSION_EXPLANATION = "中文省略了可选的“一+量词”，但主语、性质、对象和数量含义没有改变，本题判为正确。";
+  const QUANTITY_CONFLICT_EXPLANATION = "中文数量与英文原句不一致；“一双/一对”等表示两个成对对象，不能替代英文单数 a/an。";
 
   function normalizeEnglish(value) {
     return String(value || "").toLowerCase().replace(/[“”‘’.,!?;:，。！？；：]/g, "").replace(/\s+/g, " ").trim();
@@ -216,6 +220,86 @@
     return normalizeChinese(value).replace(/(在|到|去)((?:[\u3400-\u9fff]{2,}|家|店|校))里/g, "$1$2");
   }
 
+  function measureStructure(value, pattern) {
+    const normalized = relaxedChineseLocation(value);
+    const expression = new RegExp(pattern, "g");
+    const measures = [];
+    let base = "";
+    let cursor = 0;
+    let match;
+    while ((match = expression.exec(normalized))) {
+      base += normalized.slice(cursor, match.index);
+      measures.push({ offset: base.length, text: match[0], number: match[1] || "一", measure: match[2] || match[1] || "" });
+      cursor = match.index + match[0].length;
+    }
+    base += normalized.slice(cursor);
+    return { base, measures };
+  }
+
+  function optionalMeasureStructure(value) {
+    return measureStructure(value, `一(${OPTIONAL_CHINESE_SINGULAR_MEASURE_WORDS})(?=[\\u3400-\\u9fff])`);
+  }
+
+  function quantityStructure(value) {
+    return measureStructure(value, `([一二两三四五六七八九十])(${CHINESE_QUANTITY_MEASURE_WORDS})(?=[\\u3400-\\u9fff])`);
+  }
+
+  function measureMap(structure) {
+    return new Map(structure.measures.map(item => [item.offset, item]));
+  }
+
+  function structureIsSubset(smaller, larger) {
+    const largerMeasures = measureMap(larger);
+    return smaller.measures.every(item => largerMeasures.get(item.offset)?.text === item.text);
+  }
+
+  function chineseOptionalMeasureOmissionMatches(answer, acceptedAnswers) {
+    const actual = optionalMeasureStructure(answer);
+    if (!actual.base) return false;
+    return (Array.isArray(acceptedAnswers) ? acceptedAnswers : []).some(expectedValue => {
+      const expected = optionalMeasureStructure(expectedValue);
+      if (expected.base !== actual.base || expected.measures.length <= actual.measures.length) return false;
+      return structureIsSubset(actual, expected);
+    });
+  }
+
+  function optionalSingularQuantity(item) {
+    return item && item.number === "一" && new RegExp(`^(?:${OPTIONAL_CHINESE_SINGULAR_MEASURE_WORDS})$`).test(item.measure);
+  }
+
+  function quantityStructuresConflict(expected, actual) {
+    const expectedMeasures = measureMap(expected);
+    const actualMeasures = measureMap(actual);
+    const offsets = new Set([...expectedMeasures.keys(), ...actualMeasures.keys()]);
+    for (const offset of offsets) {
+      const expectedItem = expectedMeasures.get(offset);
+      const actualItem = actualMeasures.get(offset);
+      if (expectedItem?.text === actualItem?.text) continue;
+      if (!expectedItem || !actualItem) {
+        if (optionalSingularQuantity(expectedItem || actualItem)) continue;
+        return true;
+      }
+      if (expectedItem.number === actualItem.number && optionalSingularQuantity(expectedItem) && optionalSingularQuantity(actualItem)) continue;
+      return true;
+    }
+    return false;
+  }
+
+  function chineseQuantityConflict(answer, acceptedAnswers) {
+    const actual = quantityStructure(answer);
+    const comparable = (Array.isArray(acceptedAnswers) ? acceptedAnswers : [])
+      .map(quantityStructure)
+      .filter(expected => expected.base && expected.base === actual.base);
+    return comparable.length > 0 && comparable.every(expected => quantityStructuresConflict(expected, actual));
+  }
+
+  function chineseSubjectMatchesEnglish(english, chinese) {
+    const subject = normalizeEnglish(english).match(/^(it|he|she|i|we|sam|tom)\b/)?.[1] || "";
+    if (!subject) return true;
+    const expected = { it: "它", he: "他", she: "她", i: "我", we: "我们", sam: "萨姆", tom: "汤姆" }[subject];
+    return normalizeChinese(chinese).startsWith(expected);
+  }
+
   function chineseAnswerQuality(answer, acceptedAnswers) {
     const normalized = normalizeChinese(answer);
     const references = Array.isArray(acceptedAnswers) ? acceptedAnswers : [];
@@ -224,6 +308,9 @@
     }
     const relaxedLocation = relaxedChineseLocation(answer);
     if (relaxedLocation && references.some(expected => relaxedChineseLocation(expected) === relaxedLocation)) {
+      return { correct: true, gradingStatus: "correct", score: 1 };
+    }
+    if (chineseOptionalMeasureOmissionMatches(answer, references)) {
       return { correct: true, gradingStatus: "correct", score: 1 };
     }
     const relaxed = relaxedChineseMeasureWords(answer);
@@ -340,7 +427,7 @@
       prompt: task.direction === "en-zh" ? task.item.english : task.item.chinese,
       userAnswer: String(attempt.answer || "（未填写）"),
       correctAnswer: task.direction === "zh-en" ? task.item.english : task.item.chinese,
-      note: "冠词、介词或 be 动词有漏写或多写，已按当前判题规则修正。"
+      note: String(attempt.detailedExplanation || attempt.explanation || "已按当前判题规则修正。").slice(0, 300)
     };
   }
 
@@ -362,15 +449,29 @@
       let gradingStatus = ["correct", "partial", "incorrect"].includes(attempt.gradingStatus) ? attempt.gradingStatus : (correct ? "correct" : "incorrect");
       let score = Number.isFinite(Number(attempt.score)) ? Math.max(0, Math.min(1, Number(attempt.score))) : (correct ? 1 : 0);
       let explanation = String(attempt.explanation || "");
+      let detailedExplanation = String(attempt.detailedExplanation || "");
+      let problemWords = Array.isArray(attempt.problemWords) ? attempt.problemWords : [];
       if (task.direction === "en-zh") {
         const quality = chineseAnswerQuality(attempt.answer, accepted);
         if (quality.gradingStatus === "correct" || quality.gradingStatus === "partial") {
           correct = true;
           gradingStatus = quality.gradingStatus;
           score = quality.score;
+          const optionalMeasureOmission = chineseOptionalMeasureOmissionMatches(attempt.answer, accepted);
           explanation = quality.gradingStatus === "partial"
             ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
-            : (explanation || "中文表达与参考答案等义，已按当前规则修正。");
+            : optionalMeasureOmission
+              ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
+              : (attempt.correct ? (explanation || "中文表达与参考答案等义。") : "中文表达与参考答案等义，已按当前规则修正。");
+          problemWords = [];
+          detailedExplanation = buildTranslationExplanation({ direction: task.direction, referenceAnswer: task.item.chinese, answer: attempt.answer, correct: true, gradingStatus, explanation, problemWords });
+        } else if (correct && chineseQuantityConflict(attempt.answer, accepted)) {
+          correct = false;
+          gradingStatus = "incorrect";
+          score = 0;
+          explanation = QUANTITY_CONFLICT_EXPLANATION;
+          problemWords = [];
+          detailedExplanation = buildTranslationExplanation({ direction: task.direction, referenceAnswer: task.item.chinese, answer: attempt.answer, correct: false, gradingStatus, explanation, problemWords });
         }
       } else {
         if (!correct && taskAnswerMatches(task, attempt.answer)) {
@@ -387,9 +488,9 @@
       }
       const wordResults = task.direction === "zh-en"
         ? englishWordResults(task.item.english, attempt.answer)
-        : englishSourceWordResults(task.item.english, correct, attempt.problemWords);
+        : englishSourceWordResults(task.item.english, correct, problemWords);
       const previousScore = Number.isFinite(Number(attempt.score)) ? Math.max(0, Math.min(1, Number(attempt.score))) : (attempt.correct ? 1 : 0);
-      const next = { ...attempt, correct, score, gradingStatus, explanation, wordResults };
+      const next = { ...attempt, correct, score, gradingStatus, explanation, detailedExplanation, problemWords, wordResults };
       const attemptChanged = JSON.stringify(next) !== JSON.stringify(attempt);
       if (!attemptChanged) return attempt;
       changed = true;
@@ -472,8 +573,11 @@
     REQUIRED_ENGLISH_FUNCTION_WORDS,
     buildTranslationExplanation,
     buildMistakePracticeQueue,
+    chineseOptionalMeasureOmissionMatches,
+    chineseQuantityConflict,
     chineseAnswerQuality,
     chineseAnswerMatches,
+    chineseSubjectMatchesEnglish,
     englishAnswerDifferences,
     englishAnswerMatches,
     englishFunctionWordDifferences,
@@ -485,6 +589,8 @@
     mistakeIsResolved,
     normalizeChinese,
     normalizeEnglish,
+    OPTIONAL_MEASURE_OMISSION_EXPLANATION,
+    QUANTITY_CONFLICT_EXPLANATION,
     reviewTaskForRecord,
     repairReviewEvidence,
     shouldSubmitOnEnter

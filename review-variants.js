@@ -164,6 +164,13 @@
     return Array.from(String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()).slice(0, maximum).join("");
   }
 
+  function chineseSubjectMatchesEnglish(english, chinese) {
+    const subject = normalizeEnglish(english).match(/^(it|he|she|i|we|sam|tom)\b/)?.[1] || "";
+    if (!subject) return true;
+    const expected = { it: "它", he: "他", she: "她", i: "我", we: "我们", sam: "萨姆", tom: "汤姆" }[subject];
+    return String(chinese || "").replace(/[\s“”‘’.,!?;:，。！？；：、]/g, "").startsWith(expected);
+  }
+
   function invalidGeneratedVariant(reasonCode, details = {}) {
     return { valid: false, reasonCode, variant: null, ...details };
   }
@@ -175,6 +182,7 @@
     const family = sentenceFamily(baseItem);
     if (!english) return invalidGeneratedVariant("missing-english");
     if (!chinese) return invalidGeneratedVariant("missing-chinese", { english });
+    if (!chineseSubjectMatchesEnglish(english, chinese)) return invalidGeneratedVariant("subject-mismatch", { english });
     if (!family) return invalidGeneratedVariant("unsupported-source-family", { english });
     const generatedFamily = sentenceFamily({ english });
     if (generatedFamily !== family) return invalidGeneratedVariant("wrong-family", { english, expectedFamily: family, actualFamily: generatedFamily });
@@ -189,7 +197,7 @@
     const acceptedChinese = [];
     [chinese, ...(Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [])].forEach(answer => {
       const text = cleanText(answer, 180);
-      if (text && !acceptedChinese.includes(text) && acceptedChinese.length < 8) acceptedChinese.push(text);
+      if (text && chineseSubjectMatchesEnglish(english, text) && !acceptedChinese.includes(text) && acceptedChinese.length < 8) acceptedChinese.push(text);
     });
     return { valid: true, reasonCode: "ok", english, normalizedEnglish: normalized, unlearnedWords: [], variant: {
       id: generatedVariantId(family, english),
@@ -230,6 +238,7 @@
   return {
     VARIANTS,
     chooseSentenceVariant,
+    chineseSubjectMatchesEnglish,
     eligibleSentenceVariants,
     englishTokens,
     generatedVariantId,
