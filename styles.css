@@ -168,7 +168,7 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .complete-icon svg { width: 20px; height: 20px; }
 .review-complete .secondary-button { margin-left: auto; }
 
-.ai-controls { display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(210px, 1fr) 100px auto; align-items: end; gap: 16px; margin-bottom: 24px; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.ai-controls { display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(210px, 1fr) 100px 100px auto; align-items: end; gap: 16px; margin-bottom: 24px; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .ai-control-field { min-width: 0; display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
 .ai-control-field > select { width: 100%; height: 38px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--ink); background: var(--surface); }
 .ai-control-field .segmented-control { width: 100%; }
@@ -730,7 +730,7 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
   .question-area { padding: 38px 0 3px; }
   .prompt-text { font-size: 30px; }
   .ai-controls { grid-template-columns: minmax(180px, 1fr) minmax(210px, 1fr); }
-  .ai-generate-button { width: 100%; }
+  .ai-generate-button { grid-column: 1 / -1; width: 100%; }
   .exam-controls { grid-template-columns: minmax(180px, 1fr) minmax(220px, 1fr); }
   .exam-options { grid-column: 1; }
   .exam-generate-button { grid-column: 2; width: 100%; }
@@ -861,7 +861,7 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
   .settings-actions { flex-direction: column-reverse; }
   .settings-actions button { width: 100%; }
   .review-complete { align-items: flex-start; flex-wrap: wrap; }
-  .review-complete .secondary-button { margin-left: 52px; }
+  .review-complete .secondary-button { max-width: calc(100% - 52px); margin-left: 52px; white-space: normal; text-align: center; }
   .progress-overview { gap: 12px; }
   .progress-number strong { font-size: 23px; }
   .bar-chart { gap: 5px; }

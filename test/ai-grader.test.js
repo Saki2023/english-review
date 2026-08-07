@@ -10,7 +10,7 @@ const { once } = require("node:events");
 const { spawn } = require("node:child_process");
 const { test } = require("node:test");
 const { createUser, loadUsers, saveUsers } = require("../server/accounts");
-const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl, createAiGrader, createAiPreviewSentenceGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter, parseGeneratedQuestions, parseGradeResponse, parseModelList, parsePreviewSentenceResponse, parseReviewVariantResponse } = require("../server/ai-grader");
+const { buildChatCompletionsUrl, buildModelsUrl, buildResponsesUrl, createAiGrader, createAiPreviewSentenceGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter, parseGeneratedQuestionGroups, parseGeneratedQuestions, parseGradeResponse, parseModelList, parsePreviewSentenceResponse, parseReviewVariantResponse } = require("../server/ai-grader");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -343,6 +343,20 @@ test("generated questions reject unlearned English words and duplicates", () => 
   assert.throws(() => parseGeneratedQuestions(payload, { allowedWords: ["big", "cat"], count: 3 }), /too few valid/);
 });
 
+test("prepared AI groups stay independent and may reuse useful questions across groups", () => {
+  const repeated = { direction: "en-zh", english: "big cat", chinese: "大猫", acceptedEnglish: ["big cat"], acceptedChinese: ["大猫"] };
+  const payload = { choices: [{ message: { content: JSON.stringify({ groups: [
+    { questions: [repeated] },
+    { questions: [repeated] },
+    { questions: [repeated] }
+  ] }) } }] };
+  const groups = parseGeneratedQuestionGroups(payload, { allowedWords: ["big", "cat"], count: 1, groupCount: 3 });
+  assert.equal(groups.length, 3);
+  assert.deepEqual(groups.map(group => group.length), [1, 1, 1]);
+  assert.deepEqual(groups.map(group => group[0].english), ["big cat", "big cat", "big cat"]);
+  assert.throws(() => parseGeneratedQuestionGroups(payload, { allowedWords: ["big", "cat"], count: 1, groupCount: 5 }), /too few question groups/);
+});
+
 test("generated questions reject a Chinese subject that does not match the English pronoun", () => {
   const payload = { choices: [{ message: { content: JSON.stringify({ questions: [
     { direction: "zh-en", english: "It is a big cat.", chinese: "这是一只大猫。", acceptedEnglish: ["it is a big cat"], acceptedChinese: ["这是一只大猫"] },
@@ -414,13 +428,17 @@ test("admin configures AI on the web and progress-based questions use the select
               acceptedChinese: ["它是一个热箱子"]
             }) });
       } else if (system.includes("Create personalized translation exercises")) {
-        content = JSON.stringify({ questions: [
+        const questions = [
           { direction: "en-zh", english: "It is big.", chinese: "\u5b83\u5f88\u5927\u3002", acceptedEnglish: ["it is big"], acceptedChinese: ["\u5b83\u5f88\u5927"], focus: "big" },
           { direction: "zh-en", english: "A cat sat on a mat.", chinese: "\u4e00\u53ea\u732b\u5750\u5728\u4e00\u5f20\u57ab\u5b50\u4e0a\u3002", acceptedEnglish: ["a cat sat on a mat"], acceptedChinese: ["\u4e00\u53ea\u732b\u5750\u5728\u57ab\u5b50\u4e0a"], focus: "cat" },
           { direction: "en-zh", english: "I am Sam.", chinese: "\u6211\u662f\u8428\u59c6\u3002", acceptedEnglish: ["i am sam"], acceptedChinese: ["\u6211\u662f\u8428\u59c6"], focus: "am" },
           { direction: "zh-en", english: "It is a big pig.", chinese: "\u5b83\u662f\u4e00\u5934\u5927\u732a\u3002", acceptedEnglish: ["it is a big pig"], acceptedChinese: ["\u5b83\u662f\u4e00\u5934\u5927\u732a"], focus: "pig" },
           { direction: "en-zh", english: "A big cat sat on a mat.", chinese: "\u4e00\u53ea\u5927\u732b\u5750\u5728\u4e00\u5f20\u57ab\u5b50\u4e0a\u3002", acceptedEnglish: ["a big cat sat on a mat"], acceptedChinese: ["\u4e00\u53ea\u5927\u732b\u5750\u5728\u57ab\u5b50\u4e0a"], focus: "sat" }
-        ] });
+        ];
+        const groupMatch = system.match(/Return exactly (\d+) independent groups/);
+        content = groupMatch
+          ? JSON.stringify({ groups: Array.from({ length: Number(groupMatch[1]) }, () => ({ questions })) })
+          : JSON.stringify({ questions });
       } else if (system.includes("patient English tutor")) content = "先看句子的主语和位置词，再自己试一次。";
       else if (system.includes("ok set to true")) content = "{\"ok\":true}";
       else content = "{\"correct\":true,\"explanation\":\"\u610f\u601d\u76f8\u540c\uff0c\u53ea\u662f\u8bf4\u6cd5\u4e0d\u540c\u3002\"}";
@@ -577,12 +595,18 @@ test("admin configures AI on the web and progress-based questions use the select
     const generated = await fetch(`${baseUrl}/api/ai/questions/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Cookie": cookie },
-      body: JSON.stringify({ model: "strong-model", reasoningEffort: "high", count: 5 })
+      body: JSON.stringify({ model: "strong-model", reasoningEffort: "high", count: 5, groupCount: 3 })
     });
     assert.equal(generated.status, 201);
     const generatedBody = await generated.json();
     assert.equal(generatedBody.set.questions.length, 5);
     assert.equal(generatedBody.set.model, "strong-model");
+    assert.equal(generatedBody.set.groupNumber, 1);
+    assert.equal(generatedBody.set.groupCount, 3);
+    assert.equal(generatedBody.queuedSets.length, 2);
+    assert.deepEqual(generatedBody.queuedSets.map(set => set.questions.length), [5, 5]);
+    assert.deepEqual(generatedBody.queuedSets.map(set => set.groupNumber), [2, 3]);
+    assert.equal(generatedBody.settings.groupCount, 3);
     assert.equal(providerRequests.length, 3);
     const profile = JSON.parse(providerRequests[2].body.messages[1].content);
     assert.equal(profile.recentMistakes[0].correctAnswer, "\u732b");
@@ -682,6 +706,52 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.notEqual(secondReviewTutorBody.tutor.questionId, reviewTutorBody.tutor.questionId);
     assert.equal(secondReviewTutorBody.exchange.prompt, "It is big.");
     assert.equal(JSON.parse(providerRequests.at(-1).body.messages[1].content).exercise.english, "It is big.");
+
+    const earlyNext = await fetch(`${baseUrl}/api/ai/questions/next`, { method: "POST", headers: { "Content-Type": "application/json", "Cookie": cookie }, body: "{}" });
+    assert.equal(earlyNext.status, 409, "a prepared group must never start before the learner finishes the current group");
+
+    const stateWithPreparedGroups = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
+    assert.equal(stateWithPreparedGroups.aiPractice.queuedSets.length, 2);
+    const legacyAiPractice = { ...stateWithPreparedGroups.aiPractice };
+    delete legacyAiPractice.queuedSets;
+    const legacySave = await fetch(`${baseUrl}/api/state`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ ...stateWithPreparedGroups, aiPractice: legacyAiPractice })
+    });
+    assert.equal(legacySave.status, 200);
+    assert.equal((await legacySave.json()).aiPractice.queuedSets.length, 2, "an older page must not erase server-prepared groups");
+
+    const preparedAdvanceRequestCount = providerRequests.length;
+    const currentQuestions = stateWithPreparedGroups.aiPractice.currentSet.questions;
+    for (const question of currentQuestions.slice(1)) {
+      const localAnswer = question.direction === "zh-en" ? question.english : question.chinese;
+      const completion = await fetch(`${baseUrl}/api/ai/questions/grade`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Cookie": cookie },
+        body: JSON.stringify({ setId: generatedBody.set.id, questionId: question.id, answer: localAnswer })
+      });
+      assert.equal(completion.status, 200);
+    }
+    assert.equal(providerRequests.length, preparedAdvanceRequestCount, "exact answers should complete the group without another upstream request");
+
+    const nextPrepared = await fetch(`${baseUrl}/api/ai/questions/next`, { method: "POST", headers: { "Content-Type": "application/json", "Cookie": cookie }, body: "{}" });
+    assert.equal(nextPrepared.status, 200);
+    const nextPreparedBody = await nextPrepared.json();
+    assert.equal(nextPreparedBody.set.groupNumber, 2);
+    assert.equal(nextPreparedBody.remainingGroups, 1);
+    assert.equal(nextPreparedBody.practice.history.length, 5, "unanswered prepared groups must not enter practice history");
+    assert.equal(providerRequests.length, preparedAdvanceRequestCount, "continuing a prepared group must not call AI again");
+
+    const ownerRelogin = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "owner", password: "strong-ai-password" })
+    });
+    const ownerReloginCookie = ownerRelogin.headers.get("set-cookie").split(";")[0];
+    const stateAfterRelogin = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": ownerReloginCookie } })).json();
+    assert.equal(stateAfterRelogin.aiPractice.currentSet.groupNumber, 2);
+    assert.equal(stateAfterRelogin.aiPractice.queuedSets.length, 1, "prepared groups must survive a fresh login");
 
     const unavailableGeneration = await fetch(`${baseUrl}/api/ai/questions/generate`, {
       method: "POST",

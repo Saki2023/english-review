@@ -9,6 +9,8 @@ const { sanitizeFocusedState } = require("./focused-practice");
 
 const MAX_AI_HISTORY = 1000;
 const MAX_QUESTION_COUNT = 10;
+const MAX_AI_GROUPS = 5;
+const MAX_QUEUED_SETS = MAX_AI_GROUPS - 1;
 const MAX_TUTOR_MESSAGES = 12;
 const MAX_TUTOR_HISTORY = 1000;
 const MAX_TUTOR_RESETS = 1000;
@@ -175,6 +177,9 @@ function sanitizeQuestionSet(value) {
   const index = Math.min(Math.max(Number(value.index) || 0, 0), questions.length);
   return {
     id: cleanText(value.id, 80) || `aiset-${crypto.randomUUID()}`,
+    batchId: cleanText(value.batchId, 80),
+    groupNumber: Math.min(Math.max(Number(value.groupNumber) || 1, 1), MAX_AI_GROUPS),
+    groupCount: Math.min(Math.max(Number(value.groupCount) || 1, 1), MAX_AI_GROUPS),
     createdAt: cleanText(value.createdAt, 40) || new Date().toISOString(),
     providerId: cleanText(value.providerId, 64),
     providerName: cleanText(value.providerName, 60),
@@ -183,6 +188,28 @@ function sanitizeQuestionSet(value) {
     questions,
     index,
     completed: Boolean(value.completed || index >= questions.length)
+  };
+}
+
+function sanitizeQueuedQuestionSet(value) {
+  const set = sanitizeQuestionSet(value);
+  if (!set) return null;
+  return {
+    ...set,
+    index: 0,
+    completed: false,
+    questions: set.questions.map(question => ({
+      ...question,
+      userAnswer: "",
+      correct: null,
+      score: null,
+      gradingStatus: "",
+      problemWords: [],
+      wordResults: [],
+      explanation: "",
+      detailedExplanation: "",
+      answeredAt: ""
+    }))
   };
 }
 
@@ -238,7 +265,8 @@ function sanitizeAiPractice(value) {
     settings: {
       model: cleanText(settings.model, 120),
       reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
-      count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
+      count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5,
+      groupCount: [1, 2, 3, 5].includes(Number(settings.groupCount)) ? Number(settings.groupCount) : 1
     },
     tutorSettings: {
       providerId: cleanText(tutorSettings.providerId, 64),
@@ -246,6 +274,7 @@ function sanitizeAiPractice(value) {
       reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
     },
     currentSet: sanitizeQuestionSet(source.currentSet),
+    queuedSets: (Array.isArray(source.queuedSets) ? source.queuedSets : []).map(sanitizeQueuedQuestionSet).filter(Boolean).slice(0, MAX_QUEUED_SETS),
     tutor,
     tutorHistory: (savedTutorHistory.length ? savedTutorHistory : legacyTutorHistory(tutor)).slice(-MAX_TUTOR_HISTORY),
     tutorResets: Array.from(tutorResetMap.values()).slice(-MAX_TUTOR_RESETS),
@@ -358,9 +387,12 @@ function buildLearningProfile(content, state, studyDate = "") {
   };
 }
 
-function createQuestionSet(questions, selection) {
+function createQuestionSet(questions, selection, metadata = {}) {
   return sanitizeQuestionSet({
     id: `aiset-${crypto.randomUUID()}`,
+    batchId: metadata.batchId,
+    groupNumber: metadata.groupNumber,
+    groupCount: metadata.groupCount,
     createdAt: new Date().toISOString(),
     providerId: selection.providerId,
     providerName: selection.providerName,
@@ -374,6 +406,8 @@ function createQuestionSet(questions, selection) {
 
 module.exports = {
   MAX_AI_HISTORY,
+  MAX_AI_GROUPS,
+  MAX_QUEUED_SETS,
   MAX_TUTOR_HISTORY,
   MAX_TUTOR_MESSAGES,
   MAX_TUTOR_RESETS,

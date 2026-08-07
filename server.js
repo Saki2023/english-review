@@ -607,7 +607,11 @@ function handleState(req, res, user) {
   if (req.method === "GET") return sendJson(res, 200, publicReviewState(getUserState(user)));
   if (req.method === "PUT") return readBody(req).then(body => {
     const existing = getUserState(user);
-    userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({ ...body, aiExam: existing.aiExam, dictation: existing.dictation, focusedPractice: existing.focusedPractice, teachingProfile: existing.teachingProfile, reviewVariantPool: existing.reviewVariantPool })).state;
+    const incomingAiPractice = body.aiPractice && typeof body.aiPractice === "object" ? body.aiPractice : {};
+    const aiPractice = Object.hasOwn(incomingAiPractice, "queuedSets")
+      ? incomingAiPractice
+      : { ...incomingAiPractice, queuedSets: sanitizeAiPractice(existing.aiPractice).queuedSets };
+    userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({ ...body, aiPractice, aiExam: existing.aiExam, dictation: existing.dictation, focusedPractice: existing.focusedPractice, teachingProfile: existing.teachingProfile, reviewVariantPool: existing.reviewVariantPool })).state;
     persistUserStates();
     sendJson(res, 200, publicReviewState(userStates.users[user.id]));
   }).catch(error => sendError(res, error.statusCode || 400, error.message));
@@ -1713,11 +1717,12 @@ function aiSelectionForState(state, requested = {}) {
   const model = String(requested.model || (availableModels.includes(storedModel) ? storedModel : aiSettings && aiSettings.defaultModel) || "").trim();
   const reasoningEffort = AI_EFFORTS.includes(requested.reasoningEffort) ? requested.reasoningEffort : practice.settings.reasoningEffort;
   const count = [5, 10].includes(Number(requested.count)) ? Number(requested.count) : practice.settings.count;
+  const groupCount = [1, 2, 3, 5].includes(Number(requested.groupCount)) ? Number(requested.groupCount) : practice.settings.groupCount;
   const route = selectAiCandidates(aiSettings, { model, reasoningEffort });
-  practice.settings = { model: route.model, reasoningEffort: route.reasoningEffort, count };
+  practice.settings = { model: route.model, reasoningEffort: route.reasoningEffort, count, groupCount };
   practice.updatedAt = new Date().toISOString();
   state.aiPractice = practice;
-  return { route, count, practice };
+  return { route, count, groupCount, practice };
 }
 
 function publicAiOptions(user) {
@@ -1749,6 +1754,7 @@ function publicAiOptions(user) {
     selectedEffort: practice.settings.reasoningEffort,
     selectedTutorEffort: practice.tutorSettings.reasoningEffort,
     selectedCount: practice.settings.count,
+    selectedGroupCount: practice.settings.groupCount,
     routingMode: current.mode,
     admin: Boolean(user && user.role === "admin")
   };
@@ -1768,10 +1774,10 @@ function publicAiGenerationFailure(error) {
   else if (/timed out/i.test(detail)) {
     message = "AI 请求超时，请稍后重试或在 AI 设置中增加超时时间";
     statusCode = 504;
-  } else if (/AI exam returned too few|missing numbered blanks|missing a cloze passage|missing a reading passage|point allocation is invalid/i.test(detail)) message = "AI 返回的试卷缺少必需题型或题量，系统未采用，请重新生成或更换模型";
+  } else if (/too few question groups|too few valid questions|did not return questions/i.test(detail)) message = "AI 返回的题组或题量不完整，系统未采用，请重新生成或更换模型";
+  else if (/AI exam returned too few|missing numbered blanks|missing a cloze passage|missing a reading passage|point allocation is invalid/i.test(detail)) message = "AI 返回的试卷缺少必需题型或题量，系统未采用，请重新生成或更换模型";
   else if (/AI exam used unlearned English|AI exam returned no English/i.test(detail)) message = "AI 返回的试卷含有未学英语，系统未采用，请重新生成或更换模型";
-  else if (/too few valid questions/i.test(detail)) message = "AI 返回的题目超出了已学词汇，请重试或更换模型";
-  else if (/invalid (question|exam) JSON|did not return questions|unsupported response|Unexpected (end|token)/i.test(detail)) message = "AI 返回格式不符合出题要求，请重试或更换模型";
+  else if (/invalid (question|exam) JSON|unsupported response|Unexpected (end|token)/i.test(detail)) message = "AI 返回格式不符合出题要求，请重试或更换模型";
   else if (/response is too large/i.test(detail)) message = "AI 返回内容过长，请重试或更换模型";
 
   return { message, providerStatus, statusCode };
@@ -2039,20 +2045,40 @@ async function handleAiGenerate(req, res, user) {
     refreshContent();
     const profile = buildLearningProfile(content, state, today());
     if (!profile.allowedWords.length) return sendError(res, 409, "no learned words are available");
-    const routed = await runAiRoute(selection.route, config => createAiQuestionGenerator(config).generate(profile, selection.count));
-    const set = createQuestionSet(routed.value, routed.config);
+    const routed = await runAiRoute(selection.route, config => createAiQuestionGenerator(config).generateGroups(profile, selection.count, selection.groupCount));
+    const batchId = `aibatch-${crypto.randomUUID()}`;
+    const sets = routed.value.map((questions, index) => createQuestionSet(questions, routed.config, { batchId, groupNumber: index + 1, groupCount: selection.groupCount }));
+    const set = sets[0];
     selection.practice.currentSet = set;
+    selection.practice.queuedSets = sets.slice(1);
     selection.practice.tutor = null;
     selection.practice.updatedAt = new Date().toISOString();
     state.aiPractice = selection.practice;
     persistUserStates();
-    return sendJson(res, 201, { set, settings: selection.practice.settings });
+    return sendJson(res, 201, { set, queuedSets: selection.practice.queuedSets, settings: selection.practice.settings });
   } catch (error) {
     if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI question generation failed: ${error && error.message ? error.message : "unknown error"}`);
     const failure = publicAiGenerationFailure(error);
     return sendJson(res, failure.statusCode, { error: failure.message, providerStatus: failure.providerStatus });
   }
+}
+
+function handleAiNextSet(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "POST") return sendError(res, 404, "AI question endpoint not found");
+  const state = getUserState(user);
+  const practice = sanitizeAiPractice(state.aiPractice);
+  const current = practice.currentSet;
+  if (!current || !current.questions.every(question => typeof question.correct === "boolean")) return sendError(res, 409, "current AI question set is not complete");
+  if (!practice.queuedSets.length) return sendError(res, 409, "no prepared AI question set is available");
+  practice.currentSet = practice.queuedSets[0];
+  practice.queuedSets = practice.queuedSets.slice(1);
+  practice.tutor = null;
+  practice.updatedAt = new Date().toISOString();
+  state.aiPractice = practice;
+  persistUserStates();
+  return sendJson(res, 200, { set: practice.currentSet, remainingGroups: practice.queuedSets.length, practice });
 }
 
 async function handleAiTutorAsk(req, res, user) {
@@ -2750,6 +2776,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/ai/dictation" || url.pathname.startsWith("/api/ai/dictation/")) return handleAiDictation(req, res, url, user);
   if (url.pathname === "/api/ai/focused" || url.pathname.startsWith("/api/ai/focused/")) return handleAiFocusedPractice(req, res, url, user);
   if (url.pathname === "/api/ai/questions/generate") return handleAiGenerate(req, res, user);
+  if (url.pathname === "/api/ai/questions/next") return handleAiNextSet(req, res, user);
   if (url.pathname === "/api/ai/questions/tutor/clear") return handleAiTutorClear(req, res, user);
   if (url.pathname === "/api/ai/questions/ask") return handleAiTutorAsk(req, res, user);
   if (url.pathname === "/api/ai/questions/grade") return handleAiQuestionGrade(req, res, user);

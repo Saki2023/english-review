@@ -46,6 +46,7 @@
   const LIBRARY_PAGE_SIZES = [10, 20, 50, 100];
   const INTERVALS = [1, 3, 7, 14, 30, 60];
   const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+  const AI_GROUP_COUNTS = [1, 2, 3, 5];
   const AI_EFFORT_LABELS = { low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高" };
   const MAX_CLIENT_TUTOR_HISTORY = 1000;
   const MAX_CLIENT_TUTOR_RESETS = 1000;
@@ -251,7 +252,8 @@
       settings: {
         model: String(settings.model || ""),
         reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
-        count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5
+        count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5,
+        groupCount: AI_GROUP_COUNTS.includes(Number(settings.groupCount)) ? Number(settings.groupCount) : 1
       },
       tutorSettings: {
         providerId: String(tutorSettings.providerId || ""),
@@ -259,6 +261,7 @@
         reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
       },
       currentSet: source.currentSet && Array.isArray(source.currentSet.questions) ? source.currentSet : null,
+      queuedSets: (Array.isArray(source.queuedSets) ? source.queuedSets : []).filter(set => set && Array.isArray(set.questions) && set.questions.length).slice(0, 4),
       tutor: normalizeClientTutor(source.tutor),
       tutorHistory: (Array.isArray(source.tutorHistory) ? source.tutorHistory : []).map(normalizeClientTutorExchange).filter(Boolean).slice(-MAX_CLIENT_TUTOR_HISTORY),
       tutorResets: (Array.isArray(source.tutorResets) ? source.tutorResets : []).map(normalizeClientTutorReset).filter(Boolean).slice(-MAX_CLIENT_TUTOR_RESETS),
@@ -1529,7 +1532,7 @@
   function selectedAiSettings() {
     const practice = normalizeClientAiPractice(model.aiPractice);
     const modelName = aiOptions.models.includes(practice.settings.model) ? practice.settings.model : aiOptions.defaultModel;
-    return { model: modelName, reasoningEffort: practice.settings.reasoningEffort, count: practice.settings.count };
+    return { model: modelName, reasoningEffort: practice.settings.reasoningEffort, count: practice.settings.count, groupCount: practice.settings.groupCount };
   }
 
   function updateAiPreferences(patch) {
@@ -1610,6 +1613,9 @@
     if (settings.model) select.value = settings.model;
     select.disabled = !aiOptions.configured || !aiOptions.models.length;
     $("#aiQuestionCount").value = String(settings.count);
+    $("#aiQuestionCount").disabled = !aiOptions.configured || aiRequestInProgress;
+    $("#aiGroupCount").value = String(settings.groupCount);
+    $("#aiGroupCount").disabled = !aiOptions.configured || aiRequestInProgress;
     $$('[data-ai-effort]').forEach(button => {
       const active = button.dataset.aiEffort === settings.reasoningEffort;
       button.classList.toggle("is-selected", active);
@@ -2300,11 +2306,13 @@
   }
 
   function renderAiView() {
-    if (!model.aiPractice) model.aiPractice = normalizeClientAiPractice(null);
+    model.aiPractice = normalizeClientAiPractice(model.aiPractice);
+    const practice = model.aiPractice;
+    const queuedCount = practice.queuedSets.length;
     populateAiModelSelect();
     renderAiHistory();
     $("#openAiConfigButton").hidden = !currentUser || currentUser.role !== "admin";
-    $("#aiStatus").textContent = aiStatusMessage || (aiOptions.configured ? "AI 已配置" : "AI 尚未配置");
+    $("#aiStatus").textContent = aiStatusMessage || (aiOptions.configured ? (queuedCount ? `后续 ${queuedCount} 组已经准备好` : "AI 已配置") : "AI 尚未配置");
     const empty = $("#aiEmptyState");
     const panel = $("#aiPracticePanel");
     const complete = $("#aiPracticeComplete");
@@ -2315,7 +2323,7 @@
       return;
     }
 
-    const set = model.aiPractice.currentSet;
+    const set = practice.currentSet;
     if (!set) {
       empty.hidden = false; panel.hidden = true; complete.hidden = true;
       $("#aiEmptyTitle").textContent = "准备生成题目";
@@ -2326,8 +2334,15 @@
       set.completed = true;
       empty.hidden = true; panel.hidden = true; complete.hidden = false;
       const earned = set.questions.reduce((sum, question) => sum + aiQuestionScore(question), 0);
-      $("#aiCompleteNote").textContent = `得分 ${formatQuestionScore(earned)} / ${set.questions.length}`;
+      const groupProgress = Number(set.groupCount) > 1 ? `第 ${Number(set.groupNumber) || 1} / ${Number(set.groupCount) || 1} 组 · ` : "";
+      $("#aiCompleteNote").textContent = `${groupProgress}得分 ${formatQuestionScore(earned)} / ${set.questions.length}${queuedCount ? ` · 后续 ${queuedCount} 组已准备好` : ""}`;
+      const continueButton = $("#generateAnotherAiSet");
+      continueButton.disabled = aiRequestInProgress;
+      continueButton.innerHTML = queuedCount
+        ? `继续下一组（还剩 ${queuedCount} 组）<i data-lucide="arrow-right" aria-hidden="true"></i>`
+        : '生成下一组<i data-lucide="sparkles" aria-hidden="true"></i>';
       renderAiTutorWindow();
+      refreshIcons();
       return;
     }
 
@@ -2339,7 +2354,9 @@
     empty.hidden = true; panel.hidden = false; complete.hidden = true;
     $("#aiFocusBadge").textContent = question.focus || "巩固练习";
     $("#aiModelReadout").textContent = [set.providerName, set.model, AI_EFFORT_LABELS[set.reasoningEffort] || "中"].filter(Boolean).join(" · ");
-    $("#aiQuestionProgress").textContent = `${Number(set.index) + 1} / ${set.questions.length}`;
+    $("#aiQuestionProgress").textContent = Number(set.groupCount) > 1
+      ? `第 ${Number(set.groupNumber) || 1}/${Number(set.groupCount) || 1} 组 · ${Number(set.index) + 1}/${set.questions.length}`
+      : `${Number(set.index) + 1} / ${set.questions.length}`;
     $("#aiDirectionLabel").textContent = formatDirection(question.direction);
     $("#aiPromptText").textContent = question.direction === "en-zh" ? question.english : question.chinese;
     $("#aiPromptSpeech").innerHTML = question.direction === "en-zh" ? speechButtonHtml(question.english, "播放题目发音") : "";
@@ -2991,16 +3008,21 @@
 
   async function generateAiQuestions() {
     if (aiRequestInProgress || !aiOptions.configured) return;
+    const existingPractice = normalizeClientAiPractice(model.aiPractice);
+    const currentSet = existingPractice.currentSet;
+    const currentUnfinished = currentSet && !currentSet.completed && Number(currentSet.index) < currentSet.questions.length;
+    if ((currentUnfinished || existingPractice.queuedSets.length) && !window.confirm(`重新生成会替换当前${currentUnfinished ? "未完成题组" : "题组"}${existingPractice.queuedSets.length ? `和 ${existingPractice.queuedSets.length} 个待开始题组` : ""}，确定继续吗？`)) return;
     const button = $("#generateAiQuestions");
     const settings = {
       model: $("#aiModelSelect").value,
       reasoningEffort: $$('[data-ai-effort]').find(item => item.classList.contains("is-selected"))?.dataset.aiEffort || "medium",
-      count: Number($("#aiQuestionCount").value) || 5
+      count: Number($("#aiQuestionCount").value) || 5,
+      groupCount: Number($("#aiGroupCount").value) || 1
     };
     updateAiPreferences(settings);
     aiRequestInProgress = true;
-    setBusyButton(button, true, "正在生成…");
-    aiStatusMessage = "正在分析学习进度…";
+    setBusyButton(button, true, settings.groupCount > 1 ? `正在生成 ${settings.groupCount} 组…` : "正在生成…");
+    aiStatusMessage = settings.groupCount > 1 ? `正在预生成 ${settings.groupCount} 个独立题组…` : "正在分析学习进度…";
     $("#aiStatus").textContent = aiStatusMessage;
     try {
       const response = await fetch("/api/ai/questions/generate", {
@@ -3013,12 +3035,43 @@
       const practice = normalizeClientAiPractice(model.aiPractice);
       practice.settings = data.settings;
       practice.currentSet = data.set;
+      practice.queuedSets = Array.isArray(data.queuedSets) ? data.queuedSets : [];
       practice.tutor = null;
       aiTutorTarget = null;
       practice.updatedAt = new Date().toISOString();
       model.aiPractice = practice;
       saveModel();
-      aiStatusMessage = "题目已生成";
+      aiStatusMessage = settings.groupCount > 1 ? `${settings.groupCount} 组题目已全部生成，可以连续练习` : "题目已生成";
+    } catch (error) {
+      aiStatusMessage = error.message;
+      showToast(error.message);
+    } finally {
+      aiRequestInProgress = false;
+      setBusyButton(button, false, "");
+      renderAiView();
+    }
+  }
+
+  async function continuePreparedAiSet() {
+    if (aiRequestInProgress) return;
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    if (!practice.queuedSets.length) return generateAiQuestions();
+    const button = $("#generateAnotherAiSet");
+    aiRequestInProgress = true;
+    setBusyButton(button, true, "正在进入…");
+    try {
+      const response = await fetch("/api/ai/questions/next", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      const data = await responseJson(response);
+      model.aiPractice = normalizeClientAiPractice(data.practice);
+      aiTutorTarget = null;
+      saveModel();
+      const nextSet = model.aiPractice.currentSet;
+      aiStatusMessage = `已进入第 ${Number(nextSet && nextSet.groupNumber) || 1} 组${data.remainingGroups ? `，后续还有 ${data.remainingGroups} 组` : ""}`;
     } catch (error) {
       aiStatusMessage = error.message;
       showToast(error.message);
@@ -4372,8 +4425,9 @@
       setView("ai");
       const practice = normalizeClientAiPractice(model.aiPractice);
       const currentSet = practice.currentSet;
-      if (activeStage && (!currentSet || currentSet.completed || Number(currentSet.index) >= currentSet.questions.length)) {
+      if (activeStage && (!currentSet || ((currentSet.completed || Number(currentSet.index) >= currentSet.questions.length) && !practice.queuedSets.length))) {
         $("#aiQuestionCount").value = "5";
+        $("#aiGroupCount").value = "1";
         await generateAiQuestions();
       }
       focusStudyStageContent("#aiPracticePanel:not([hidden]), #aiEmptyState:not([hidden]), #aiPracticeComplete:not([hidden])", ["#aiAnswerInput", "#nextAiQuestion", "#generateAiQuestions"]);
@@ -5713,8 +5767,13 @@
       updateAiPreferences({ count: Number(event.target.value) });
       renderAiView();
     });
+    $("#aiGroupCount").addEventListener("change", event => {
+      aiStatusMessage = "";
+      updateAiPreferences({ groupCount: Number(event.target.value) });
+      renderAiView();
+    });
     $("#generateAiQuestions").addEventListener("click", generateAiQuestions);
-    $("#generateAnotherAiSet").addEventListener("click", generateAiQuestions);
+    $("#generateAnotherAiSet").addEventListener("click", continuePreparedAiSet);
     $("#aiAnswerForm").addEventListener("submit", submitAiAnswer);
     const aiTutorLaunchButton = $("#openAiTutorButton");
     aiTutorLaunchButton.addEventListener("click", event => {
@@ -5879,7 +5938,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=52", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=53", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

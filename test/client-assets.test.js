@@ -32,6 +32,22 @@ test("AI tutor Enter handling is wired to form submission", () => {
   assert.match(app, /旧问答仍保留为学习记录/);
 });
 
+test("AI practice can prepare independent groups and continue without another generation request", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  assert.match(html, /<span>每组题数<\/span>[\s\S]*id="aiQuestionCount"/);
+  assert.match(html, /<span>生成组数<\/span>[\s\S]*id="aiGroupCount"[\s\S]*value="1"[\s\S]*value="2"[\s\S]*value="3"[\s\S]*value="5"/);
+  assert.match(app, /groupCount: AI_GROUP_COUNTS\.includes\(Number\(settings\.groupCount\)\)/);
+  assert.match(app, /queuedSets: \(Array\.isArray\(source\.queuedSets\)/);
+  assert.match(app, /groupCount: Number\(\$\("#aiGroupCount"\)\.value\) \|\| 1/);
+  assert.match(app, /practice\.queuedSets = Array\.isArray\(data\.queuedSets\) \? data\.queuedSets : \[\]/);
+  assert.match(app, /function continuePreparedAiSet\(\)/);
+  assert.match(app, /fetch\("\/api\/ai\/questions\/next"/);
+  assert.match(app, /continueButton\.innerHTML = queuedCount[\s\S]*继续下一组（还剩 \$\{queuedCount\} 组）/);
+  assert.match(app, /generateAnotherAiSet"\)\.addEventListener\("click", continuePreparedAiSet\)/);
+  assert.match(app, /&& !practice\.queuedSets\.length/);
+});
+
 test("AI tutor launcher supports persistent pointer dragging", () => {
   const app = read("app.js");
   const css = read("styles.css");
@@ -149,14 +165,14 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=52/);
+  assert.match(html, /pronunciation-data\.js\?v=53/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /phonemeSoundButtonHtml\(item\)/);
   assert.match(app, /speechButtonHtml\(item\.example, `慢速播放完整示范词/);
   assert.match(app, /data-pronunciation-sound/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=52/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=53/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -408,7 +424,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 52", () => {
+test("PWA client assets consistently use the displayed cache version 53", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -419,8 +435,8 @@ test("PWA client assets consistently use the displayed cache version 52", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "52");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v52"/);
+  assert.equal(displayedVersion[1], "53");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v53"/);
 });
 
 test("daily study plan offers six free-choice projects and records sixty minutes across web and learning-window work", () => {
@@ -453,6 +469,6 @@ test("daily study plan offers six free-choice projects and records sixty minutes
   assert.doesNotMatch(app, /String\(stage\.index \+ 1\)/);
   assert.doesNotMatch(app, /按顺序完成/);
   assert.doesNotMatch(html, /按顺序学习/);
-  assert.match(html, /study-time\.js\?v=52/);
-  assert.match(serviceWorker, /study-time\.js\?v=52/);
+  assert.match(html, /study-time\.js\?v=53/);
+  assert.match(serviceWorker, /study-time\.js\?v=53/);
 });

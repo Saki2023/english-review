@@ -285,12 +285,26 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | GET | `/api/admin/ai-config` | 管理员 | 获取脱敏后的配置；响应永远不包含 Key |
 | POST | `/api/admin/ai-config/models` | 管理员 | 使用当前或已保存的连接信息获取上游模型列表，不保存配置 |
 | POST | `/api/admin/ai-config/test` | 管理员 | 测试指定供应商和模型，不触发轮换 |
-| POST | `/api/ai/questions/generate` | 已登录 | 根据当前账号进度生成 5 或 10 道题 |
+| POST | `/api/ai/questions/generate` | 已登录 | 根据当前账号进度生成题组；`count` 为每组 5/10 题，`groupCount` 为 1/2/3/5 组 |
+| POST | `/api/ai/questions/next` | 已登录 | 当前组完成后进入服务器已保存的下一组，不再次调用 AI |
 | POST | `/api/ai/questions/ask` | 已登录 | 询问当前或历史 AI 题目；请求可带独立 `model` 和 `reasoningEffort`，并按账号及题目追加长期问答记录 |
 | POST | `/api/ai/questions/tutor/clear` | 已登录 | 切断指定题目的当前 AI 会话上下文，旧问答仍保留为学习历史 |
 | POST | `/api/ai/questions/grade` | 已登录 | 判定一道 AI 生成题并保存练习历史 |
 | POST | `/api/review/sentence-variants` | 已登录 | 按已学词句、近期变式和薄弱点创建或恢复后台句子变式任务；可带当前账号选择的 `model`、`reasoningEffort` 和强制新一轮的 `force` |
 | GET | `/api/review/sentence-variants?jobId=...` | 已登录 | 轮询后台句子变式任务；单次上游等待最多 10 分钟，合格项立即保留，失败项最多修正 3 轮并返回精确原因；网络/上游失败会在 5 分钟后继续尝试，内容失败不会无限自动请求 |
+
+多组 AI 出题请求示例：
+
+```json
+{
+  "model": "your-model",
+  "reasoningEffort": "high",
+  "count": 10,
+  "groupCount": 3
+}
+```
+
+服务器只调用一次上游生成请求，并把结果保存为 1 个当前题组和 2 个待开始题组。待开始题组会随账号状态保存，但在真正作答前不会进入做题历史、错题、能力分析或学习同步证据。完成当前组后调用 `/api/ai/questions/next` 即可立即进入下一组。
 
 ### 每次学习同步的 50 条句子池
 

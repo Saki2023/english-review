@@ -37,25 +37,43 @@ test("learning profile prioritizes weak learned content and excludes future less
   assert.equal(profile.recentAccuracy, 0);
 });
 
-test("AI practice state keeps a bounded question set and per-account settings", () => {
-  const set = createQuestionSet([{ direction: "en-zh", english: "cat", chinese: "猫", acceptedEnglish: ["cat"], acceptedChinese: ["猫"], focus: "单词复习" }], { providerId: "provider-a", providerName: "NewAPI", model: "model-a", reasoningEffort: "max" });
+test("AI practice state keeps a bounded current set, prepared groups, and per-account settings", () => {
+  const question = { direction: "en-zh", english: "cat", chinese: "猫", acceptedEnglish: ["cat"], acceptedChinese: ["猫"], focus: "单词复习" };
+  const selection = { providerId: "provider-a", providerName: "NewAPI", model: "model-a", reasoningEffort: "max" };
+  const set = createQuestionSet([question], selection, { batchId: "batch-a", groupNumber: 1, groupCount: 5 });
+  const queuedSets = Array.from({ length: 5 }, (_, index) => createQuestionSet([question], selection, { batchId: "batch-a", groupNumber: index + 2, groupCount: 5 }));
+  queuedSets[0].index = 1;
+  queuedSets[0].completed = true;
+  queuedSets[0].questions[0].userAnswer = "猫";
+  queuedSets[0].questions[0].correct = true;
   const tutorMessages = Array.from({ length: 14 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `message-${index}` }));
-  const practice = sanitizeAiPractice({ settings: { model: "model-a", reasoningEffort: "max", count: 10 }, tutorSettings: { providerId: "provider-b", reasoningEffort: "low" }, currentSet: set, tutor: { setId: set.id, questionId: set.questions[0].id, messages: tutorMessages } });
+  const practice = sanitizeAiPractice({ settings: { model: "model-a", reasoningEffort: "max", count: 10, groupCount: 5 }, tutorSettings: { providerId: "provider-b", reasoningEffort: "low" }, currentSet: set, queuedSets, tutor: { setId: set.id, questionId: set.questions[0].id, messages: tutorMessages } });
   assert.equal(practice.settings.model, "model-a");
   assert.equal(practice.settings.reasoningEffort, "max");
   assert.equal(practice.settings.count, 10);
+  assert.equal(practice.settings.groupCount, 5);
   assert.equal(practice.tutorSettings.reasoningEffort, "low");
   assert.equal(practice.tutorSettings.providerId, "provider-b");
   assert.equal(practice.currentSet.questions.length, 1);
   assert.equal(practice.currentSet.reasoningEffort, "max");
   assert.equal(practice.currentSet.providerId, "provider-a");
   assert.equal(practice.currentSet.providerName, "NewAPI");
+  assert.equal(practice.currentSet.batchId, "batch-a");
+  assert.equal(practice.currentSet.groupNumber, 1);
+  assert.equal(practice.queuedSets.length, 4);
+  assert.equal(practice.queuedSets[0].groupNumber, 2);
+  assert.equal(practice.queuedSets[0].index, 0);
+  assert.equal(practice.queuedSets[0].completed, false);
+  assert.equal(practice.queuedSets[0].questions[0].correct, null);
+  assert.equal(practice.queuedSets[0].questions[0].userAnswer, "");
   assert.equal(practice.tutor.messages.length, 12);
   assert.equal(practice.tutor.messages[0].content, "message-2");
   assert.equal(practice.tutorHistory.length, 6);
   assert.equal(practice.tutorHistory[0].question, "message-2");
   assert.deepEqual(sanitizeAiPractice({ settings: { reasoningEffort: "max" }, tutorSettings: { providerId: "provider-c", model: "tutor-model", reasoningEffort: "high" } }).tutorSettings, { providerId: "provider-c", model: "tutor-model", reasoningEffort: "high" });
   assert.equal(sanitizeAiPractice({ settings: { reasoningEffort: "max" } }).tutorSettings.reasoningEffort, "medium");
+  [1, 2, 3, 5].forEach(groupCount => assert.equal(sanitizeAiPractice({ settings: { groupCount } }).settings.groupCount, groupCount));
+  assert.equal(sanitizeAiPractice({ settings: { groupCount: 4 } }).settings.groupCount, 1);
 });
 
 test("AI tutor keeps separate persistent histories for every exercise", () => {
