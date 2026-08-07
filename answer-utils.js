@@ -1,12 +1,13 @@
 (function (root, factory) {
   "use strict";
-  const api = factory();
+  const variants = typeof module === "object" && module.exports ? require("./review-variants") : (root && root.ENGLISH_REVIEW_VARIANTS);
+  const api = factory(variants || {});
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.ENGLISH_REVIEW_ANSWER_UTILS = api;
-})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+})(typeof globalThis !== "undefined" ? globalThis : this, function (REVIEW_VARIANTS) {
   "use strict";
 
-  const EVIDENCE_REPAIR_VERSION = 4;
+  const EVIDENCE_REPAIR_VERSION = 5;
   const MISTAKE_AUTO_RESOLVE_STREAK = 2;
   const PARTIAL_TRANSLATION_SCORE = 0.8;
   const REQUIRED_ENGLISH_FUNCTION_WORDS = ["a", "an", "the", "on", "in", "am", "is", "are"];
@@ -388,7 +389,10 @@
     const chinese = String(source && source.chinese || "").trim();
     if (!source || !snapshotId || !english || !chinese || (variantId && snapshotId !== variantId)) return task;
     const acceptedEnglish = Array.isArray(source.acceptedEnglish) && source.acceptedEnglish.length ? source.acceptedEnglish : [english];
-    const acceptedChinese = Array.isArray(source.acceptedChinese) && source.acceptedChinese.length ? source.acceptedChinese : [chinese];
+    const storedAcceptedChinese = Array.isArray(source.acceptedChinese) && source.acceptedChinese.length ? source.acceptedChinese : [chinese];
+    const acceptedChinese = typeof REVIEW_VARIANTS.expandRegisteredChineseAnswers === "function"
+      ? REVIEW_VARIANTS.expandRegisteredChineseAnswers(content, english, storedAcceptedChinese, 16)
+      : storedAcceptedChinese;
     return {
       ...task,
       item: { ...task.item, english, chinese, acceptedEnglish, acceptedChinese },
@@ -445,6 +449,15 @@
       const task = reviewTaskForRecord(content, attempt);
       if (!task || typeof attempt.correct !== "boolean") return attempt;
       const accepted = taskAcceptedAnswers(task);
+      const storedAcceptedChinese = Array.isArray(attempt.reviewVariant && attempt.reviewVariant.acceptedChinese) && attempt.reviewVariant.acceptedChinese.length
+        ? attempt.reviewVariant.acceptedChinese
+        : [task.item.chinese];
+      const acceptedByRegisteredMeaning = Boolean(task.reviewVariant) && task.direction === "en-zh"
+        && !chineseAnswerMatches(attempt.answer, storedAcceptedChinese)
+        && chineseAnswerMatches(attempt.answer, accepted);
+      const registeredMeaningNote = acceptedByRegisteredMeaning && /\bpen\b/i.test(task.item.english)
+        ? "；本题的 pen 在正式词库中可译为“笔”或“钢笔”"
+        : "";
       let correct = attempt.correct;
       let gradingStatus = ["correct", "partial", "incorrect"].includes(attempt.gradingStatus) ? attempt.gradingStatus : (correct ? "correct" : "incorrect");
       let score = Number.isFinite(Number(attempt.score)) ? Math.max(0, Math.min(1, Number(attempt.score))) : (correct ? 1 : 0);
@@ -460,9 +473,11 @@
           const optionalMeasureOmission = chineseOptionalMeasureOmissionMatches(attempt.answer, accepted);
           explanation = quality.gradingStatus === "partial"
             ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
-            : optionalMeasureOmission
-              ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
-              : (attempt.correct ? (explanation || "中文表达与参考答案等义。") : "中文表达与参考答案等义，已按当前规则修正。");
+            : acceptedByRegisteredMeaning
+              ? `你的翻译使用了正式词库登记的同义词${registeredMeaningNote}，意思正确；旧判定已修正。`
+              : optionalMeasureOmission
+                ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
+                : (attempt.correct ? (explanation || "中文表达与参考答案等义。") : "中文表达与参考答案等义，已按当前规则修正。");
           problemWords = [];
           detailedExplanation = buildTranslationExplanation({ direction: task.direction, referenceAnswer: task.item.chinese, answer: attempt.answer, correct: true, gradingStatus, explanation, problemWords });
         } else if (correct && chineseQuantityConflict(attempt.answer, accepted)) {
@@ -490,7 +505,8 @@
         ? englishWordResults(task.item.english, attempt.answer)
         : englishSourceWordResults(task.item.english, correct, problemWords);
       const previousScore = Number.isFinite(Number(attempt.score)) ? Math.max(0, Math.min(1, Number(attempt.score))) : (attempt.correct ? 1 : 0);
-      const next = { ...attempt, correct, score, gradingStatus, explanation, detailedExplanation, problemWords, wordResults };
+      const next = { ...attempt, correct, score, gradingStatus, explanation, detailedExplanation, problemWords, wordResults,
+        ...(task.reviewVariant ? { reviewVariant: { ...task.reviewVariant } } : {}) };
       const attemptChanged = JSON.stringify(next) !== JSON.stringify(attempt);
       if (!attemptChanged) return attempt;
       changed = true;

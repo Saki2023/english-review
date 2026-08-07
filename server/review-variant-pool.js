@@ -1,7 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { eligibleSentenceVariants, normalizeEnglish, sentenceFamily } = require("../review-variants");
+const { eligibleSentenceVariants, expandRegisteredChineseAnswers, normalizeEnglish, sentenceFamily } = require("../review-variants");
 
 const REVIEW_VARIANT_POOL_SCHEMA = 2;
 const REVIEW_VARIANT_POOL_TARGET = 50;
@@ -29,7 +29,7 @@ function sanitizePoolVariant(value) {
     english,
     chinese,
     acceptedEnglish: cleanStringList(source.acceptedEnglish, 8, 180).length ? cleanStringList(source.acceptedEnglish, 8, 180) : [normalizeEnglish(english)],
-    acceptedChinese: cleanStringList(source.acceptedChinese, 8, 180).length ? cleanStringList(source.acceptedChinese, 8, 180) : [chinese],
+    acceptedChinese: cleanStringList(source.acceptedChinese, 16, 180).length ? cleanStringList(source.acceptedChinese, 16, 180) : [chinese],
     requiredWords: cleanStringList(source.requiredWords, 30, 40),
     source: "ai",
     providerId: cleanText(source.providerId, 100),
@@ -261,7 +261,7 @@ function stableIndex(value, length) {
   return length ? (hash >>> 0) % length : 0;
 }
 
-function assignReviewVariantPoolTasks(value, tasks) {
+function assignReviewVariantPoolTasks(value, tasks, content = null) {
   const pool = sanitizeReviewVariantPool(value);
   const byId = new Map(pool.variants.map(item => [item.id, item]));
   const used = new Set(Object.values(pool.assignments));
@@ -288,7 +288,10 @@ function assignReviewVariantPoolTasks(value, tasks) {
       pool.assignments[taskId] = variant.id;
       used.add(variant.id);
     }
-    variants.push({ ...variant, taskId });
+    const acceptedChinese = content
+      ? expandRegisteredChineseAnswers(content, variant.english, variant.acceptedChinese, 16)
+      : variant.acceptedChinese;
+    variants.push({ ...variant, acceptedChinese, taskId });
   });
   pool.updatedAt = new Date().toISOString();
   return { pool, variants };

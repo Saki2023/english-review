@@ -111,6 +111,52 @@
       .filter(Boolean));
   }
 
+  const SENTENCE_MEANING_EXPANSION_BLOCKLIST = new Set([
+    "a", "an", "the", "am", "is", "are", "was", "were",
+    "in", "on", "at", "to", "from", "of", "for", "with",
+    "i", "you", "he", "she", "it", "we", "they", "sit", "sat"
+  ]);
+
+  function registeredChineseMeanings(content, token) {
+    const item = (Array.isArray(content && content.words) ? content.words : [])
+      .find(candidate => normalizeEnglish(candidate && candidate.english) === token);
+    if (!item || SENTENCE_MEANING_EXPANSION_BLOCKLIST.has(token)) return [];
+    const primary = cleanText(item.chinese, 80);
+    if (!primary || /的$/u.test(primary) || /^[一二三四五六七八九十百千万亿两零〇]+$/u.test(primary)) return [];
+    return Array.from(new Set([item.chinese, ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])]
+      .map(value => cleanText(value, 80))
+      .filter(value => value && /[\u3400-\u9fff]/u.test(value) && !/[（）()；;…]/u.test(value))))
+      .sort((left, right) => Array.from(right).length - Array.from(left).length);
+  }
+
+  function expandRegisteredChineseAnswers(content, english, answers, maximum = 16) {
+    const limit = Math.max(1, Math.min(32, Number(maximum) || 16));
+    const result = [];
+    (Array.isArray(answers) ? answers : [answers]).forEach(answer => {
+      const text = cleanText(answer, 180);
+      if (text && !result.includes(text) && result.length < limit) result.push(text);
+    });
+    const tokens = Array.from(new Set(englishTokens(english)));
+    tokens.forEach(token => {
+      const meanings = registeredChineseMeanings(content, token);
+      if (meanings.length < 2) return;
+      const queue = [...result];
+      for (let index = 0; index < queue.length && result.length < limit; index += 1) {
+        const answer = queue[index];
+        const matched = meanings.find(meaning => answer.includes(meaning));
+        if (!matched) continue;
+        meanings.forEach(replacement => {
+          if (replacement === matched || result.length >= limit) return;
+          const candidate = answer.replace(matched, replacement);
+          if (!candidate || result.includes(candidate) || !chineseSubjectMatchesEnglish(english, candidate)) return;
+          result.push(candidate);
+          queue.push(candidate);
+        });
+      }
+    });
+    return result;
+  }
+
   const OUT_OF_SCOPE_SENSE_HINTS = Object.freeze({
     top: ["陀螺"],
     run: ["经营", "运行"],
@@ -197,15 +243,16 @@
     const acceptedChinese = [];
     [chinese, ...(Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [])].forEach(answer => {
       const text = cleanText(answer, 180);
-      if (text && chineseSubjectMatchesEnglish(english, text) && !acceptedChinese.includes(text) && acceptedChinese.length < 8) acceptedChinese.push(text);
+      if (text && chineseSubjectMatchesEnglish(english, text) && !acceptedChinese.includes(text) && acceptedChinese.length < 16) acceptedChinese.push(text);
     });
+    const expandedAcceptedChinese = expandRegisteredChineseAnswers(content, english, acceptedChinese, 16);
     return { valid: true, reasonCode: "ok", english, normalizedEnglish: normalized, unlearnedWords: [], variant: {
       id: generatedVariantId(family, english),
       family,
       english,
       chinese,
       acceptedEnglish: [normalized],
-      acceptedChinese,
+      acceptedChinese: expandedAcceptedChinese,
       requiredWords: Array.from(new Set(tokens))
     } };
   }
@@ -241,6 +288,7 @@
     chineseSubjectMatchesEnglish,
     eligibleSentenceVariants,
     englishTokens,
+    expandRegisteredChineseAnswers,
     generatedVariantId,
     normalizeEnglish,
     outOfScopeMeaning,

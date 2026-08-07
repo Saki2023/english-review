@@ -101,7 +101,7 @@ test("evidence repair grades a saved AI review variant against its immutable sna
   };
   const repaired = require("../answer-utils").repairReviewEvidence(content, state);
   assert.equal(repaired.state.attempts[0].correct, true);
-  assert.equal(repaired.state.attempts[0].gradingSource, "evidence-repair-v4");
+  assert.equal(repaired.state.attempts[0].gradingSource, "evidence-repair-v5");
   assert.equal(repaired.state.mistakes.length, 0);
   assert.equal(repaired.state.history["2026-08-06"].correct, 1);
 });
@@ -201,4 +201,62 @@ test("evidence repair keeps explicit pair quantities wrong", () => {
   assert.equal(item.score, 0);
   assert.equal(item.gradingStatus, "incorrect");
   assert.match(item.detailedExplanation, /一双|数量/);
+});
+
+test("evidence repair clears a false pen error using the formal word-bank meanings", () => {
+  const content = {
+    currentDay: 4,
+    words: [
+      { id: "a", day: 1, english: "a", chinese: "一个", acceptedChinese: ["一个", "一"] },
+      { id: "big", day: 2, english: "big", chinese: "大的", acceptedChinese: ["大的", "大"] },
+      { id: "pen", day: 3, english: "pen", chinese: "笔", acceptedChinese: ["笔", "钢笔"] },
+      { id: "is", day: 2, english: "is", chinese: "是", acceptedChinese: ["是"] },
+      { id: "on", day: 1, english: "on", chinese: "在……上面", acceptedChinese: ["在上面", "在上"] },
+      { id: "box", day: 4, english: "box", chinese: "箱子", acceptedChinese: ["箱子", "盒子"] }
+    ],
+    sentences: [{ id: "pen-base", day: 4, english: "A pen is on a box.", chinese: "一支笔在一个箱子上。", directions: ["en-zh"] }]
+  };
+  const variant = {
+    id: "ai-big-pen-box",
+    family: "on",
+    english: "A big pen is on a box.",
+    chinese: "一支大钢笔在一个箱子上。",
+    acceptedEnglish: ["a big pen is on a box"],
+    acceptedChinese: ["一支大钢笔在一个箱子上。"]
+  };
+  const state = {
+    evidenceRepairVersion: 4,
+    taskStates: { "pen-base:en-zh": { level: 0, lastResult: false, reviewCount: 1, lastReviewed: "2026-08-07" } },
+    history: { "2026-08-07": { reviewed: 1, correct: 0 } },
+    attempts: [{
+      id: "pen-attempt",
+      taskId: "pen-base:en-zh",
+      variantId: variant.id,
+      reviewVariant: variant,
+      date: "2026-08-07",
+      answer: "一支大笔在一个箱子上",
+      correct: false,
+      score: 0,
+      gradingStatus: "incorrect",
+      problemWords: ["pen"]
+    }],
+    mistakes: [{ id: "pen-mistake", attemptId: "pen-attempt", taskId: "pen-base:en-zh", variantId: variant.id, reviewVariant: variant, userAnswer: "一支大笔在一个箱子上" }]
+  };
+
+  const repaired = repairLearningEvidence(content, state);
+  const attempt = repaired.state.attempts[0];
+  assert.equal(attempt.correct, true);
+  assert.equal(attempt.score, 1);
+  assert.equal(attempt.gradingStatus, "correct");
+  assert.deepEqual(attempt.problemWords, []);
+  assert.equal(attempt.gradingSource, "evidence-repair-v5");
+  assert.ok(attempt.reviewVariant.acceptedChinese.includes("一支大笔在一个箱子上。"));
+  assert.match(attempt.detailedExplanation, /正式词库|笔|钢笔/);
+  assert.equal(repaired.state.mistakes.length, 0);
+  assert.equal(repaired.state.history["2026-08-07"].correct, 1);
+  assert.equal(repaired.state.taskStates["pen-base:en-zh"].lastResult, true);
+
+  const abilities = analyzeAbilities(content, repaired.state).abilities;
+  assert.equal(abilities.find(item => item.id === "reading").measuredAccuracy, 100);
+  assert.notEqual(abilities.find(item => item.id === "vocabulary").measuredAccuracy, 0, "the repaired pen answer must not remain as a vocabulary penalty");
 });

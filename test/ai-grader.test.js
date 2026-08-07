@@ -324,6 +324,7 @@ test("AI preview sentence parser keeps target preview words and translations", a
   assert.equal(result[0].wordId, "d5-sun");
   assert.match(requestBody.messages[0].content, /Every sentence must use its target preview word/);
   assert.match(requestBody.messages[0].content, /learnedWords/);
+  assert.match(requestBody.messages[0].content, /in school.*在上学.*in a school.*一所学校/i);
   assert.deepEqual(JSON.parse(requestBody.messages[1].content).learnedWords, ["i", "see", "the"]);
   assert.deepEqual(JSON.parse(requestBody.messages[1].content).previewWords, [{ wordId: "d5-sun", english: "sun" }]);
 });

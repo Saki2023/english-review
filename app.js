@@ -3,7 +3,7 @@
 
   const DATA = window.ENGLISH_REVIEW_DATA;
   const PRONUNCIATION = window.ENGLISH_PRONUNCIATION_DATA || { concepts: [], phonemes: [] };
-  const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, sanitizeGeneratedSentenceVariant: () => null };
+  const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, expandRegisteredChineseAnswers: (_content, _english, answers) => answers, sanitizeGeneratedSentenceVariant: () => null };
   const STUDY_TIME = window.ENGLISH_REVIEW_STUDY_TIME || {};
   const { MISTAKE_AUTO_RESOLVE_STREAK, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const FALLBACK_DAILY_STUDY_PLAN = [
@@ -276,13 +276,17 @@
     const english = String(value.english || "").trim().slice(0, 180);
     const chinese = String(value.chinese || "").trim().slice(0, 180);
     if (!id || !english || !chinese) return null;
+    const acceptedChineseSource = Array.from(new Set((Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [chinese]).map(item => String(item || "").trim()).filter(Boolean))).slice(0, 16);
+    const acceptedChinese = typeof REVIEW_VARIANTS.expandRegisteredChineseAnswers === "function"
+      ? REVIEW_VARIANTS.expandRegisteredChineseAnswers(DATA, english, acceptedChineseSource, 16)
+      : acceptedChineseSource;
     return {
       id,
       family: String(value.family || "").slice(0, 30),
       english,
       chinese,
       acceptedEnglish: Array.from(new Set((Array.isArray(value.acceptedEnglish) ? value.acceptedEnglish : [english]).map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8),
-      acceptedChinese: Array.from(new Set((Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [chinese]).map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8),
+      acceptedChinese,
       source: value.source === "ai" ? "ai" : "local",
       providerId: String(value.providerId || "").slice(0, 64),
       providerName: String(value.providerName || "").slice(0, 60),
@@ -1154,6 +1158,19 @@
     }
   }
 
+  function clientPreviewSchoolAnswers(english, chinese, acceptedEnglish = []) {
+    const sourceEnglish = String(english || "").trim().slice(0, 180);
+    const sourceChinese = String(chinese || "").trim().slice(0, 180);
+    const normalizedEnglish = sourceEnglish.toLocaleLowerCase().replace(/[.,!?;:]/g, "").replace(/\s+/g, " ").trim();
+    const institutional = /\bin school\b/.test(normalizedEnglish);
+    const building = /\bin a school\b/.test(normalizedEnglish);
+    const ambiguous = /在学校(?:里面|里)?/u.test(sourceChinese) && !/在(?:一|某)所学校/u.test(sourceChinese);
+    const answers = [sourceEnglish, ...(Array.isArray(acceptedEnglish) ? acceptedEnglish : [])];
+    if (ambiguous && institutional) answers.push(sourceEnglish.replace(/\bin school\b/i, "in a school"));
+    else if (ambiguous && building) answers.push(sourceEnglish.replace(/\bin a school\b/i, "in school"));
+    return { ambiguous, acceptedEnglish: Array.from(new Set(answers.map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8) };
+  }
+
   function normalizeClientPreviewPractice(value) {
     const source = value && typeof value === "object" ? value : {};
     const tasks = (Array.isArray(source.tasks) ? source.tasks : []).map(item => {
@@ -1164,6 +1181,7 @@
       const english = String(item.english || "").trim().slice(0, 180);
       const chinese = String(item.chinese || "").trim().slice(0, 180);
       if (!id || !kind || !direction || !english || !chinese) return null;
+      const school = clientPreviewSchoolAnswers(english, chinese, item.acceptedEnglish);
       return {
         id,
         kind,
@@ -1172,7 +1190,7 @@
         requiredPreviewWordIds: Array.from(new Set((Array.isArray(item.requiredPreviewWordIds) ? item.requiredPreviewWordIds : []).map(value => String(value || "").trim().slice(0, 100)).filter(Boolean))).slice(0, 8),
         english,
         chinese,
-        acceptedEnglish: Array.from(new Set((Array.isArray(item.acceptedEnglish) ? item.acceptedEnglish : [english]).map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8),
+        acceptedEnglish: school.acceptedEnglish,
         acceptedChinese: Array.from(new Set((Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [chinese]).map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8)
       };
     }).filter(Boolean).slice(0, 80);
@@ -1185,6 +1203,23 @@
       return [String(key).slice(0, 160), { correct: result.correct === true, score: Math.max(0, Math.min(1, Number(result.score) || 0)), gradingStatus: ["correct", "partial", "incorrect"].includes(result.gradingStatus) ? result.gradingStatus : (result.correct === true ? "correct" : "incorrect"), explanation: String(result.explanation || "").slice(0, 240), detailedExplanation: String(result.detailedExplanation || "").slice(0, 320), problemWords, wordResults, source: ["ai", "local", "local-fallback"].includes(result.source) ? result.source : "", answeredAt: String(result.answeredAt || "").slice(0, 40) }];
     }).filter(([key]) => taskIds.has(key)));
     const pending = Object.fromEntries(Object.entries(source.pending && typeof source.pending === "object" ? source.pending : {}).slice(-100).map(([key, value]) => [String(key).slice(0, 160), String(value || "").slice(0, 240)]).filter(([key]) => taskIds.has(key)));
+    tasks.forEach(task => {
+      const school = clientPreviewSchoolAnswers(task.english, task.chinese, task.acceptedEnglish);
+      const result = results[task.id];
+      const answer = answers[task.id];
+      if (task.direction !== "zh-en" || !school.ambiguous || !result || result.correct || !englishAnswerMatches(answer, task.acceptedEnglish)) return;
+      results[task.id] = {
+        ...result,
+        correct: true,
+        score: 1,
+        gradingStatus: "correct",
+        explanation: "中文“在学校”可能表示“在上学”，也可能表示“在一所学校里面”；两种合理英文均已接受。",
+        detailedExplanation: "in school 表示“在上学/在校”；in a school 表示“在一所学校里面”。原中文题干没有区分这两个意思，因此本次预习答案已改判为正确，而且不会计入正式错题或能力分。",
+        problemWords: [],
+        wordResults: [],
+        source: "local"
+      };
+    });
     return {
       key: String(source.key || "").slice(0, 240),
       currentDay: Math.max(0, Number(source.currentDay) || 0),
@@ -2647,7 +2682,7 @@
             direction: "en-zh",
             english: String(sentence.english).trim(),
             chinese: String(sentence.chinese).trim(),
-            acceptedEnglish: [String(sentence.english).trim()],
+            acceptedEnglish: Array.from(new Set([String(sentence.english).trim(), ...(Array.isArray(sentence.acceptedEnglish) ? sentence.acceptedEnglish : [])].map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8),
             acceptedChinese: Array.from(new Set([String(sentence.chinese).trim(), ...(Array.isArray(sentence.acceptedChinese) ? sentence.acceptedChinese : [])].map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8)
           };
         });
@@ -2696,8 +2731,15 @@
       return { correct: quality.gradingStatus !== "incorrect", score: quality.score, gradingStatus: quality.gradingStatus, explanation, detailedExplanation: buildTranslationExplanation({ direction: task.direction, referenceAnswer: task.chinese, answer, correct: quality.gradingStatus !== "incorrect", gradingStatus: quality.gradingStatus, explanation }) };
     }
     const correct = englishAnswerMatches(answer, task.acceptedEnglish || [task.english]);
-    const explanation = correct ? "英文拼写和句子结构正确。" : "请检查单词拼写、冠词和 be 动词。";
-    return { correct, score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", explanation, detailedExplanation: buildTranslationExplanation({ direction: task.direction, referenceAnswer: task.english, answer, correct, explanation }) };
+    const school = clientPreviewSchoolAnswers(task.english, task.chinese, task.acceptedEnglish);
+    const acceptedAmbiguousSchoolMeaning = correct && school.ambiguous && !englishAnswerMatches(answer, [task.english]);
+    const explanation = acceptedAmbiguousSchoolMeaning
+      ? "中文“在学校”可能表示“在上学”，也可能表示“在一所学校里面”；两种合理英文均已接受。"
+      : correct ? "英文拼写和句子结构正确。" : "请检查单词拼写、冠词和 be 动词。";
+    const detailedExplanation = acceptedAmbiguousSchoolMeaning
+      ? "in school 表示“在上学/在校”；in a school 表示“在一所学校里面”。原中文题干没有区分这两个意思，因此本次预习答案判为正确，而且不会计入正式错题或能力分。"
+      : buildTranslationExplanation({ direction: task.direction, referenceAnswer: task.english, answer, correct, explanation });
+    return { correct, score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", explanation, detailedExplanation };
   }
 
   function previewPracticeTaskPayload(task) {
@@ -5217,6 +5259,9 @@
     const answer = $("#answerInput").value.trim();
     let correct = answerMatches(task, answer);
     let grading = { source: "local", explanation: "", score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", problemWords: [], wordResults: [] };
+    if (correct && answer && task.direction === "en-zh" && !chineseAnswerMatches(answer, [task.item.chinese])) {
+      grading.explanation = "你的翻译使用了课程词库允许的同义表达，意思正确。";
+    }
     if (correct && answer && task.direction === "en-zh" && chineseOptionalMeasureOmissionMatches(answer, task.item.acceptedChinese || [task.item.chinese])) {
       grading.explanation = OPTIONAL_MEASURE_OMISSION_EXPLANATION;
     }
@@ -5938,7 +5983,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=53", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=54", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

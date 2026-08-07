@@ -13,7 +13,7 @@ const { buildLearningSyncProfile } = require("./server/learning-sync");
 const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./server/learning-sync-token");
 const { publicTeachingProfile, sanitizeTeachingProfile } = require("./server/teaching-profile");
 const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis");
-const { normalizeEnglish: normalizeVariantEnglish, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById, validateGeneratedSentenceVariant } = require("./review-variants");
+const { expandRegisteredChineseAnswers, normalizeEnglish: normalizeVariantEnglish, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById, validateGeneratedSentenceVariant } = require("./review-variants");
 const {
   REVIEW_VARIANT_POOL_BATCH,
   REVIEW_VARIANT_POOL_TARGET,
@@ -26,7 +26,7 @@ const {
   sanitizeReviewVariantPool,
   storeReviewVariantPoolResults
 } = require("./server/review-variant-pool");
-const { sanitizePreviewPractice, sanitizePreviewPracticeHistory } = require("./server/preview-practice");
+const { normalizePreviewSchoolSentence, sanitizePreviewPractice, sanitizePreviewPracticeHistory } = require("./server/preview-practice");
 const { repairLearningEvidence } = require("./server/evidence-repair");
 const { normalizeStudyTime } = require("./study-time");
 const {
@@ -690,14 +690,15 @@ function previewSentenceId(wordId, english) {
 
 function sanitizePreviewSentence(contentValue, target, value, allowedWords) {
   const source = value && typeof value === "object" ? value : {};
-  const english = String(source.english || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
-  const chinese = String(source.chinese || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+  const school = normalizePreviewSchoolSentence({ english: source.english, chinese: source.chinese }, { rewriteChinese: true });
+  const english = school.english;
+  const chinese = school.chinese;
   if (!english || !chinese) return null;
   const tokens = previewEnglishTokens(english);
   const targetTokens = previewEnglishTokens(target.english);
   const allowed = new Set(allowedWords);
   if (!tokens.length || tokens.some(token => !allowed.has(token)) || !targetTokens.every(token => tokens.includes(token))) return null;
-  const acceptedChinese = Array.from(new Set([chinese, ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])].map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8);
+  const acceptedChinese = Array.from(new Set([chinese, String(source.chinese || "").trim(), ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])].map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8);
   return {
     id: previewSentenceId(target.id, english),
     kind: "sentence",
@@ -705,7 +706,7 @@ function sanitizePreviewSentence(contentValue, target, value, allowedWords) {
     requiredPreviewWordIds: [target.id],
     english,
     chinese,
-    acceptedEnglish: [normalizePreviewEnglish(english)],
+    acceptedEnglish: school.acceptedEnglish,
     acceptedChinese,
     source: "ai"
   };
@@ -799,8 +800,9 @@ function previewPracticeGradeTask(rawTask, previewData) {
     };
   }
 
-  const english = String(source.english || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
-  const chinese = String(source.chinese || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+  const school = normalizePreviewSchoolSentence({ english: source.english, chinese: source.chinese });
+  const english = school.english;
+  const chinese = school.chinese;
   const requiredIds = Array.from(new Set((Array.isArray(source.requiredPreviewWordIds) ? source.requiredPreviewWordIds : []).map(value => String(value || "").trim()).filter(Boolean)));
   if (!english || !chinese || !requiredIds.includes(wordId)) return null;
   const learnedWords = content.words
@@ -818,8 +820,9 @@ function previewPracticeGradeTask(rawTask, previewData) {
     requiredPreviewWordIds: [wordId],
     english,
     chinese,
-    acceptedEnglish: [english],
-    acceptedChinese: [chinese]
+    acceptedEnglish: school.acceptedEnglish,
+    acceptedChinese: [chinese],
+    schoolMeaningAmbiguous: school.ambiguousSchool
   };
 }
 
@@ -839,16 +842,26 @@ async function handlePreviewPracticeGrade(req, res, user) {
     const acceptedAnswers = task.direction === "zh-en" ? task.acceptedEnglish : task.acceptedChinese;
     const localGrade = localTranslationGrade(task.direction, task.english, answer, acceptedAnswers);
     if (localGrade) {
+      const acceptedAmbiguousSchoolMeaning = task.direction === "zh-en"
+        && task.schoolMeaningAmbiguous
+        && !englishAnswerMatches(answer, [task.english])
+        && englishAnswerMatches(answer, task.acceptedEnglish);
+      const explanation = acceptedAmbiguousSchoolMeaning
+        ? "中文“在学校”可能表示“在上学”，也可能表示“在一所学校里面”；两种合理英文均已接受。"
+        : localGrade.explanation;
       return sendJson(res, 200, {
         ...localGrade,
+        explanation,
         referenceAnswer: task.direction === "zh-en" ? task.english : task.chinese,
-        detailedExplanation: localGrade.detailedExplanation || buildTranslationExplanation({
+        detailedExplanation: acceptedAmbiguousSchoolMeaning
+          ? "in school 表示“在上学/在校”；in a school 表示“在一所学校里面”。原中文题干没有区分这两个意思，因此本次预习答案判为正确，而且不会计入正式错题或能力分。"
+          : localGrade.detailedExplanation || buildTranslationExplanation({
           direction: task.direction,
           referenceAnswer: task.direction === "zh-en" ? task.english : task.chinese,
           answer,
           correct: localGrade.correct,
           gradingStatus: localGrade.gradingStatus,
-          explanation: localGrade.explanation
+          explanation
         })
       });
     }
@@ -910,8 +923,9 @@ function findStoredPoolSentenceTask(user, taskId, variantId = "") {
   // A pool variant is accepted only when the server has assigned that exact
   // ID to this task. The browser cannot inject arbitrary sentence text.
   if (!assignedId || (requestedId && requestedId !== assignedId)) return null;
-  const variant = Array.isArray(pool.variants) ? pool.variants.find(item => item.id === assignedId) : null;
-  if (!variant) return null;
+  const storedVariant = Array.isArray(pool.variants) ? pool.variants.find(item => item.id === assignedId) : null;
+  if (!storedVariant) return null;
+  const variant = { ...storedVariant, acceptedChinese: expandRegisteredChineseAnswers(content, storedVariant.english, storedVariant.acceptedChinese, 16) };
   return { ...base, item: { ...base.baseItem, ...variant }, variant };
 }
 
@@ -1614,7 +1628,7 @@ async function handleReviewSentenceVariants(req, res, user) {
       // Use every compatible sentence already saved in this sync cycle first.
       // The remaining tasks can be generated in the background; the learner
       // should never wait for the full 50-sentence pool when one is ready.
-      assigned = assignReviewVariantPoolTasks(pool, tasks);
+      assigned = assignReviewVariantPoolTasks(pool, tasks, content);
       state.reviewVariantPool = assigned.pool;
       persistUserStates();
       const assignedTaskIds = new Set(assigned.variants.map(item => item.taskId));
@@ -1907,7 +1921,9 @@ function localTranslationGrade(direction, english, answer, acceptedAnswers) {
     ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
     : optionalMeasureOmission
       ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
-      : "本地规则已接受这个答案。";
+      : !chineseAnswerMatches(answer, [acceptedAnswers[0] || ""])
+        ? "你的翻译使用了课程词库允许的同义表达，意思正确。"
+        : "本地规则已接受这个答案。";
   return {
     ...quality,
     explanation,

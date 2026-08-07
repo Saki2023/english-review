@@ -75,3 +75,17 @@ test("AI variant validation keeps English and Chinese subjects aligned", () => {
   assert.equal(accepted.valid, true);
   assert.deepEqual(accepted.variant.acceptedChinese, ["它是一只大猫。", "它是一个大猫"]);
 });
+
+test("AI variants expand formally registered Chinese word meanings inside full sentences", () => {
+  const base = data.sentences.find(item => item.id === "d4-s4");
+  const accepted = variants.sanitizeGeneratedSentenceVariant(content, base, {
+    english: "A big pen is on a box.",
+    chinese: "一支大钢笔在一个箱子上。"
+  });
+
+  assert.ok(accepted);
+  assert.ok(accepted.acceptedChinese.includes("一支大钢笔在一个箱子上。"));
+  assert.ok(accepted.acceptedChinese.includes("一支大笔在一个箱子上。"));
+  assert.ok(accepted.acceptedChinese.includes("一支大钢笔在一个盒子上。"));
+  assert.ok(accepted.acceptedChinese.includes("一支大笔在一个盒子上。"));
+});

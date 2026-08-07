@@ -1,5 +1,7 @@
 "use strict";
 
+const { englishAnswerMatches } = require("../answer-utils");
+
 const MAX_TASKS = 80;
 const MAX_MAP_ENTRIES = 100;
 const MAX_HISTORY = 30;
@@ -22,6 +24,51 @@ function uniqueTexts(value, primary, maximum = 8) {
   return result;
 }
 
+function normalizePreviewSchoolSentence(value, { rewriteChinese = false } = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  const english = clean(source.english, 180);
+  const originalChinese = clean(source.chinese, 180);
+  const normalizedEnglish = english.toLocaleLowerCase().replace(/[.,!?;:]/g, "").replace(/\s+/g, " ").trim();
+  const institutional = /\bin school\b/.test(normalizedEnglish);
+  const building = /\bin a school\b/.test(normalizedEnglish);
+  const ambiguousSchool = /在学校(?:里面|里)?/u.test(originalChinese) && !/在(?:一|某)所学校/u.test(originalChinese);
+  let chinese = originalChinese;
+  let acceptedEnglish = [english];
+
+  if (ambiguousSchool && !rewriteChinese) {
+    if (institutional) acceptedEnglish.push(english.replace(/\bin school\b/i, "in a school"));
+    else if (building) acceptedEnglish.push(english.replace(/\bin a school\b/i, "in school"));
+  }
+  if (ambiguousSchool && rewriteChinese) {
+    if (institutional) chinese = originalChinese.replace(/在学校(?:里面|里)?/u, "在上学");
+    else if (building) chinese = originalChinese.replace(/在学校(?:里面|里)?/u, "在一所学校里");
+  }
+
+  acceptedEnglish = Array.from(new Set(acceptedEnglish.map(item => clean(item, 180)).filter(Boolean)));
+  return { english, chinese, acceptedEnglish, ambiguousSchool, schoolMeaning: institutional ? "institutional" : building ? "building" : "" };
+}
+
+function repairAmbiguousSchoolResults(tasks, answers, results) {
+  tasks.forEach(task => {
+    if (task.direction !== "zh-en") return;
+    const school = normalizePreviewSchoolSentence(task);
+    const result = results[task.id];
+    const answer = answers[task.id];
+    if (!school.ambiguousSchool || !result || result.correct || !englishAnswerMatches(answer, task.acceptedEnglish)) return;
+    results[task.id] = {
+      ...result,
+      correct: true,
+      score: 1,
+      gradingStatus: "correct",
+      explanation: "中文“在学校”可能表示“在上学”，也可能表示“在一所学校里面”；两种合理英文均已接受。",
+      detailedExplanation: "in school 表示“在上学/在校”；in a school 表示“在一所学校里面”。原中文题干没有区分这两个意思，因此本次预习答案已改判为正确，而且不会计入正式错题或能力分。",
+      problemWords: [],
+      wordResults: [],
+      source: "local"
+    };
+  });
+}
+
 function normalizeTask(value) {
   const source = value && typeof value === "object" ? value : {};
   const id = clean(source.id, 160);
@@ -30,6 +77,7 @@ function normalizeTask(value) {
   const english = clean(source.english, 180);
   const chinese = clean(source.chinese, 180);
   if (!id || !kind || !direction || !english || !chinese) return null;
+  const school = normalizePreviewSchoolSentence({ english, chinese });
   return {
     id,
     kind,
@@ -38,7 +86,7 @@ function normalizeTask(value) {
     requiredPreviewWordIds: Array.from(new Set((Array.isArray(source.requiredPreviewWordIds) ? source.requiredPreviewWordIds : []).map(item => clean(item, 120)).filter(Boolean))).slice(0, 8),
     english,
     chinese,
-    acceptedEnglish: uniqueTexts(source.acceptedEnglish, english),
+    acceptedEnglish: uniqueTexts([...school.acceptedEnglish, ...(Array.isArray(source.acceptedEnglish) ? source.acceptedEnglish : [])], english),
     acceptedChinese: uniqueTexts(source.acceptedChinese, chinese)
   };
 }
@@ -86,6 +134,7 @@ function normalizeHistoryEntry(value) {
   const results = normalizeResultMap(source.results);
   Object.keys(answers).forEach(key => { if (!taskIds.has(key)) delete answers[key]; });
   Object.keys(results).forEach(key => { if (!taskIds.has(key)) delete results[key]; });
+  repairAmbiguousSchoolResults(tasks, answers, results);
   const total = tasks.length;
   const completed = tasks.filter(task => results[task.id]).length;
   const correct = tasks.filter(task => results[task.id] && results[task.id].correct).length;
@@ -123,6 +172,7 @@ function sanitizePreviewPractice(value) {
   Object.keys(answers).forEach(key => { if (!taskIds.has(key)) delete answers[key]; });
   Object.keys(results).forEach(key => { if (!taskIds.has(key)) delete results[key]; });
   Object.keys(pending).forEach(key => { if (!taskIds.has(key)) delete pending[key]; });
+  repairAmbiguousSchoolResults(tasks, answers, results);
   return {
     key: clean(source.key, 240),
     currentDay: Math.max(0, Number(source.currentDay) || 0),
@@ -142,4 +192,4 @@ function sanitizePreviewPractice(value) {
   };
 }
 
-module.exports = { normalizeTask, sanitizePreviewPractice, sanitizePreviewPracticeHistory };
+module.exports = { normalizePreviewSchoolSentence, normalizeTask, sanitizePreviewPractice, sanitizePreviewPracticeHistory };

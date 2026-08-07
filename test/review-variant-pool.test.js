@@ -158,3 +158,25 @@ test("a persisted pool variant is used immediately when the current family is no
   assert.equal(result.variants[0].id, "ai-description-1");
   assert.equal(result.pool.assignments["inside-one:en-zh"], "ai-description-1");
 });
+
+test("persisted pool variants regain formal word-bank Chinese alternatives when assigned", () => {
+  const learnedContent = {
+    words: [
+      { english: "pen", chinese: "笔", acceptedChinese: ["笔", "钢笔"] },
+      { english: "box", chinese: "箱子", acceptedChinese: ["箱子", "盒子"] }
+    ]
+  };
+  let pool = createReviewVariantPool({ date: "2026-08-07", contentSignature: "pen-signature" });
+  pool = storeReviewVariantPoolResults(pool, [{
+    id: "ai-on-pen-box",
+    family: "on",
+    english: "A big pen is on a box.",
+    chinese: "一支大钢笔在一个箱子上。",
+    acceptedEnglish: ["a big pen is on a box"],
+    acceptedChinese: ["一支大钢笔在一个箱子上。"]
+  }]).pool;
+
+  const result = assignReviewVariantPoolTasks(pool, [{ taskId: "pen-base:en-zh", family: "on" }], learnedContent);
+  assert.ok(result.variants[0].acceptedChinese.includes("一支大笔在一个箱子上。"));
+  assert.ok(result.variants[0].acceptedChinese.includes("一支大笔在一个盒子上。"));
+});
