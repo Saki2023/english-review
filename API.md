@@ -237,6 +237,14 @@ powershell -ExecutionPolicy Bypass -File ".\每日英语复习\scripts\sync-lear
 
 脚本会先上传本地教学档案，将最新预习设为网页默认内容并保留最近 30 份预习供选择；随后解析最新预习的单词表，并与 `学习同步\网站课程内容.json` 一起幂等更新网站正式词句、预习词与“学习笔记”；最后把网站档案保存为 `学习同步\网站学习档案.json`，供独立的英语学习窗口读取。省略 `SYNC_WRITE_TOKEN` 时会退化为只下载模式。不要提交 `.sync.env`，也不要把任何令牌发到聊天中。
 
+如果只需要把刚完成的预习练习交给学习窗口解释，可使用独立只下载模式：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\每日英语复习\scripts\sync-learning-profile.ps1" -PreviewPracticeOnly
+```
+
+该模式即使 `.sync.env` 中配置了写入令牌，也不会上传任何资料，只把已完成的 `previewPracticeHistory` 和预习统计写入 `学习同步\网站预习练习.json`。完整命令仍执行正式同步并继续写入 `网站学习档案.json`，两种文件不会互相覆盖。
+
 ## 数据保存位置
 
 Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/data`，由 `docker-compose.yml` 映射到宿主机，不会因为容器重新创建而丢失。

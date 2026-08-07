@@ -2,6 +2,7 @@
   [switch]$Headless,
   [switch]$InstallDailyTask,
   [switch]$RemoveDailyTask,
+  [switch]$PreviewPracticeOnly,
   [switch]$DryRun
 )
 
@@ -11,6 +12,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $workspaceRoot = Split-Path -Parent $repoRoot
 $sharedDirectory = Join-Path $workspaceRoot "学习同步"
 $syncScript = Join-Path $repoRoot "scripts\sync-learning-profile.ps1"
+$fullProfilePath = Join-Path $sharedDirectory "网站学习档案.json"
+$previewPracticePath = Join-Path $sharedDirectory "网站预习练习.json"
 $reportDirectory = Join-Path $sharedDirectory "同步记录"
 $latestReportPath = Join-Path $reportDirectory "最近一次同步.json"
 $historyPath = Join-Path $reportDirectory "同步历史.json"
@@ -124,8 +127,8 @@ function Get-DecimalValue($Object, [string]$Name, [double]$Default = 0) {
   try { return [double]$value } catch { return $Default }
 }
 
-function Read-WebsiteSummary {
-  $profilePath = Join-Path $sharedDirectory "网站学习档案.json"
+function Read-WebsiteSummary([string]$ProfilePath = $fullProfilePath) {
+  $profilePath = $ProfilePath
   if (-not (Test-Path -LiteralPath $profilePath)) { return $null }
   try {
     $profile = Get-Content -Raw -Encoding UTF8 -LiteralPath $profilePath | ConvertFrom-Json
@@ -188,14 +191,14 @@ function Get-OutputMessages([string[]]$Lines) {
   $messages = @()
   foreach ($line in $Lines) {
     if (-not $line) { continue }
-    if ($line -match "已上传|已同步|网站 AI|网站试卷|待复习|听写：|专项训练") {
+    if ($line -match "已上传|已同步|预习练习|网站 AI|网站试卷|待复习|听写：|专项训练") {
       $messages += Redact-SensitiveText $line
     }
   }
   return @($messages | Select-Object -Last 20)
 }
 
-function Invoke-UnderlyingSync([switch]$PreviewOnly) {
+function Invoke-UnderlyingSync([switch]$PreviewOnly, [switch]$PreviewPracticeOnly) {
   $started = Get-Date
   $snapshot = Get-InputSnapshot
   if ($PreviewOnly) {
@@ -231,7 +234,9 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly) {
   $syncStatus = $null
   $exitCode = 1
   try {
-    $records = @(& $syncScript -StatusPath $statusPath -NoExitOnFailure *>&1)
+    $syncArguments = @("-StatusPath", $statusPath, "-NoExitOnFailure")
+    if ($PreviewPracticeOnly) { $syncArguments += "-PreviewPracticeOnly" }
+    $records = @(& $syncScript @syncArguments *>&1)
     foreach ($record in $records) {
       $line = Redact-SensitiveText ([string]$record)
       if (-not $line) { continue }
@@ -249,16 +254,16 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly) {
   }
 
   $configState = Get-ConfigState
-  $profilePath = Join-Path $sharedDirectory "网站学习档案.json"
+  $profilePath = if ($PreviewPracticeOnly) { $previewPracticePath } else { $fullProfilePath }
   $profileAvailable = Test-Path -LiteralPath $profilePath
-  $uploadAttempted = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "uploadAttempted" $configState.hasWriteToken) } else { [bool]$configState.hasWriteToken }
-  $uploadSucceeded = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "uploadSuccess" $false) } else { ($exitCode -eq 0 -and $configState.hasWriteToken) }
-  $teachingUploadSucceeded = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "teachingUploadSuccess" $false) } else { $uploadSucceeded }
-  $courseUploadSucceeded = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "courseUploadSuccess" $false) } else { $uploadSucceeded }
+  $uploadAttempted = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "uploadAttempted" $configState.hasWriteToken) } else { [bool]$configState.hasWriteToken }
+  $uploadSucceeded = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "uploadSuccess" $false) } else { ($exitCode -eq 0 -and $configState.hasWriteToken) }
+  $teachingUploadSucceeded = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "teachingUploadSuccess" $false) } else { $uploadSucceeded }
+  $courseUploadSucceeded = if ($PreviewPracticeOnly) { $false } elseif ($syncStatus) { [bool](Get-ObjectValue $syncStatus "courseUploadSuccess" $false) } else { $uploadSucceeded }
   $downloadAttempted = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "downloadAttempted" $false) } else { $true }
   $downloadSucceeded = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "downloadSuccess" $false) } else { ($exitCode -eq 0 -and $profileAvailable) }
   $compatibilityTransportUsed = if ($syncStatus) { [bool](Get-ObjectValue $syncStatus "compatibilityTransportUsed" $false) } else { $false }
-  $preparedFiles = @($snapshot.documents | Where-Object { $_.exists } | ForEach-Object { $_.path })
+  $preparedFiles = if ($PreviewPracticeOnly) { @() } else { @($snapshot.documents | Where-Object { $_.exists } | ForEach-Object { $_.path }) }
   $uploadedFiles = @()
   if ($teachingUploadSucceeded) {
     $uploadedFiles += @($snapshot.documents | Where-Object { $_.exists -and $_.kind -ne "网站课程内容" } | ForEach-Object { $_.path })
@@ -270,7 +275,9 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly) {
   $previewFiles = @()
   if ($teachingUploadSucceeded) { $previewFiles = @($snapshot.documents | Where-Object { $_.exists -and $_.kind -eq "每日预习" } | ForEach-Object { $_.path }) }
   $downloadedFiles = @()
-  if ($downloadSucceeded -and $profileAvailable) { $downloadedFiles = @("学习同步\网站学习档案.json") }
+  if ($downloadSucceeded -and $profileAvailable) {
+    $downloadedFiles = @($(if ($PreviewPracticeOnly) { "学习同步\网站预习练习.json" } else { "学习同步\网站学习档案.json" }))
+  }
   $errors = @()
   if ($syncStatus) { $errors = @((Get-ObjectValue $syncStatus "errors" @())) }
   $errorCategories = @($errors | ForEach-Object { Redact-SensitiveText ([string](Get-ObjectValue $_ "category" "unknown")) } | Where-Object { $_ } | Select-Object -Unique)
@@ -286,20 +293,22 @@ function Invoke-UnderlyingSync([switch]$PreviewOnly) {
     if (-not $errorText) { $errorText = "同步脚本返回错误代码 $exitCode。" }
   }
   $messages = @(Get-OutputMessages ($stdoutLines + $stderrLines))
-  $websiteSummary = Read-WebsiteSummary
+  $websiteSummary = Read-WebsiteSummary $profilePath
   if ($uploadSucceeded) { $messages += "本地教学档案和课程内容已上传到网站。" }
   if ($previewFiles.Count -gt 0) { $messages += "每日预习已同步：$($previewFiles[-1])（共 $($previewFiles.Count) 份）" }
   if ($courseUploadSucceeded -and $websiteSummary -and ($preparedFiles -contains "学习同步\网站课程内容.json")) {
     $messages += "网站课程已同步：第 $($websiteSummary.courseDay) 天，$($websiteSummary.courseWords) 个正式单词、$($websiteSummary.coursePreviewWords) 个预习单词、$($websiteSummary.courseSentences) 个句子、$($websiteSummary.courseNotes) 份笔记。"
   }
-  if ($downloadedFiles.Count -gt 0) { $messages += "网站学习档案已下载到本地。" }
+  if ($downloadedFiles.Count -gt 0) {
+    $messages += $(if ($PreviewPracticeOnly) { "预习练习记录已单独下载到本地；本次没有上传任何内容。" } else { "网站学习档案已下载到本地。" })
+  }
   if ($compatibilityTransportUsed) { $messages += "Windows PowerShell 网络通道异常，本次已自动使用兼容 HTTPS 通道。" }
   if (-not $uploadSucceeded -and $downloadSucceeded -and $uploadAttempted) { $messages += "上传失败，但网站学习档案已成功下载并刷新。" }
   $overallSuccess = ($downloadSucceeded -and (-not $uploadAttempted -or $uploadSucceeded))
   $partialSuccess = (($downloadSucceeded -and $uploadAttempted -and -not $uploadSucceeded) -or ($uploadSucceeded -and -not $downloadSucceeded))
   $report = [ordered]@{
     schemaVersion = 2
-    mode = "sync"
+    mode = if ($PreviewPracticeOnly) { "preview-practice" } else { "sync" }
     success = $overallSuccess
     partialSuccess = $partialSuccess
     uploadAttempted = $uploadAttempted
@@ -369,9 +378,14 @@ function Get-ReportText($Report) {
   if ($Report.mode -eq "dry-run") { $status = "预览" }
   $lines += "状态：$status"
   if ($Report.mode -ne "dry-run") {
+    $previewPracticeMode = $Report.mode -eq "preview-practice"
     $uploadAttempted = [bool](Get-ObjectValue $Report "uploadAttempted" $false)
-    $uploadState = if (-not $uploadAttempted) { "未配置写入令牌，本次跳过" } elseif ([bool](Get-ObjectValue $Report "uploadSuccess" $false)) { "成功" } else { "失败" }
-    $downloadState = if ([bool](Get-ObjectValue $Report "downloadSuccess" $false)) { "成功，已刷新本地网站学习档案" } else { "失败，本地旧快照已保留" }
+    $uploadState = if ($previewPracticeMode) { "未执行（仅下载预习练习）" } elseif (-not $uploadAttempted) { "未配置写入令牌，本次跳过" } elseif ([bool](Get-ObjectValue $Report "uploadSuccess" $false)) { "成功" } else { "失败" }
+    $downloadState = if ([bool](Get-ObjectValue $Report "downloadSuccess" $false)) {
+      $(if ($previewPracticeMode) { "成功，已刷新本地网站预习练习记录" } else { "成功，已刷新本地网站学习档案" })
+    } else {
+      $(if ($previewPracticeMode) { "失败，本地旧预习练习记录已保留" } else { "失败，本地旧快照已保留" })
+    }
     $lines += "上传阶段：$uploadState"
     $lines += "下载阶段：$downloadState"
     if ([bool](Get-ObjectValue $Report "compatibilityTransportUsed" $false)) { $lines += "网络通道：已自动使用兼容 HTTPS 通道" }
@@ -382,21 +396,26 @@ function Get-ReportText($Report) {
   $lines += "完成：$($Report.finishedAt)"
   $lines += ""
   $lines += "准备同步的本地内容："
-  if (@($Report.preparedFiles).Count -eq 0) { $lines += "  （没有找到可上传的学习文档）" }
+  if ($Report.mode -eq "preview-practice") { $lines += "  （仅下载预习练习，本模式不读取或上传本地学习文档）" }
+  elseif (@($Report.preparedFiles).Count -eq 0) { $lines += "  （没有找到可上传的学习文档）" }
   else { foreach ($item in @($Report.preparedFiles)) { $lines += "  · $item" } }
   $lines += ""
   $lines += "已上传到网站："
-  if (@($Report.uploadedFiles).Count -eq 0) { $lines += "  （本次没有上传，可能未配置写入令牌）" }
+  if ($Report.mode -eq "preview-practice") { $lines += "  （仅同步预习练习不会上传任何内容）" }
+  elseif (@($Report.uploadedFiles).Count -eq 0) { $lines += "  （本次没有上传，可能未配置写入令牌）" }
   else { foreach ($item in @($Report.uploadedFiles)) { $lines += "  · $item" } }
   $lines += ""
   $lines += "从网站下载："
-  if (@($Report.downloadedFiles).Count -eq 0) { $lines += "  （没有生成网站学习档案）" }
+  if (@($Report.downloadedFiles).Count -eq 0) { $lines += $(if ($Report.mode -eq "preview-practice") { "  （没有生成网站预习练习记录）" } else { "  （没有生成网站学习档案）" }) }
   else { foreach ($item in @($Report.downloadedFiles)) { $lines += "  · $item" } }
   $lines += ""
   $downloadIsFresh = [bool](Get-ObjectValue $Report "downloadSuccess" $false)
   $lines += if ($downloadIsFresh) { "本次下载的网站学习统计：" } else { "本地旧快照统计（本次未刷新）：" }
   $summary = $Report.summary
   if ($null -eq $summary) { $lines += "  （暂无可读取的学习档案统计）" }
+  elseif ($Report.mode -eq "preview-practice") {
+    $lines += "  · 预习练习：$($summary.previewPracticeRounds) 轮、$($summary.previewPracticeQuestions) 题，完全正确 $($summary.previewPracticeFullyCorrect)、部分正确 $($summary.previewPracticePartiallyCorrect)、错误 $($summary.previewPracticeIncorrect)，平均 $($summary.previewPracticeAverageScore) 分（不计入正式能力）"
+  }
   else {
     $lines += "  · 课程：第 $($summary.courseDay) 天，$($summary.courseWords) 个正式单词、$($summary.coursePreviewWords) 个预习单词、$($summary.courseSentences) 个句子、$($summary.courseNotes) 份笔记"
     $lines += "  · AI 做题：$($summary.aiQuestions) 题，正确 $($summary.aiCorrect) 题，正确率 $($summary.aiAccuracy)%"
@@ -459,8 +478,19 @@ function Show-SyncCenter {
   $syncButton.Width = 125
   $syncButton.Height = 38
   $syncButton.Location = New-Object System.Drawing.Point(760, 25)
+  $syncButton.Anchor = "Top,Right"
   $header.Controls.Add($syncButton)
   $script:syncButton = $syncButton
+
+  $previewSyncButton = New-Object System.Windows.Forms.Button
+  $previewSyncButton.Text = "仅同步预习练习"
+  $previewSyncButton.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 10, [System.Drawing.FontStyle]::Bold)
+  $previewSyncButton.Width = 160
+  $previewSyncButton.Height = 38
+  $previewSyncButton.Location = New-Object System.Drawing.Point(585, 25)
+  $previewSyncButton.Anchor = "Top,Right"
+  $header.Controls.Add($previewSyncButton)
+  $script:previewSyncButton = $previewSyncButton
 
   $split = New-Object System.Windows.Forms.SplitContainer
   $split.Dock = "Fill"
@@ -556,7 +586,8 @@ function Show-SyncCenter {
       if ([bool](Get-ObjectValue $report "partialSuccess" $false)) { $state = "部分成功" }
       if ($report.mode -eq "dry-run") { $state = "预览" }
       $stamp = try { ([DateTime]$report.finishedAt).ToString("MM-dd HH:mm") } catch { "未知时间" }
-      [void]$script:historyList.Items.Add("$stamp · $state · 上传 $(@($report.uploadedFiles).Count) 项")
+      $scope = if ($report.mode -eq "preview-practice") { "仅预习 $([int](Get-ObjectValue $report.summary 'previewPracticeRounds' 0)) 轮" } else { "正式 · 上传 $(@($report.uploadedFiles).Count) 项" }
+      [void]$script:historyList.Items.Add("$stamp · $state · $scope")
     }
     if ($script:historyReports.Count -gt 0) {
       $script:historyList.SelectedIndex = 0
@@ -569,35 +600,44 @@ function Show-SyncCenter {
   $script:syncWorker = New-Object System.ComponentModel.BackgroundWorker
   $script:syncWorker.DoWork += {
     param($sender, $event)
-    $event.Result = Invoke-UnderlyingSync
+    $event.Result = Invoke-UnderlyingSync -PreviewPracticeOnly:([string]$event.Argument -eq "preview-practice")
   }
   $script:syncWorker.RunWorkerCompleted += {
     param($sender, $event)
     $script:syncRunning = $false
     $script:syncButton.Enabled = $true
+    $script:previewSyncButton.Enabled = $true
     if ($event.Error) {
       [System.Windows.Forms.MessageBox]::Show("同步程序异常：$(Redact-SensitiveText $event.Error.Message)", "同步失败", "OK", "Error") | Out-Null
       Refresh-HistoryList
     } else {
       Refresh-HistoryList
-      $latest = if ($script:historyReports.Count -gt 0) { $script:historyReports[0] } else { $null }
+      $latest = $event.Result
       if ($latest -and [bool](Get-ObjectValue $latest "partialSuccess" $false)) {
         [System.Windows.Forms.MessageBox]::Show("同步部分成功：网站学习档案已经刷新，但另一个阶段失败。请查看右侧详情。", "同步部分成功", "OK", "Warning") | Out-Null
       } elseif ($latest -and -not $latest.success) {
-        [System.Windows.Forms.MessageBox]::Show("同步失败，请查看右侧同步详情。", "同步失败", "OK", "Warning") | Out-Null
+        $failureText = if ($latest.mode -eq "preview-practice") { "预习练习同步失败，请查看右侧同步详情。" } else { "同步失败，请查看右侧同步详情。" }
+        [System.Windows.Forms.MessageBox]::Show($failureText, "同步失败", "OK", "Warning") | Out-Null
       }
     }
   }
 
-  function Start-UiSync {
+  function Start-UiSync([switch]$OnlyPreviewPractice) {
     if ($script:syncRunning) { return }
     $script:syncRunning = $true
     $script:syncButton.Enabled = $false
-    $script:detailBox.Text = "正在同步……`r`n`r`n正在读取学习进度、错题本、每日课程内容、学习笔记和预习，并与网站交换学习档案。"
-    $script:syncWorker.RunWorkerAsync()
+    $script:previewSyncButton.Enabled = $false
+    if ($OnlyPreviewPractice) {
+      $script:detailBox.Text = "正在单独同步预习练习……`r`n`r`n本次只从网站下载已完成的预习练习，不读取或上传课程、笔记、进度和错题。"
+      $script:syncWorker.RunWorkerAsync("preview-practice")
+    } else {
+      $script:detailBox.Text = "正在正式同步……`r`n`r`n正在读取学习进度、错题本、每日课程内容、学习笔记和预习，并与网站交换完整学习档案。"
+      $script:syncWorker.RunWorkerAsync("full")
+    }
   }
 
   $syncButton.Add_Click({ Start-UiSync })
+  $previewSyncButton.Add_Click({ Start-UiSync -OnlyPreviewPractice })
   $historyList.Add_SelectedIndexChanged({
     if ($script:historyList.SelectedIndex -ge 0 -and $script:historyList.SelectedIndex -lt $script:historyReports.Count) {
       Update-Detail $script:historyReports[$script:historyList.SelectedIndex]
@@ -617,16 +657,18 @@ function Show-SyncCenter {
   })
   $openFolderButton.Add_Click({ Start-Process explorer.exe -ArgumentList "`"$sharedDirectory`"" })
   $openReportButton.Add_Click({
-    $path = Join-Path $sharedDirectory "网站学习档案.json"
+    $selectedReport = if ($script:historyList.SelectedIndex -ge 0 -and $script:historyList.SelectedIndex -lt $script:historyReports.Count) { $script:historyReports[$script:historyList.SelectedIndex] } else { $null }
+    $path = if ($selectedReport -and $selectedReport.mode -eq "preview-practice") { $previewPracticePath } else { $fullProfilePath }
     if (Test-Path -LiteralPath $path) { Start-Process notepad.exe -ArgumentList "`"$path`"" }
-    else { [System.Windows.Forms.MessageBox]::Show("还没有网站学习档案，请先同步。", "提示", "OK", "Information") | Out-Null }
+    else { [System.Windows.Forms.MessageBox]::Show("还没有对应的本地同步档案，请先运行相应同步。", "提示", "OK", "Information") | Out-Null }
   })
 
   $timer = New-Object System.Windows.Forms.Timer
   $timer.Interval = 60000
   $timer.Add_Tick({
     if (-not $autoCheck.Checked -or $script:syncRunning) { return }
-    $latest = if ($script:historyReports.Count -gt 0) { $script:historyReports[0] } else { $null }
+    $latest = @($script:historyReports | Where-Object { $_.mode -ne "preview-practice" -and $_.mode -ne "dry-run" } | Select-Object -First 1)
+    $latest = if ($latest.Count -gt 0) { $latest[0] } else { $null }
     $due = $true
     if ($latest -and $latest.success) {
       try { $due = ((Get-Date) - [DateTime]$latest.finishedAt).TotalHours -ge [int]$script:uiConfig.intervalHours } catch { $due = $true }
@@ -636,7 +678,8 @@ function Show-SyncCenter {
   $timer.Start()
   $form.Add_Shown({
     Refresh-HistoryList
-    $latest = if ($script:historyReports.Count -gt 0) { $script:historyReports[0] } else { $null }
+    $latest = @($script:historyReports | Where-Object { $_.mode -ne "preview-practice" -and $_.mode -ne "dry-run" } | Select-Object -First 1)
+    $latest = if ($latest.Count -gt 0) { $latest[0] } else { $null }
     if ($autoCheck.Checked -and (-not $latest -or -not $latest.success)) { Start-UiSync }
   })
   $form.Add_FormClosed({
@@ -658,7 +701,7 @@ if ($InstallDailyTask) {
 }
 
 if ($Headless) {
-  $result = Invoke-UnderlyingSync -PreviewOnly:$DryRun
+  $result = Invoke-UnderlyingSync -PreviewOnly:$DryRun -PreviewPracticeOnly:$PreviewPracticeOnly
   $result | ConvertTo-Json -Depth 15
   if (-not $result.success) { exit 1 }
   exit 0

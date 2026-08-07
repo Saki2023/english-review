@@ -14,6 +14,7 @@ test("sync center provides a safe visible report and headless entry point", () =
   const readme = read("sync-center/README.md");
   assert.match(script, /\[switch\]\$Headless/);
   assert.match(script, /\[switch\]\$DryRun/);
+  assert.match(script, /\[switch\]\$PreviewPracticeOnly/);
   assert.match(script, /最近一次同步\.json/);
   assert.match(script, /同步历史\.json/);
   assert.match(script, /uploadedFiles/);
@@ -34,6 +35,11 @@ test("sync center provides a safe visible report and headless entry point", () =
   assert.match(script, /coursePreviewWords/);
   assert.match(script, /previewPracticeRounds/);
   assert.match(script, /previewPracticeQuestions/);
+  assert.match(script, /网站预习练习\.json/);
+  assert.match(script, /仅同步预习练习/);
+  assert.match(script, /Start-UiSync -OnlyPreviewPractice/);
+  assert.match(script, /Invoke-UnderlyingSync -PreviewOnly:\$DryRun -PreviewPracticeOnly:\$PreviewPracticeOnly/);
+  assert.match(script, /Where-Object \{ \$_\.mode -ne "preview-practice" -and \$_\.mode -ne "dry-run" \}/);
   assert.match(script, /课程：第 \$\(\$summary\.courseDay\) 天/);
   assert.match(script, /预习练习：\$\(\$summary\.previewPracticeRounds\) 轮/);
   assert.match(script, /function Get-DecimalValue/);

@@ -100,3 +100,65 @@ test("a failed upload does not prevent downloading a fresh website learning prof
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 });
+
+test("preview-practice-only sync downloads a filtered file and never uploads local learning data", { skip: process.platform !== "win32" }, async () => {
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    requests.push(`${request.method} ${request.url}`);
+    request.resume();
+    if (request.method === "GET" && request.url.startsWith("/api/sync/profile")) {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        schemaVersion: 6,
+        generatedAt: "2026-08-07T10:00:00.000Z",
+        course: { currentDay: 7, contentUpdatedAt: "2026-08-07" },
+        summary: { previewPracticeRounds: 1, previewPracticeQuestions: 2, previewPracticeFullyCorrect: 1, previewPracticePartiallyCorrect: 0, previewPracticeIncorrect: 1, previewPracticeAverageScore: 50, latestPreviewPracticeAt: "2026-08-07T09:00:00.000Z", aiQuestions: 999 },
+        previewPracticeHistory: [{ id: "preview-round-1", previewDay: 8, formalEvidence: false, questions: [{ id: "q1", prompt: "It is in school.", learnerAnswer: "它在学校。", referenceAnswer: "它在学校里。", detailedExplanation: "位置表达。", formalEvidence: false }] }],
+        aiHistory: [{ prompt: "must-not-copy-other-profile-data" }],
+        tutorHistory: [{ learnerQuestion: "must-not-copy-other-profile-data" }]
+      }));
+      return;
+    }
+    response.writeHead(500, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: "preview-only mode must not upload" }));
+  });
+
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "english-preview-practice-sync-test-"));
+  const outputPath = path.join(temporaryDirectory, "preview-practice.json");
+  const statusPath = path.join(temporaryDirectory, "status.json");
+  try {
+    const address = server.address();
+    const result = await runPowerShell([
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(ROOT, "scripts", "sync-learning-profile.ps1"),
+      "-BaseUrl", `http://127.0.0.1:${address.port}`,
+      "-Username", "preview-sync-user",
+      "-SyncToken", "test-read-token",
+      "-WriteToken", "test-write-token-that-must-be-ignored",
+      "-ConfigPath", path.join(temporaryDirectory, "missing.env"),
+      "-OutputPath", outputPath,
+      "-StatusPath", statusPath,
+      "-PreviewPracticeOnly"
+    ]);
+
+    assert.equal(result.code, 0);
+    assert.deepEqual(requests, ["GET /api/sync/profile?username=preview-sync-user"]);
+    const status = JSON.parse(fs.readFileSync(statusPath, "utf8"));
+    const preview = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    assert.equal(status.mode, "preview-practice");
+    assert.equal(status.uploadAttempted, false);
+    assert.equal(status.downloadSuccess, true);
+    assert.equal(status.success, true);
+    assert.equal(status.summary.previewPracticeRounds, 1);
+    assert.equal(preview.schemaVersion, 1);
+    assert.equal(preview.formalEvidence, false);
+    assert.equal(preview.course.currentDay, 7);
+    assert.equal(preview.previewPracticeHistory[0].questions[0].prompt, "It is in school.");
+    assert.equal(Object.hasOwn(preview, "aiHistory"), false);
+    assert.equal(Object.hasOwn(preview, "tutorHistory"), false);
+    assert.equal(JSON.stringify(preview).includes("must-not-copy-other-profile-data"), false);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});

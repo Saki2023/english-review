@@ -6,6 +6,7 @@
   [string]$ConfigPath = "",
   [string]$OutputPath = "",
   [string]$StatusPath = "",
+  [switch]$PreviewPracticeOnly,
   [switch]$NoExitOnFailure
 )
 
@@ -15,10 +16,14 @@ $workspaceRoot = Split-Path -Parent $repoRoot
 $sharedDirectory = Join-Path $workspaceRoot "学习同步"
 
 if (-not $ConfigPath) { $ConfigPath = Join-Path $sharedDirectory ".sync.env" }
-if (-not $OutputPath) { $OutputPath = Join-Path $sharedDirectory "网站学习档案.json" }
+if (-not $OutputPath) {
+  $OutputPath = Join-Path $sharedDirectory $(if ($PreviewPracticeOnly) { "网站预习练习.json" } else { "网站学习档案.json" })
+}
 $script:statusPathWasProvided = [bool]$StatusPath
-if (-not $StatusPath) { $StatusPath = Join-Path $sharedDirectory "同步记录\最近一次同步.json" }
-$script:historyPath = Join-Path (Split-Path -Parent $StatusPath) "同步历史.json"
+if (-not $StatusPath) {
+  $StatusPath = Join-Path $sharedDirectory $(if ($PreviewPracticeOnly) { "同步记录\最近一次预习练习同步.json" } else { "同步记录\最近一次同步.json" })
+}
+$script:historyPath = Join-Path (Split-Path -Parent $StatusPath) $(if ($PreviewPracticeOnly) { "预习练习同步历史.json" } else { "同步历史.json" })
 
 $config = @{}
 if (Test-Path -LiteralPath $ConfigPath) {
@@ -41,6 +46,7 @@ if (-not $SyncToken) { $SyncToken = $env:SYNC_READ_TOKEN }
 if (-not $SyncToken) { $SyncToken = $config["SYNC_READ_TOKEN"] }
 if (-not $WriteToken) { $WriteToken = $env:SYNC_WRITE_TOKEN }
 if (-not $WriteToken) { $WriteToken = $config["SYNC_WRITE_TOKEN"] }
+if ($PreviewPracticeOnly) { $WriteToken = "" }
 
 if (-not $BaseUrl -or -not $Username -or -not $SyncToken) {
   throw "同步配置不完整。请在 学习同步\.sync.env 中填写 SYNC_BASE_URL、SYNC_USERNAME 和 SYNC_READ_TOKEN。"
@@ -51,7 +57,8 @@ $encodedUsername = [Uri]::EscapeDataString($Username)
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $script:syncErrors = @()
 $syncStatus = [ordered]@{
-  schemaVersion = 2
+  schemaVersion = 3
+  mode = if ($PreviewPracticeOnly) { "preview-practice" } else { "full" }
   startedAt = (Get-Date).ToUniversalTime().ToString("o")
   finishedAt = $null
   uploadAttempted = [bool]$WriteToken
@@ -435,7 +442,11 @@ if ($WriteToken) {
   }
   $syncStatus.uploadSuccess = ([bool]$syncStatus.teachingUploadSuccess -and (-not [bool]$syncStatus.courseUploadAttempted -or [bool]$syncStatus.courseUploadSuccess))
 } else {
-  Write-Warning "未配置 SYNC_WRITE_TOKEN，本次只下载网站档案，不上传本地教学计划。"
+  if ($PreviewPracticeOnly) {
+    Write-Host "仅同步预习练习：本次只下载已完成记录，不上传课程、笔记、进度或错题。"
+  } else {
+    Write-Warning "未配置 SYNC_WRITE_TOKEN，本次只下载网站档案，不上传本地教学计划。"
+  }
 }
 
 $uri = "$base/api/sync/profile?username=$encodedUsername"
@@ -444,58 +455,97 @@ $syncStatus.downloadAttempted = $true
 $downloadResult = Invoke-SyncRequest -Phase "下载网站学习档案" -Method Get -Uri $uri -Headers $headers
 if ($downloadResult.success) {
   $profile = $downloadResult.value
-  $outputDirectory = Split-Path -Parent $OutputPath
-  if (-not (Test-Path -LiteralPath $outputDirectory)) { New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null }
-  $json = $profile | ConvertTo-Json -Depth 40
-  [IO.File]::WriteAllText($OutputPath, "$json`n", $utf8NoBom)
-  $syncStatus.downloadSuccess = $true
   $profileSummary = $profile.summary
   $courseSummary = $profile.course
-  $abilitySummary = $profile.abilities
-  $latestSummary = [ordered]@{
-    courseDay = if ($courseSummary) { [int]$courseSummary.currentDay } else { 0 }
-    courseWords = if ($courseSummary) { [int]$courseSummary.words } else { 0 }
-    coursePreviewWords = if ($courseSummary) { [int]$courseSummary.previewWords } else { 0 }
-    courseSentences = if ($courseSummary) { [int]$courseSummary.sentences } else { 0 }
-    courseNotes = if ($courseSummary) { [int]$courseSummary.notes } else { 0 }
-    aiQuestions = if ($profileSummary) { [int]$profileSummary.aiQuestions } else { 0 }
-    aiCorrect = if ($profileSummary) { [double]$profileSummary.aiCorrect } else { 0 }
-    aiAccuracy = if ($profileSummary) { [int]$profileSummary.aiAccuracy } else { 0 }
-    tutorQuestions = if ($profileSummary) { [int]$profileSummary.tutorQuestions } else { 0 }
-    previewPracticeRounds = if ($profileSummary) { [int]$profileSummary.previewPracticeRounds } else { 0 }
-    previewPracticeQuestions = if ($profileSummary) { [int]$profileSummary.previewPracticeQuestions } else { 0 }
-    previewPracticeFullyCorrect = if ($profileSummary) { [int]$profileSummary.previewPracticeFullyCorrect } else { 0 }
-    previewPracticePartiallyCorrect = if ($profileSummary) { [int]$profileSummary.previewPracticePartiallyCorrect } else { 0 }
-    previewPracticeIncorrect = if ($profileSummary) { [int]$profileSummary.previewPracticeIncorrect } else { 0 }
-    previewPracticeAverageScore = if ($profileSummary -and $null -ne $profileSummary.previewPracticeAverageScore) { [int]$profileSummary.previewPracticeAverageScore } else { $null }
-    exams = if ($profileSummary) { [int]$profileSummary.exams } else { 0 }
-    latestExamScore = if ($profileSummary) { $profileSummary.latestExamScore } else { $null }
-    latestExamPossible = if ($profileSummary) { $profileSummary.latestExamPossible } else { $null }
-    itemsNeedingReview = if ($profileSummary) { [int]$profileSummary.itemsNeedingReview } else { 0 }
-    dictations = if ($profileSummary) { [int]$profileSummary.dictations } else { 0 }
-    focusedSessions = if ($profileSummary) { [int]$profileSummary.focusedSessions } else { 0 }
-    evidence = if ($abilitySummary) { [int]$abilitySummary.totalEvidence } else { 0 }
-    abilityScore = if ($abilitySummary) { [int]$abilitySummary.comprehensiveScore } else { 0 }
+  $outputDirectory = Split-Path -Parent $OutputPath
+  if (-not (Test-Path -LiteralPath $outputDirectory)) { New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null }
+  if ($PreviewPracticeOnly) {
+    $previewHistory = @()
+    if ($null -ne $profile.PSObject.Properties["previewPracticeHistory"]) { $previewHistory = @($profile.previewPracticeHistory) }
+    $profileToWrite = [ordered]@{
+      schemaVersion = 1
+      generatedAt = [string]$profile.generatedAt
+      syncedAt = (Get-Date).ToUniversalTime().ToString("o")
+      formalEvidence = $false
+      course = [ordered]@{
+        currentDay = if ($courseSummary) { [int]$courseSummary.currentDay } else { 0 }
+        contentUpdatedAt = if ($courseSummary) { [string]$courseSummary.contentUpdatedAt } else { "" }
+      }
+      summary = [ordered]@{
+        previewPracticeRounds = if ($profileSummary) { [int]$profileSummary.previewPracticeRounds } else { 0 }
+        previewPracticeQuestions = if ($profileSummary) { [int]$profileSummary.previewPracticeQuestions } else { 0 }
+        previewPracticeFullyCorrect = if ($profileSummary) { [int]$profileSummary.previewPracticeFullyCorrect } else { 0 }
+        previewPracticePartiallyCorrect = if ($profileSummary) { [int]$profileSummary.previewPracticePartiallyCorrect } else { 0 }
+        previewPracticeIncorrect = if ($profileSummary) { [int]$profileSummary.previewPracticeIncorrect } else { 0 }
+        previewPracticeAverageScore = if ($profileSummary -and $null -ne $profileSummary.previewPracticeAverageScore) { [int]$profileSummary.previewPracticeAverageScore } else { $null }
+        latestPreviewPracticeAt = if ($profileSummary) { [string]$profileSummary.latestPreviewPracticeAt } else { "" }
+      }
+      previewPracticeHistory = $previewHistory
+    }
+  } else {
+    $profileToWrite = $profile
+  }
+  $json = $profileToWrite | ConvertTo-Json -Depth 40
+  [IO.File]::WriteAllText($OutputPath, "$json`n", $utf8NoBom)
+  $syncStatus.downloadSuccess = $true
+  if ($PreviewPracticeOnly) {
+    $latestSummary = $profileToWrite.summary
+  } else {
+    $abilitySummary = $profile.abilities
+    $latestSummary = [ordered]@{
+      courseDay = if ($courseSummary) { [int]$courseSummary.currentDay } else { 0 }
+      courseWords = if ($courseSummary) { [int]$courseSummary.words } else { 0 }
+      coursePreviewWords = if ($courseSummary) { [int]$courseSummary.previewWords } else { 0 }
+      courseSentences = if ($courseSummary) { [int]$courseSummary.sentences } else { 0 }
+      courseNotes = if ($courseSummary) { [int]$courseSummary.notes } else { 0 }
+      aiQuestions = if ($profileSummary) { [int]$profileSummary.aiQuestions } else { 0 }
+      aiCorrect = if ($profileSummary) { [double]$profileSummary.aiCorrect } else { 0 }
+      aiAccuracy = if ($profileSummary) { [int]$profileSummary.aiAccuracy } else { 0 }
+      tutorQuestions = if ($profileSummary) { [int]$profileSummary.tutorQuestions } else { 0 }
+      previewPracticeRounds = if ($profileSummary) { [int]$profileSummary.previewPracticeRounds } else { 0 }
+      previewPracticeQuestions = if ($profileSummary) { [int]$profileSummary.previewPracticeQuestions } else { 0 }
+      previewPracticeFullyCorrect = if ($profileSummary) { [int]$profileSummary.previewPracticeFullyCorrect } else { 0 }
+      previewPracticePartiallyCorrect = if ($profileSummary) { [int]$profileSummary.previewPracticePartiallyCorrect } else { 0 }
+      previewPracticeIncorrect = if ($profileSummary) { [int]$profileSummary.previewPracticeIncorrect } else { 0 }
+      previewPracticeAverageScore = if ($profileSummary -and $null -ne $profileSummary.previewPracticeAverageScore) { [int]$profileSummary.previewPracticeAverageScore } else { $null }
+      exams = if ($profileSummary) { [int]$profileSummary.exams } else { 0 }
+      latestExamScore = if ($profileSummary) { $profileSummary.latestExamScore } else { $null }
+      latestExamPossible = if ($profileSummary) { $profileSummary.latestExamPossible } else { $null }
+      itemsNeedingReview = if ($profileSummary) { [int]$profileSummary.itemsNeedingReview } else { 0 }
+      dictations = if ($profileSummary) { [int]$profileSummary.dictations } else { 0 }
+      focusedSessions = if ($profileSummary) { [int]$profileSummary.focusedSessions } else { 0 }
+      evidence = if ($abilitySummary) { [int]$abilitySummary.totalEvidence } else { 0 }
+      abilityScore = if ($abilitySummary) { [int]$abilitySummary.comprehensiveScore } else { 0 }
+    }
   }
   # 同步中心和历史报告使用 summary 作为统一统计字段。保留
   # profileSummary 作为兼容别名，避免旧版读取器丢失统计。
   $syncStatus.summary = $latestSummary
   $syncStatus.profileSummary = $latestSummary
 
-  Write-Host "学习档案已同步：$OutputPath"
-  Write-Host "网站 AI 做题：$($profile.summary.aiQuestions) 题，正确率 $($profile.summary.aiAccuracy)%"
-  Write-Host "网站 AI 问答：$($profile.summary.tutorQuestions) 次"
-  Write-Host "网站预习练习：$($profile.summary.previewPracticeRounds) 轮、$($profile.summary.previewPracticeQuestions) 题（完全正确 $($profile.summary.previewPracticeFullyCorrect)、部分正确 $($profile.summary.previewPracticePartiallyCorrect)、错误 $($profile.summary.previewPracticeIncorrect)；仅供预习回顾，不计入正式能力）。"
-  if ($profile.summary.exams -gt 0) {
-    Write-Host "网站试卷：$($profile.summary.exams) 份，最近 $($profile.summary.latestExamScore)/$($profile.summary.latestExamPossible) 分，平均百分比 $($profile.summary.examAveragePercentage)%"
+  if ($PreviewPracticeOnly) {
+    Write-Host "预习练习记录已单独同步：$OutputPath"
+    Write-Host "网站预习练习：$($profileToWrite.summary.previewPracticeRounds) 轮、$($profileToWrite.summary.previewPracticeQuestions) 题（完全正确 $($profileToWrite.summary.previewPracticeFullyCorrect)、部分正确 $($profileToWrite.summary.previewPracticePartiallyCorrect)、错误 $($profileToWrite.summary.previewPracticeIncorrect)；仅供预习回顾，不计入正式能力）。"
   } else {
-    Write-Host "网站试卷：尚未交卷"
+    Write-Host "学习档案已同步：$OutputPath"
+    Write-Host "网站 AI 做题：$($profile.summary.aiQuestions) 题，正确率 $($profile.summary.aiAccuracy)%"
+    Write-Host "网站 AI 问答：$($profile.summary.tutorQuestions) 次"
+    Write-Host "网站预习练习：$($profile.summary.previewPracticeRounds) 轮、$($profile.summary.previewPracticeQuestions) 题（完全正确 $($profile.summary.previewPracticeFullyCorrect)、部分正确 $($profile.summary.previewPracticePartiallyCorrect)、错误 $($profile.summary.previewPracticeIncorrect)；仅供预习回顾，不计入正式能力）。"
+    if ($profile.summary.exams -gt 0) {
+      Write-Host "网站试卷：$($profile.summary.exams) 份，最近 $($profile.summary.latestExamScore)/$($profile.summary.latestExamPossible) 分，平均百分比 $($profile.summary.examAveragePercentage)%"
+    } else {
+      Write-Host "网站试卷：尚未交卷"
+    }
+    Write-Host "待复习内容：$($profile.summary.itemsNeedingReview) 项"
+    Write-Host "听写：$($profile.summary.dictations) 次；专项训练：$($profile.summary.focusedSessions) 次；能力证据：$($profile.abilities.totalEvidence) 条"
   }
-  Write-Host "待复习内容：$($profile.summary.itemsNeedingReview) 项"
-  Write-Host "听写：$($profile.summary.dictations) 次；专项训练：$($profile.summary.focusedSessions) 次；能力证据：$($profile.abilities.totalEvidence) 条"
 } else {
   Add-SyncError "download-learning-profile" $downloadResult.error $downloadResult.attempts
-  Write-Warning "网站学习档案下载失败：$($downloadResult.error.message) 本地旧快照已保留。"
+  if ($PreviewPracticeOnly) {
+    Write-Warning "预习练习记录下载失败：$($downloadResult.error.message) 本地旧记录已保留。"
+  } else {
+    Write-Warning "网站学习档案下载失败：$($downloadResult.error.message) 本地旧快照已保留。"
+  }
 }
 
 Save-SyncStatus

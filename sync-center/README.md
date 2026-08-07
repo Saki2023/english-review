@@ -5,6 +5,7 @@
 - 本次准备同步的学习进度、错题本、每日课程词句、最近每日笔记和预习文件；
 - 实际上传到网站的文件；
 - 从网站下载的 `网站学习档案.json`；
+- 独立下载的 `网站预习练习.json`，包含已完成预习练习的逐题记录；
 - 网站当前课程天数、词句与笔记总数，以及 AI 做题、问答、试卷、待复习、听写、专项训练和能力证据统计；
 - 最近 50 次同步记录及失败原因；
 - 上传和下载各自的成功状态，以及网络、TLS、超时、HTTP 401/403、HTTP 5xx 或本地资料错误类别。
@@ -28,6 +29,14 @@ powershell -ExecutionPolicy Bypass -File ".\每日英语复习\sync-center\同�
 ```
 
 首次使用前，`学习同步\.sync.env` 需要已经填写 `SYNC_BASE_URL`、`SYNC_USERNAME`、`SYNC_READ_TOKEN`；要把本地进度上传到网站，还需要 `SYNC_WRITE_TOKEN`。同步中心只显示配置是否存在，不显示任何令牌。
+
+“立即同步”执行完整正式同步；“仅同步预习练习”只下载已完成的预习练习到 `学习同步\网站预习练习.json`，不会读取或上传课程、笔记、进度、错题以及其他本地资料。完整同步仍会把预习练习包含在 `网站学习档案.json` 中，两种模式互不替代。
+
+无界面单独同步预习练习：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\每日英语复习\sync-center\同步中心.ps1" -Headless -PreviewPracticeOnly
+```
 
 ## 自动同步
 
