@@ -165,14 +165,14 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=57/);
+  assert.match(html, /pronunciation-data\.js\?v=58/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /phonemeSoundButtonHtml\(item\)/);
   assert.match(app, /speechButtonHtml\(item\.example, `慢速播放完整示范词/);
   assert.match(app, /data-pronunciation-sound/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=57/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=58/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -259,6 +259,8 @@ test("preview practice keeps word and sentence exercises isolated from formal re
   const html = read("index.html");
   const server = read("server.js");
   const previewPractice = read("server/preview-practice.js");
+  const answerUtils = read("answer-utils.js");
+  const reviewVariants = read("review-variants.js");
   assert.match(html, /data-view="preview-practice"/);
   assert.match(html, /id="previewPracticeForm"/);
   assert.match(html, /data-preview-practice-mode="word"/);
@@ -267,8 +269,14 @@ test("preview practice keeps word and sentence exercises isolated from formal re
   assert.match(app, /function previewPracticeGrade\(task, answer\)/);
   assert.match(app, /function clientPreviewAcceptedChinese\(english, chinese, acceptedChinese = \[\]\)/);
   assert.match(app, /REVIEW_VARIANTS\.expandRegisteredChineseAnswers\(DATA, english, answers, 16\)/);
-  assert.match(app, /acceptedChinese: clientPreviewAcceptedChinese\(sentence\.english, sentence\.chinese, sentence\.acceptedChinese\)/);
+  assert.match(app, /acceptedChinese: clientPreviewAcceptedChinese\(sentence\.english, chinese, \[sourceChinese,/);
   assert.match(app, /你的答案使用了正式词库登记的中文同义词/);
+  assert.match(app, /chineseNaturalDeepMatches\(answer, task\.acceptedChinese/);
+  assert.match(answerUtils, /const NATURAL_DEEP_EXPLANATION =/);
+  assert.match(reviewVariants, /const DEEP_DEGREE_BOUNDARY_WORDS = new Set/);
+  assert.match(reviewVariants, /naturalizePlainDeepChinese/);
+  assert.match(server, /normalizeStoredContentSentences/);
+  assert.match(previewPractice, /NATURAL_DEEP_EXPLANATION/);
   assert.match(app, /function currentPreviewPracticeTask\(state = ensurePreviewPracticeState\(\)\)/);
   assert.match(app, /const state = ensurePreviewPracticeState\(\);\s*const task = currentPreviewPracticeTask\(state\);/s);
   assert.match(app, /Object\.assign\(stored, current\);\s*model\.previewPractice = stored;\s*return stored;/s);
@@ -304,7 +312,7 @@ test("preview practice keeps word and sentence exercises isolated from formal re
   assert.match(server, /\[\.\.\.learnedWords, \.\.\.previewWords\.flatMap/);
   assert.match(server, /targetTokens\.every\(token => tokens\.includes\(token\)\)/);
   assert.match(server, /expandPreviewAcceptedChinese\(contentValue, english/);
-  assert.match(server, /expandPreviewAcceptedChinese\(content, english, \[\], chinese, 16\)/);
+  assert.match(server, /expandPreviewAcceptedChinese\(content, english, \[school\.chinese\], chinese, 16\)/);
   assert.match(previewPractice, /repairRegisteredChineseResults/);
   assert.match(previewPractice, /不会计入正式错题、待复习、薄弱点或能力分/);
   assert.match(server, /url\.pathname === "\/api\/preview\/practice\/sentences"/);
@@ -433,7 +441,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 57", () => {
+test("PWA client assets consistently use the displayed cache version 58", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -444,8 +452,8 @@ test("PWA client assets consistently use the displayed cache version 57", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "57");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v57"/);
+  assert.equal(displayedVersion[1], "58");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v58"/);
 });
 
 test("complete self-study exposes one-step teaching, recovery, questions, and explicit continuation controls", () => {
@@ -498,6 +506,6 @@ test("daily study plan offers six free-choice projects and records sixty minutes
   assert.doesNotMatch(app, /String\(stage\.index \+ 1\)/);
   assert.doesNotMatch(app, /按顺序完成/);
   assert.doesNotMatch(html, /按顺序学习/);
-  assert.match(html, /study-time\.js\?v=57/);
-  assert.match(serviceWorker, /study-time\.js\?v=57/);
+  assert.match(html, /study-time\.js\?v=58/);
+  assert.match(serviceWorker, /study-time\.js\?v=58/);
 });

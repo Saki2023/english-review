@@ -190,3 +190,51 @@ test("exam grading removes full credit when a Chinese-to-English translation omi
   assert.match(grade.explanation, /冠词/);
   assert.equal(grading.weakPoints.some(item => item.category === "grammar" && item.questionIds.includes(target.id)), true);
 });
+
+test("exam generation and grading accept natural Chinese 很深 while preserving degree boundaries", () => {
+  const payload = generatedPayload();
+  const parsed = JSON.parse(payload.choices[0].message.content);
+  const deepSource = parsed.questions.find(question => question.type === "translation" && question.direction === "en-zh");
+  Object.assign(deepSource, {
+    sourceText: "We see a deep pool.",
+    acceptedAnswers: ["我们看见一个深的水池。"]
+  });
+  payload.choices[0].message.content = JSON.stringify(parsed);
+  const allowedWords = [...ALLOWED_WORDS, "we", "see", "deep", "pool"];
+  const generated = parseGeneratedExam(payload, { allowedWords, totalPoints: 100, includeEssay: false, includeListening: false });
+  const exam = createExam(generated, { providerId: "p1", providerName: "Test", model: "test-model", reasoningEffort: "high" });
+  const target = exam.questions.find(question => question.type === "translation" && question.sourceText === "We see a deep pool.");
+  assert.equal(target.answerKey.acceptedAnswers[0], "我们看见一个很深的水池。");
+  assert.ok(target.answerKey.acceptedAnswers.includes("我们看见一个深的水池。"));
+  assert.ok(target.answerKey.acceptedAnswers.includes("我们看见一个很深的游泳池。"));
+
+  const answers = answersFor(exam);
+  answers[target.id] = "我们看见一个很深的游泳池";
+  const subjectiveGrades = exam.questions.filter(question => question.type === "translation").map(question => ({
+    questionId: question.id,
+    score: question.id === target.id ? Math.max(0, question.points - 2) : question.points,
+    explanation: question.id === target.id ? "多写了很。" : "表达正确。"
+  }));
+  const gradePayload = { choices: [{ message: { content: JSON.stringify({
+    subjectiveGrades,
+    weakPoints: [{ category: "translation", severity: "low", detail: "不要写很。", recommendation: "删除很。", questionIds: [target.id], relatedWords: ["deep"] }],
+    summary: "完成。"
+  }) } }] };
+  const grading = parseExamGrade(gradePayload, { exam, answers, allowedWords });
+  const targetGrade = grading.subjectiveGrades.find(item => item.questionId === target.id);
+  assert.equal(targetGrade.score, target.points);
+  assert.equal(targetGrade.correct, true);
+  assert.match(targetGrade.explanation, /自然表达|没有改变/);
+  assert.equal(grading.weakPoints.some(item => item.questionIds.includes(target.id)), false);
+
+  const completed = completeExam(exam, { ...grading, objectiveGrades: objectiveGrades(exam, answers) }, { providerId: "p1", providerName: "Test" }, allowedWords);
+  const completedGrade = completed.result.grades.find(item => item.questionId === target.id);
+  assert.equal(completedGrade.score, target.points);
+  assert.equal(completedGrade.correct, true);
+  assert.equal(completed.result.weakPoints.some(item => item.questionIds.includes(target.id)), false);
+
+  const boundary = JSON.parse(JSON.stringify(target));
+  boundary.sourceText = "We see a very deep pool.";
+  boundary.answerKey.acceptedAnswers = ["我们看见一个非常深的游泳池。"];
+  assert.equal(require("../answer-utils").chineseAnswerMatches("我们看见一个很深的游泳池", boundary.answerKey.acceptedAnswers, boundary.sourceText), false);
+});

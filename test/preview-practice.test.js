@@ -93,15 +93,15 @@ test("preview sentences inherit formal word meanings and repair legacy pool resu
       chinese: "一个水池是深的。",
       acceptedChinese: ["一个水池是深的。"]
     }],
-    answers: { "preview-sentence-d9-deep": "一个游泳池是深的" },
+    answers: { "preview-sentence-d9-deep": "一个游泳池很深" },
     pending: { "preview-sentence-d9-deep": "等待重试" },
     results: {
       "preview-sentence-d9-deep": {
         correct: false,
         score: 0,
         gradingStatus: "incorrect",
-        explanation: "pool 只能翻译为水池。",
-        detailedExplanation: "误译为游泳池改变了原意。",
+        explanation: "中文多写了“很”。",
+        detailedExplanation: "参考答案要求写成一个水池是深的。",
         problemWords: ["pool"],
         wordResults: [{ english: "pool", correct: false, issue: "meaning" }],
         source: "ai",
@@ -113,16 +113,21 @@ test("preview sentences inherit formal word meanings and repair legacy pool resu
   const restored = sanitizePreviewPractice(JSON.parse(JSON.stringify(legacy)), content);
   const task = restored.tasks[0];
   const result = restored.results[task.id];
+  assert.equal(task.chinese, "一个水池很深。");
   assert.ok(task.acceptedChinese.includes("一个水池是深的。"));
   assert.ok(task.acceptedChinese.includes("一个游泳池是深的。"));
   assert.ok(task.acceptedChinese.includes("一个泳池是深的。"));
+  assert.ok(task.acceptedChinese.includes("一个水池很深。"));
+  assert.ok(task.acceptedChinese.includes("一个游泳池很深。"));
+  assert.ok(task.acceptedChinese.includes("一个泳池很深。"));
   assert.equal(result.correct, true);
   assert.equal(result.score, 1);
   assert.equal(result.gradingStatus, "correct");
   assert.deepEqual(result.problemWords, []);
   assert.deepEqual(result.wordResults, []);
   assert.equal(Object.hasOwn(restored.pending, task.id), false);
-  assert.doesNotMatch(`${result.explanation} ${result.detailedExplanation}`, /只能翻译为水池|误译为游泳池|改变了原意/);
+  assert.doesNotMatch(`${result.explanation} ${result.detailedExplanation}`, /只能翻译为水池|误译为游泳池|改变了原意|多写了“很”|要求写成/);
+  assert.match(result.explanation, /自然表达|没有改变/);
   assert.match(result.detailedExplanation, /不会计入正式错题、待复习、薄弱点或能力分/);
   assert.deepEqual(sanitizePreviewPractice(JSON.parse(JSON.stringify(restored)), content), restored);
 

@@ -1,12 +1,14 @@
 "use strict";
 
 const {
+  NATURAL_DEEP_EXPLANATION,
   NATURAL_PERSON_MEASURE_EXPLANATION,
   OPTIONAL_MEASURE_OMISSION_EXPLANATION,
   QUANTITY_CONFLICT_EXPLANATION,
   buildTranslationExplanation,
   chineseAnswerQuality,
   chineseAnswerMatches,
+  chineseNaturalDeepMatches,
   chineseNaturalPersonMeasureMatches,
   chineseOptionalMeasureOmissionMatches,
   chineseQuantityConflict,
@@ -18,10 +20,15 @@ const {
   normalizeEnglish,
   repairReviewEvidence
 } = require("../answer-utils");
+const { expandRegisteredChineseAnswers, naturalizePlainDeepChinese } = require("../review-variants");
 
-function correctedAiHistoryItem(value) {
+function correctedAiHistoryItem(value, content = {}) {
   const item = value && typeof value === "object" ? value : {};
-  const acceptedAnswers = item.correctAnswer ? [item.correctAnswer] : [];
+  const sourceCorrectAnswer = String(item.correctAnswer || "");
+  const correctAnswer = item.direction === "en-zh" ? naturalizePlainDeepChinese(item.prompt, sourceCorrectAnswer) : sourceCorrectAnswer;
+  const acceptedAnswers = item.direction === "en-zh"
+    ? expandRegisteredChineseAnswers(content, item.prompt, [correctAnswer, sourceCorrectAnswer], 16)
+    : (sourceCorrectAnswer ? [sourceCorrectAnswer] : []);
   let correct = item.correct === true;
   let score = Number.isFinite(Number(item.score)) ? Math.max(0, Math.min(1, Number(item.score))) : (correct ? 1 : 0);
   let gradingStatus = ["correct", "partial", "incorrect"].includes(item.gradingStatus) ? item.gradingStatus : (correct ? "correct" : "incorrect");
@@ -37,9 +44,12 @@ function correctedAiHistoryItem(value) {
       problemWords = [];
       const optionalMeasureOmission = chineseOptionalMeasureOmissionMatches(item.userAnswer, acceptedAnswers);
       const naturalPersonMeasure = chineseNaturalPersonMeasureMatches(item.userAnswer, acceptedAnswers, item.prompt);
+      const naturalDeep = chineseNaturalDeepMatches(item.userAnswer, acceptedAnswers, item.prompt);
       explanation = quality.gradingStatus === "partial"
         ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
-        : naturalPersonMeasure
+        : naturalDeep
+          ? NATURAL_DEEP_EXPLANATION
+          : naturalPersonMeasure
           ? NATURAL_PERSON_MEASURE_EXPLANATION
           : optionalMeasureOmission
           ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
@@ -72,6 +82,7 @@ function correctedAiHistoryItem(value) {
     : englishSourceWordResults(english, correct, problemWords);
   const repaired = {
     ...item,
+    correctAnswer,
     correct,
     score,
     gradingStatus,
@@ -83,16 +94,47 @@ function correctedAiHistoryItem(value) {
   return JSON.stringify(repaired) === JSON.stringify(item) ? item : repaired;
 }
 
-function repairAiPractice(value) {
+function normalizeAiQuestion(content, value) {
+  const question = value && typeof value === "object" ? value : {};
+  if (question.direction !== "en-zh") return question;
+  const sourceChinese = String(question.chinese || "");
+  const chinese = naturalizePlainDeepChinese(question.english, sourceChinese);
+  const acceptedChinese = expandRegisteredChineseAnswers(content, question.english, [chinese, sourceChinese, ...(Array.isArray(question.acceptedChinese) ? question.acceptedChinese : [])], 16);
+  const naturalDeep = chineseNaturalDeepMatches(question.userAnswer, acceptedChinese, question.english);
+  const repaired = {
+    ...question,
+    chinese,
+    acceptedChinese,
+    ...(naturalDeep ? {
+      correct: true,
+      score: 1,
+      gradingStatus: "correct",
+      explanation: NATURAL_DEEP_EXPLANATION,
+      detailedExplanation: buildTranslationExplanation({ direction: "en-zh", referenceAnswer: chinese, answer: question.userAnswer, correct: true, gradingStatus: "correct", explanation: NATURAL_DEEP_EXPLANATION, problemWords: [] }),
+      problemWords: [],
+      wordResults: englishSourceWordResults(question.english, true, [])
+    } : {})
+  };
+  return JSON.stringify(repaired) === JSON.stringify(question) ? question : repaired;
+}
+
+function normalizeAiQuestionSet(content, value) {
+  if (!value || typeof value !== "object" || !Array.isArray(value.questions)) return value;
+  const questions = value.questions.map(question => normalizeAiQuestion(content, question));
+  return questions.some((question, index) => question !== value.questions[index]) ? { ...value, questions } : value;
+}
+
+function repairAiPractice(value, content = {}) {
   const source = value && typeof value === "object" ? value : {};
   let changed = false;
   const history = (Array.isArray(source.history) ? source.history : []).map(item => {
-    const repaired = correctedAiHistoryItem(item);
+    const repaired = correctedAiHistoryItem(item, content);
     if (repaired !== item) changed = true;
     return repaired;
   });
   const historyById = new Map(history.map(item => [item.id, item]));
-  let currentSet = source.currentSet;
+  let currentSet = normalizeAiQuestionSet(content, source.currentSet);
+  if (currentSet !== source.currentSet) changed = true;
   if (currentSet && Array.isArray(currentSet.questions)) {
     const questions = currentSet.questions.map(question => {
       const historyItem = historyById.get(`${currentSet.id}:${question.id}`);
@@ -113,8 +155,10 @@ function repairAiPractice(value) {
     });
     if (questions.some((question, index) => question !== currentSet.questions[index])) currentSet = { ...currentSet, questions };
   }
+  const queuedSets = (Array.isArray(source.queuedSets) ? source.queuedSets : []).map(set => normalizeAiQuestionSet(content, set));
+  if (queuedSets.some((set, index) => set !== source.queuedSets[index])) changed = true;
   if (!changed) return { changed: false, value: source };
-  return { changed: true, value: { ...source, currentSet, history, updatedAt: new Date().toISOString() } };
+  return { changed: true, value: { ...source, currentSet, queuedSets, history, updatedAt: new Date().toISOString() } };
 }
 
 function isKnownSemanticPromptIssue(question) {
@@ -124,35 +168,97 @@ function isKnownSemanticPromptIssue(question) {
   return normalizeEnglish(correctOption && correctOption.text) === "it is a big cat";
 }
 
-function repairExam(examValue) {
-  const exam = examValue && typeof examValue === "object" ? examValue : null;
-  if (!exam || !Array.isArray(exam.questions)) return { changed: false, value: exam };
-  let changed = false;
-  const questions = exam.questions.map(question => {
-    if (!isKnownSemanticPromptIssue(question)) return question;
-    changed = true;
-    return { ...question, prompt: "选择含有 big 的句子。" };
-  });
-  return changed ? { changed: true, value: { ...exam, questions } } : { changed: false, value: exam };
+function removeCorrectedWeakPoints(value, correctedIds) {
+  return (Array.isArray(value) ? value : []).map(item => {
+    const questionIds = Array.isArray(item && item.questionIds) ? item.questionIds : [];
+    const retained = questionIds.filter(questionId => !correctedIds.has(questionId));
+    return { item: { ...item, questionIds: retained }, drop: questionIds.length > 0 && retained.length === 0 };
+  }).filter(entry => !entry.drop).map(entry => entry.item);
 }
 
-function repairAiExam(value) {
+function normalizeExamQuestion(content, value) {
+  const question = value && typeof value === "object" ? value : {};
+  if (question.type !== "translation" || question.direction !== "en-zh") return question;
+  const key = question.answerKey && typeof question.answerKey === "object" ? question.answerKey : {};
+  const sourceAnswers = Array.isArray(key.acceptedAnswers) ? key.acceptedAnswers : [];
+  const acceptedAnswers = expandRegisteredChineseAnswers(content, question.sourceText, [
+    ...sourceAnswers.map(answer => naturalizePlainDeepChinese(question.sourceText, answer)),
+    ...sourceAnswers
+  ], 16);
+  const repaired = { ...question, answerKey: { ...key, acceptedAnswers } };
+  return JSON.stringify(repaired) === JSON.stringify(question) ? question : repaired;
+}
+
+function repairExam(examValue, content = {}) {
+  const exam = examValue && typeof examValue === "object" ? examValue : null;
+  if (!exam || !Array.isArray(exam.questions)) return { changed: false, value: exam, correctedQuestionIds: new Set() };
+  const questions = exam.questions.map(question => {
+    const promptRepaired = isKnownSemanticPromptIssue(question) ? { ...question, prompt: "选择含有 big 的句子。" } : question;
+    return normalizeExamQuestion(content, promptRepaired);
+  });
+  const correctedQuestionIds = new Set();
+  let result = exam.result;
+  if (result && Array.isArray(result.grades)) {
+    const grades = result.grades.map(grade => {
+      const question = questions.find(item => item.id === grade.questionId);
+      const answer = exam.answers && question ? exam.answers[question.id] : "";
+      if (!question || question.type !== "translation" || question.direction !== "en-zh"
+        || !chineseNaturalDeepMatches(answer, question.answerKey.acceptedAnswers, question.sourceText)) return grade;
+      correctedQuestionIds.add(question.id);
+      return {
+        ...grade,
+        score: question.points,
+        correct: true,
+        explanation: NATURAL_DEEP_EXPLANATION,
+        detailedExplanation: NATURAL_DEEP_EXPLANATION,
+        correctAnswer: question.answerKey.acceptedAnswers.join(" / ")
+      };
+    });
+    const typeScores = Array.from(new Set(questions.map(question => question.type))).map(type => {
+      const typeQuestions = questions.filter(question => question.type === type);
+      const previous = (Array.isArray(result.typeScores) ? result.typeScores : []).find(item => item.type === type);
+      return {
+        type,
+        label: previous && previous.label || typeQuestions[0].typeLabel || type,
+        score: grades.filter(grade => typeQuestions.some(question => question.id === grade.questionId)).reduce((sum, grade) => sum + (Number(grade.score) || 0), 0),
+        possible: typeQuestions.reduce((sum, question) => sum + (Number(question.points) || 0), 0)
+      };
+    });
+    result = {
+      ...result,
+      score: grades.reduce((sum, grade) => sum + (Number(grade.score) || 0), 0),
+      possible: questions.reduce((sum, question) => sum + (Number(question.points) || 0), 0),
+      grades,
+      typeScores,
+      weakPoints: removeCorrectedWeakPoints(result.weakPoints, correctedQuestionIds)
+    };
+  }
+  const repairedExam = { ...exam, questions, result };
+  const changed = JSON.stringify(repairedExam) !== JSON.stringify(exam);
+  return { changed, value: changed ? repairedExam : exam, correctedQuestionIds };
+}
+
+function repairAiExam(value, content = {}) {
   const source = value && typeof value === "object" ? value : {};
-  const current = repairExam(source.currentExam);
+  const current = repairExam(source.currentExam, content);
   let changed = current.changed;
+  const correctedQuestionIds = new Set(current.correctedQuestionIds);
   const history = (Array.isArray(source.history) ? source.history : []).map(exam => {
-    const repaired = repairExam(exam);
+    const repaired = repairExam(exam, content);
     if (repaired.changed) changed = true;
+    repaired.correctedQuestionIds.forEach(id => correctedQuestionIds.add(id));
     return repaired.value;
   });
+  const weakPoints = removeCorrectedWeakPoints(source.weakPoints, correctedQuestionIds);
+  if (JSON.stringify(weakPoints) !== JSON.stringify(source.weakPoints || [])) changed = true;
   if (!changed) return { changed: false, value: source };
-  return { changed: true, value: { ...source, currentExam: current.value, history, updatedAt: new Date().toISOString() } };
+  return { changed: true, value: { ...source, currentExam: current.value, history, weakPoints, updatedAt: new Date().toISOString() } };
 }
 
 function repairLearningEvidence(content, stateValue) {
   const review = repairReviewEvidence(content, stateValue);
-  const practice = repairAiPractice(review.state.aiPractice);
-  const exam = repairAiExam(review.state.aiExam);
+  const practice = repairAiPractice(review.state.aiPractice, content);
+  const exam = repairAiExam(review.state.aiExam, content);
   return {
     changed: review.changed || practice.changed || exam.changed,
     state: { ...review.state, aiPractice: practice.value, aiExam: exam.value }

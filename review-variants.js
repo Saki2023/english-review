@@ -116,6 +116,69 @@
     "in", "on", "at", "to", "from", "of", "for", "with",
     "i", "you", "he", "she", "it", "we", "they", "sit", "sat"
   ]);
+  const DEEP_DEGREE_BOUNDARY_WORDS = new Set([
+    "almost", "as", "enough", "extremely", "fairly", "how", "less", "more", "most", "not", "quite", "rather",
+    "really", "slightly", "so", "too", "very"
+  ]);
+  const POOL_CHINESE_MEANINGS = Object.freeze(["游泳池", "泳池", "水池"]);
+
+  function plainDeepSentence(value) {
+    const tokens = englishTokens(value);
+    return tokens.length > 1 && tokens.includes("deep") && !tokens.some(token => DEEP_DEGREE_BOUNDARY_WORDS.has(token));
+  }
+
+  function addUniqueText(result, value, limit) {
+    const text = cleanText(value, 180);
+    if (!text || result.includes(text) || result.length >= limit) return false;
+    result.push(text);
+    return true;
+  }
+
+  function naturalizePlainDeepChinese(english, value) {
+    const text = cleanText(value, 180);
+    if (!text || !plainDeepSentence(english)) return text;
+    return text
+      .replace(/是深的/gu, "很深")
+      .replace(/(^|[^很])深(?:的)?(?=(?:游泳池|泳池|水池))/gu, "$1很深的")
+      .replace(/(游泳池|泳池|水池)深(?=$|[。！？,.!?；;，])/gu, "$1很深")
+      .replace(/(^|[^是很])深的/gu, "$1很深的");
+  }
+
+  function expandNaturalChineseAnswers(english, answers, maximum = 16) {
+    const limit = Math.max(1, Math.min(32, Number(maximum) || 16));
+    const candidateLimit = 128;
+    const result = [];
+    (Array.isArray(answers) ? answers : [answers]).forEach(answer => {
+      addUniqueText(result, naturalizePlainDeepChinese(english, answer), candidateLimit);
+      addUniqueText(result, answer, candidateLimit);
+    });
+    if (!plainDeepSentence(english)) return result.slice(0, limit);
+    const includesPool = englishTokens(english).includes("pool");
+
+    for (let index = 0; index < result.length && result.length < candidateLimit; index += 1) {
+      const answer = result[index];
+      if (includesPool) {
+        const matchedPool = POOL_CHINESE_MEANINGS.find(meaning => answer.includes(meaning));
+        if (matchedPool) {
+          POOL_CHINESE_MEANINGS.forEach(meaning => {
+            if (meaning !== matchedPool) addUniqueText(result, answer.replace(matchedPool, meaning), candidateLimit);
+          });
+        }
+      }
+      addUniqueText(result, naturalizePlainDeepChinese(english, answer), candidateLimit);
+      addUniqueText(result, answer.replace(/很深的/gu, "深的"), candidateLimit);
+      addUniqueText(result, answer.replace(/很深(?=$|[。！？,.!?；;，])/gu, "是深的"), candidateLimit);
+    }
+    return result.sort((left, right) => {
+      const naturalDifference = Number(/很深/u.test(right)) - Number(/很深/u.test(left));
+      if (naturalDifference) return naturalDifference;
+      return left < right ? -1 : left > right ? 1 : 0;
+    }).slice(0, limit);
+  }
+
+  function isNaturalDeepChinese(english, value) {
+    return plainDeepSentence(english) && /很深(?:的)?/u.test(cleanText(value, 180));
+  }
 
   function registeredChineseMeanings(content, token) {
     const item = (Array.isArray(content && content.words) ? content.words : [])
@@ -154,7 +217,7 @@
         });
       }
     });
-    return result;
+    return expandNaturalChineseAnswers(english, result, limit);
   }
 
   const OUT_OF_SCOPE_SENSE_HINTS = Object.freeze({
@@ -224,7 +287,8 @@
   function validateGeneratedSentenceVariant(content, baseItem, value) {
     if (!value || typeof value !== "object") return invalidGeneratedVariant("invalid-object");
     const english = cleanText(value.english, 180);
-    const chinese = cleanText(value.chinese, 180);
+    const sourceChinese = cleanText(value.chinese, 180);
+    const chinese = naturalizePlainDeepChinese(english, sourceChinese);
     const family = sentenceFamily(baseItem);
     if (!english) return invalidGeneratedVariant("missing-english");
     if (!chinese) return invalidGeneratedVariant("missing-chinese", { english });
@@ -241,7 +305,7 @@
     if (outOfScope) return invalidGeneratedVariant("unlearned-word-sense", { english, unlearnedWords: [outOfScope.token], outOfScopeMeaning: outOfScope.hint });
     const normalized = normalizeEnglish(english);
     const acceptedChinese = [];
-    [chinese, ...(Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [])].forEach(answer => {
+    [chinese, sourceChinese, ...(Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [])].forEach(answer => {
       const text = cleanText(answer, 180);
       if (text && chineseSubjectMatchesEnglish(english, text) && !acceptedChinese.includes(text) && acceptedChinese.length < 16) acceptedChinese.push(text);
     });
@@ -288,8 +352,11 @@
     chineseSubjectMatchesEnglish,
     eligibleSentenceVariants,
     englishTokens,
+    expandNaturalChineseAnswers,
     expandRegisteredChineseAnswers,
     generatedVariantId,
+    isNaturalDeepChinese,
+    naturalizePlainDeepChinese,
     normalizeEnglish,
     outOfScopeMeaning,
     sanitizeGeneratedSentenceVariant,

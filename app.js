@@ -3,9 +3,9 @@
 
   const DATA = window.ENGLISH_REVIEW_DATA;
   const PRONUNCIATION = window.ENGLISH_PRONUNCIATION_DATA || { concepts: [], phonemes: [] };
-  const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, expandRegisteredChineseAnswers: (_content, _english, answers) => answers, sanitizeGeneratedSentenceVariant: () => null };
+  const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, expandRegisteredChineseAnswers: (_content, _english, answers) => answers, naturalizePlainDeepChinese: (_english, value) => value, sanitizeGeneratedSentenceVariant: () => null };
   const STUDY_TIME = window.ENGLISH_REVIEW_STUDY_TIME || {};
-  const { MISTAKE_AUTO_RESOLVE_STREAK, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
+  const { MISTAKE_AUTO_RESOLVE_STREAK, NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const FALLBACK_DAILY_STUDY_PLAN = [
     { id: "review", label: "旧知识复习", minutes: 10, view: "home", actionLabel: "直接开始做题" },
     { id: "phonics", label: "拼读与词汇", minutes: 15, view: "pronunciation", actionLabel: "开始发音教学", allowBackground: true },
@@ -63,7 +63,15 @@
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
   let remoteReady = !API_ENABLED;
   let remoteSaveTimer;
-  const allItems = [...DATA.words.map(item => ({ ...item, type: "word" })), ...DATA.sentences.map(item => ({ ...item, type: "sentence" }))];
+  const allItems = [
+    ...DATA.words.map(item => ({ ...item, type: "word" })),
+    ...DATA.sentences.map(item => {
+      const sourceChinese = String(item.chinese || "").trim();
+      const chinese = REVIEW_VARIANTS.naturalizePlainDeepChinese(item.english, sourceChinese);
+      const acceptedChinese = REVIEW_VARIANTS.expandRegisteredChineseAnswers(DATA, item.english, [chinese, sourceChinese, ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])], 16);
+      return { ...item, chinese, acceptedChinese, type: "sentence" };
+    })
+  ];
   const learnedItems = allItems.filter(item => !item.preview);
   const itemById = new Map(allItems.map(item => [item.id, item]));
   const taskById = new Map();
@@ -282,9 +290,10 @@
     if (!value || typeof value !== "object") return null;
     const id = String(value.id || "").trim().slice(0, 180);
     const english = String(value.english || "").trim().slice(0, 180);
-    const chinese = String(value.chinese || "").trim().slice(0, 180);
-    if (!id || !english || !chinese) return null;
-    const acceptedChineseSource = Array.from(new Set((Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [chinese]).map(item => String(item || "").trim()).filter(Boolean))).slice(0, 16);
+    const sourceChinese = String(value.chinese || "").trim().slice(0, 180);
+    const chinese = REVIEW_VARIANTS.naturalizePlainDeepChinese(english, sourceChinese);
+    if (!id || !english || !sourceChinese || !chinese) return null;
+    const acceptedChineseSource = Array.from(new Set([chinese, sourceChinese, ...(Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [])].map(item => String(item || "").trim()).filter(Boolean))).slice(0, 16);
     const acceptedChinese = typeof REVIEW_VARIANTS.expandRegisteredChineseAnswers === "function"
       ? REVIEW_VARIANTS.expandRegisteredChineseAnswers(DATA, english, acceptedChineseSource, 16)
       : acceptedChineseSource;
@@ -1195,9 +1204,10 @@
       const kind = item.kind === "sentence" ? "sentence" : item.kind === "word" ? "word" : "";
       const direction = ["en-zh", "zh-en"].includes(item.direction) ? item.direction : "";
       const english = String(item.english || "").trim().slice(0, 180);
-      const chinese = String(item.chinese || "").trim().slice(0, 180);
-      if (!id || !kind || !direction || !english || !chinese) return null;
-      const school = clientPreviewSchoolAnswers(english, chinese, item.acceptedEnglish);
+      const sourceChinese = String(item.chinese || "").trim().slice(0, 180);
+      const chinese = REVIEW_VARIANTS.naturalizePlainDeepChinese(english, sourceChinese);
+      if (!id || !kind || !direction || !english || !sourceChinese || !chinese) return null;
+      const school = clientPreviewSchoolAnswers(english, sourceChinese, item.acceptedEnglish);
       return {
         id,
         kind,
@@ -1208,7 +1218,7 @@
         chinese,
         acceptedEnglish: school.acceptedEnglish,
         acceptedChinese: kind === "sentence"
-          ? clientPreviewAcceptedChinese(english, chinese, item.acceptedChinese)
+          ? clientPreviewAcceptedChinese(english, chinese, [sourceChinese, ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])])
           : Array.from(new Set((Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [chinese]).map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8)
       };
     }).filter(Boolean).slice(0, 80);
@@ -1244,13 +1254,16 @@
       const answer = answers[task.id];
       if (!result || !answer || (result.correct && result.gradingStatus === "correct" && Number(result.score) >= 1)) return;
       if (!chineseAnswerMatches(answer, task.acceptedChinese, task.english)) return;
+      const naturalDeep = chineseNaturalDeepMatches(answer, task.acceptedChinese, task.english);
       results[task.id] = {
         ...result,
         correct: true,
         score: 1,
         gradingStatus: "correct",
-        explanation: "你的答案使用了正式词库登记的中文同义词，整句意思正确。",
-        detailedExplanation: "正式词库允许这个单词使用多种中文表达；替换后整句语义、数量和句子结构都没有改变，因此本次预习答案已改判为完全正确。预习记录仅供学习窗口查看，不会计入正式错题、待复习、薄弱点或能力分。",
+        explanation: naturalDeep ? NATURAL_DEEP_EXPLANATION : "你的答案使用了正式词库登记的中文同义词，整句意思正确。",
+        detailedExplanation: naturalDeep
+          ? `${NATURAL_DEEP_EXPLANATION}旧的错误解释已删除；这条预习记录仅供学习窗口查看，不会计入正式错题、待复习、薄弱点或能力分。`
+          : "正式词库允许这个单词使用多种中文表达；替换后整句语义、数量和句子结构都没有改变，因此本次预习答案已改判为完全正确。预习记录仅供学习窗口查看，不会计入正式错题、待复习、薄弱点或能力分。",
         problemWords: [],
         wordResults: [],
         source: "local"
@@ -2718,6 +2731,8 @@
           if (!sentence || !String(sentence.english || "").trim() || !String(sentence.chinese || "").trim()) throw Object.assign(new Error("AI 返回的预习句子不完整"), { statusCode: 503 });
           const required = Array.isArray(sentence.requiredPreviewWordIds) && sentence.requiredPreviewWordIds.length ? sentence.requiredPreviewWordIds : [word.id];
           if (!required.includes(word.id)) throw Object.assign(new Error("预习句子没有包含对应预习词"), { statusCode: 503 });
+          const sourceChinese = String(sentence.chinese).trim();
+          const chinese = REVIEW_VARIANTS.naturalizePlainDeepChinese(sentence.english, sourceChinese);
           return {
             id: `preview-sentence-${word.id}`,
             kind: "sentence",
@@ -2725,9 +2740,9 @@
             requiredPreviewWordIds: [word.id],
             direction: "en-zh",
             english: String(sentence.english).trim(),
-            chinese: String(sentence.chinese).trim(),
+            chinese,
             acceptedEnglish: Array.from(new Set([String(sentence.english).trim(), ...(Array.isArray(sentence.acceptedEnglish) ? sentence.acceptedEnglish : [])].map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8),
-            acceptedChinese: clientPreviewAcceptedChinese(sentence.english, sentence.chinese, sentence.acceptedChinese)
+            acceptedChinese: clientPreviewAcceptedChinese(sentence.english, chinese, [sourceChinese, ...(Array.isArray(sentence.acceptedChinese) ? sentence.acceptedChinese : [])])
           };
         });
         const targetState = ensurePreviewPracticeState();
@@ -2766,10 +2781,13 @@
     if (task.direction === "en-zh") {
       const quality = chineseAnswerQuality(answer, task.acceptedChinese || [task.chinese], task.english);
       const naturalPersonMeasure = chineseNaturalPersonMeasureMatches(answer, task.acceptedChinese || [task.chinese], task.english);
+      const naturalDeep = chineseNaturalDeepMatches(answer, task.acceptedChinese || [task.chinese], task.english);
       const explanation = quality.gradingStatus === "partial"
         ? "意思基本正确，中文表达还可以更自然。"
         : quality.gradingStatus === "correct"
-          ? naturalPersonMeasure
+          ? naturalDeep
+            ? NATURAL_DEEP_EXPLANATION
+            : naturalPersonMeasure
             ? NATURAL_PERSON_MEASURE_EXPLANATION
             : chineseOptionalMeasureOmissionMatches(answer, task.acceptedChinese || [task.chinese])
             ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
@@ -5690,6 +5708,9 @@
     if (correct && answer && task.direction === "en-zh" && chineseOptionalMeasureOmissionMatches(answer, task.item.acceptedChinese || [task.item.chinese])) {
       grading.explanation = OPTIONAL_MEASURE_OMISSION_EXPLANATION;
     }
+    if (correct && answer && task.direction === "en-zh" && chineseNaturalDeepMatches(answer, task.item.acceptedChinese || [task.item.chinese], task.item.english)) {
+      grading.explanation = NATURAL_DEEP_EXPLANATION;
+    }
     if (!correct && answer && task.direction === "en-zh") {
       const quality = chineseAnswerQuality(answer, task.item.acceptedChinese || [task.item.chinese], task.item.english);
       if (quality.gradingStatus === "partial") {
@@ -6435,7 +6456,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=57", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=58", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

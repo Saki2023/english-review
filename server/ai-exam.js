@@ -1,7 +1,8 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { buildTranslationExplanation, chineseAnswerMatches, englishAnswerMatches, englishFunctionWordsMatch } = require("../answer-utils");
+const { NATURAL_DEEP_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseNaturalDeepMatches, englishAnswerMatches, englishFunctionWordsMatch } = require("../answer-utils");
+const { expandNaturalChineseAnswers, naturalizePlainDeepChinese } = require("../review-variants");
 const { extractMessageContent, requestCompletion } = require("./ai-grader");
 const { englishTokens } = require("./ai-question-utils");
 
@@ -228,7 +229,13 @@ function parseGeneratedQuestion(source, type, allowedSet, points, passages) {
     const direction = source.direction === "zh-en" ? "zh-en" : "en-zh";
     if (!sourceText) throw new Error("AI exam translation question is missing source text");
     if (direction === "en-zh") assertEnglishText(sourceText, allowedSet, label);
-    const acceptedAnswers = normalizedStringArray(source.acceptedAnswers, 8, 320);
+    const sourceAcceptedAnswers = normalizedStringArray(source.acceptedAnswers, 8, 320);
+    const acceptedAnswers = direction === "en-zh"
+      ? expandNaturalChineseAnswers(sourceText, [
+        ...sourceAcceptedAnswers.map(answer => naturalizePlainDeepChinese(sourceText, answer)),
+        ...sourceAcceptedAnswers
+      ], 16)
+      : sourceAcceptedAnswers;
     if (!acceptedAnswers.length) throw new Error("AI exam translation question is missing reference answers");
     if (direction === "zh-en") acceptedAnswers.forEach(answer => assertEnglishText(answer, allowedSet, label));
     return { ...base, direction, answerKey: { kind: "text", language: direction === "zh-en" ? "en" : "zh", acceptedAnswers } };
@@ -354,10 +361,18 @@ function sanitizeStoredQuestion(value) {
     text: cleanText(item && item.text, 180)
   })).filter(item => item.id && item.text).slice(0, 6);
   const key = source.answerKey && typeof source.answerKey === "object" ? source.answerKey : {};
+  const sourceText = cleanText(source.sourceText, type === "essay" ? 500 : 320);
+  const direction = source.direction === "zh-en" ? "zh-en" : source.direction === "en-zh" ? "en-zh" : "";
+  const storedAcceptedAnswers = normalizedStringArray(key.acceptedAnswers, 8, 320);
   const answerKey = {
     kind: cleanText(key.kind, 20),
     language: cleanText(key.language, 4),
-    acceptedAnswers: normalizedStringArray(key.acceptedAnswers, 8, 320),
+    acceptedAnswers: type === "translation" && direction === "en-zh"
+      ? expandNaturalChineseAnswers(sourceText, [
+        ...storedAcceptedAnswers.map(answer => naturalizePlainDeepChinese(sourceText, answer)),
+        ...storedAcceptedAnswers
+      ], 16)
+      : storedAcceptedAnswers,
     correctOption: cleanText(key.correctOption, 4),
     correctOptions: normalizedStringArray(key.correctOptions, 6, 4),
     correctAnswer: typeof key.correctAnswer === "boolean" ? key.correctAnswer : null,
@@ -368,11 +383,11 @@ function sanitizeStoredQuestion(value) {
     type,
     typeLabel: TYPE_LABELS[type],
     prompt: cleanText(source.prompt, 300),
-    sourceText: cleanText(source.sourceText, type === "essay" ? 500 : 320),
+    sourceText,
     speechText: type === "listening" ? cleanText(source.speechText, 500) : "",
     focus: questionFocus(type),
     points: boundedInteger(source.points, 0, 0, 150),
-    direction: source.direction === "zh-en" ? "zh-en" : source.direction === "en-zh" ? "en-zh" : "",
+    direction,
     options,
     minWords: boundedInteger(source.minWords, 5, 0, 80),
     maxWords: boundedInteger(source.maxWords, 30, 0, 120),
@@ -538,30 +553,45 @@ function sanitizeWeakPoint(value, allowedSet, fallbackQuestionIds = []) {
   };
 }
 
+function withoutWeakPointQuestionIds(value, excluded) {
+  return (Array.isArray(value) ? value : []).map(item => {
+    const questionIds = Array.isArray(item.questionIds) ? item.questionIds : [];
+    const retained = questionIds.filter(questionId => !excluded.has(questionId));
+    return { item: { ...item, questionIds: retained }, drop: questionIds.length > 0 && retained.length === 0 };
+  }).filter(entry => !entry.drop).map(entry => entry.item);
+}
+
 function parseExamGrade(payload, input) {
   const parsed = parseJsonPayload(payload, "exam grade");
   const subjective = input.exam.questions.filter(question => SUBJECTIVE_TYPES.has(question.type));
   const grades = Array.isArray(parsed.subjectiveGrades) ? parsed.subjectiveGrades : [];
   const structuralQuestionIds = [];
+  const naturalDeepQuestionIds = new Set();
   const subjectiveGrades = subjective.map(question => {
     const source = grades.find(item => item && item.questionId === question.id);
     if (!source) throw new Error("AI provider omitted an exam subjective grade");
     const functionWordsMatch = !input.answers || question.type !== "translation" || question.direction !== "zh-en" || englishFunctionWordsMatch(input.answers[question.id], question.answerKey.acceptedAnswers);
+    const naturalDeep = question.type === "translation"
+      && question.direction === "en-zh"
+      && chineseNaturalDeepMatches(input.answers && input.answers[question.id], question.answerKey.acceptedAnswers, question.sourceText);
+    if (naturalDeep) naturalDeepQuestionIds.add(question.id);
     if (!functionWordsMatch) structuralQuestionIds.push(question.id);
     const score = boundedInteger(source.score, 0, 0, question.points);
-    const explanation = functionWordsMatch
+    const explanation = naturalDeep
+      ? NATURAL_DEEP_EXPLANATION
+      : functionWordsMatch
       ? (cleanText(source.explanation, 240) || "AI 未提供详细讲解。")
       : "冠词、介词或 be 动词有漏写或多写，本题不能记为完全正确。";
     return {
       questionId: question.id,
-      score: functionWordsMatch ? score : Math.min(score, Math.max(0, question.points - 1)),
-      correct: functionWordsMatch ? undefined : false,
+      score: naturalDeep ? question.points : functionWordsMatch ? score : Math.min(score, Math.max(0, question.points - 1)),
+      correct: naturalDeep ? true : functionWordsMatch ? undefined : false,
       explanation,
       detailedExplanation: explanation
     };
   });
   const allowedSet = new Set(input.allowedWords.map(word => String(word).toLocaleLowerCase()));
-  const modelWeakPoints = (Array.isArray(parsed.weakPoints) ? parsed.weakPoints : []).map(item => sanitizeWeakPoint(item, allowedSet)).filter(Boolean);
+  const modelWeakPoints = withoutWeakPointQuestionIds((Array.isArray(parsed.weakPoints) ? parsed.weakPoints : []).map(item => sanitizeWeakPoint(item, allowedSet)).filter(Boolean), naturalDeepQuestionIds);
   const structuralWeakPoints = structuralQuestionIds.map(questionId => ({
     category: "grammar",
     severity: "low",
@@ -783,18 +813,28 @@ function completeExam(examValue, grading, provider, allowedWords) {
   const subjectiveById = new Map(grading.subjectiveGrades.map(item => [item.questionId, item]));
   const grades = exam.questions.map(question => {
     const source = objectiveById.get(question.id) || subjectiveById.get(question.id) || {};
-    const score = boundedInteger(source.score, 0, 0, question.points);
+    const naturalDeep = question.type === "translation"
+      && question.direction === "en-zh"
+      && chineseNaturalDeepMatches(exam.answers[question.id], question.answerKey.acceptedAnswers, question.sourceText);
+    const score = naturalDeep ? question.points : boundedInteger(source.score, 0, 0, question.points);
+    const explanation = naturalDeep ? NATURAL_DEEP_EXPLANATION : cleanText(source.explanation, 240);
     return {
       questionId: question.id,
       score,
-      correct: typeof source.correct === "boolean" ? source.correct : score >= Math.ceil(question.points * 0.7),
-      explanation: cleanText(source.explanation, 240) || subjectiveFallbackExplanation(question, exam.answers[question.id], score),
-      detailedExplanation: cleanText(source.detailedExplanation, 320) || cleanText(source.explanation, 240) || subjectiveFallbackExplanation(question, exam.answers[question.id], score),
+      correct: naturalDeep ? true : typeof source.correct === "boolean" ? source.correct : score >= Math.ceil(question.points * 0.7),
+      explanation: explanation || subjectiveFallbackExplanation(question, exam.answers[question.id], score),
+      detailedExplanation: naturalDeep ? NATURAL_DEEP_EXPLANATION : cleanText(source.detailedExplanation, 320) || explanation || subjectiveFallbackExplanation(question, exam.answers[question.id], score),
       correctAnswer: displayAnswer(question)
     };
   });
+  const naturalDeepFullIds = new Set(grades.filter(grade => {
+    const question = exam.questions.find(item => item.id === grade.questionId);
+    return question && question.type === "translation" && question.direction === "en-zh"
+      && chineseNaturalDeepMatches(exam.answers[question.id], question.answerKey.acceptedAnswers, question.sourceText);
+  }).map(grade => grade.questionId));
   const fallback = grades.filter(grade => grade.score < exam.questions.find(question => question.id === grade.questionId).points * 0.7).map(grade => fallbackWeakPoint(exam.questions.find(question => question.id === grade.questionId), allowedWords, exam));
-  const weakPoints = [...grading.weakPoints, ...fallback].filter((item, index, all) => all.findIndex(other => other.category === item.category && other.detail === item.detail) === index).slice(0, 30);
+  const correctedWeakPoints = withoutWeakPointQuestionIds(grading.weakPoints, naturalDeepFullIds);
+  const weakPoints = [...correctedWeakPoints, ...fallback].filter((item, index, all) => all.findIndex(other => other.category === item.category && other.detail === item.detail) === index).slice(0, 30);
   const completedAt = new Date().toISOString();
   return sanitizeExam({
     ...exam,

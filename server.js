@@ -5,7 +5,7 @@ const vm = require("vm");
 const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
-const { NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
+const { NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
 const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
@@ -13,7 +13,7 @@ const { buildLearningSyncProfile } = require("./server/learning-sync");
 const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./server/learning-sync-token");
 const { publicTeachingProfile, sanitizeTeachingProfile } = require("./server/teaching-profile");
 const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis");
-const { expandRegisteredChineseAnswers, normalizeEnglish: normalizeVariantEnglish, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById, validateGeneratedSentenceVariant } = require("./review-variants");
+const { expandRegisteredChineseAnswers, naturalizePlainDeepChinese, normalizeEnglish: normalizeVariantEnglish, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById, validateGeneratedSentenceVariant } = require("./review-variants");
 const {
   REVIEW_VARIANT_POOL_BATCH,
   REVIEW_VARIANT_POOL_TARGET,
@@ -206,6 +206,23 @@ function mergeContent(seed, stored) {
   };
 }
 
+function normalizeStoredContentSentences(target) {
+  const context = target && typeof target === "object" ? target : { words: [], sentences: [] };
+  context.sentences = (Array.isArray(context.sentences) ? context.sentences : []).map(item => {
+    const english = String(item && item.english || "").trim();
+    const sourceChinese = String(item && item.chinese || "").trim();
+    if (!english || !sourceChinese) return item;
+    const chinese = naturalizePlainDeepChinese(english, sourceChinese);
+    const acceptedChinese = expandRegisteredChineseAnswers(context, english, [
+      chinese,
+      sourceChinese,
+      ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])
+    ], 16);
+    return { ...item, chinese, acceptedChinese };
+  });
+  return context;
+}
+
 function recalculateCurrentDay(target, seedDay = 0) {
   const itemDays = [...(target.words || []), ...(target.sentences || []), ...(target.notes || [])].filter(item => !item.preview).map(item => Number(item.day) || 0);
   target.currentDay = Math.max(Number(seedDay) || 0, ...itemDays);
@@ -213,7 +230,7 @@ function recalculateCurrentDay(target, seedDay = 0) {
 
 function loadContent() {
   const seed = readSeedContent();
-  const merged = mergeContent(seed, readJson(CONTENT_FILE, null));
+  const merged = normalizeStoredContentSentences(mergeContent(seed, readJson(CONTENT_FILE, null)));
   recalculateCurrentDay(merged, seed.currentDay);
   writeJson(CONTENT_FILE, merged);
   return merged;
@@ -222,9 +239,9 @@ function loadContent() {
 function refreshContent() {
   try {
     const seed = readSeedContent();
-    const merged = mergeContent(seed, content);
+    const merged = normalizeStoredContentSentences(mergeContent(seed, content));
     recalculateCurrentDay(merged, seed.currentDay);
-    const changed = merged.currentDay !== content.currentDay || merged.words.length !== content.words.length || merged.sentences.length !== content.sentences.length || merged.notes.length !== (content.notes || []).length || merged.updatedAt !== content.updatedAt || merged.deletedIds.length !== (content.deletedIds || []).length;
+    const changed = merged.currentDay !== content.currentDay || merged.words.length !== content.words.length || JSON.stringify(merged.sentences) !== JSON.stringify(content.sentences) || merged.notes.length !== (content.notes || []).length || merged.updatedAt !== content.updatedAt || merged.deletedIds.length !== (content.deletedIds || []).length;
     content = merged;
     if (changed) writeJson(CONTENT_FILE, content);
   } catch (_) {
@@ -467,14 +484,16 @@ function slug(value) { return String(value || "item").toLowerCase().replace(/[^a
 
 function normalizeContentItem(body) {
   const kind = body.kind === "sentence" || body.type === "sentence" ? "sentence" : "word";
-  const english = String(body.english || "").trim(); const chinese = String(body.chinese || "").trim();
-  if (!english || !chinese) throw Object.assign(new Error("english and chinese are required"), { statusCode: 400 });
+  const english = String(body.english || "").trim(); const sourceChinese = String(body.chinese || "").trim();
+  if (!english || !sourceChinese) throw Object.assign(new Error("english and chinese are required"), { statusCode: 400 });
+  const chinese = kind === "sentence" ? naturalizePlainDeepChinese(english, sourceChinese) : sourceChinese;
   const day = Number(body.day || content.currentDay || 1);
   if (!Number.isInteger(day) || day < 1) throw Object.assign(new Error("day must be a positive integer"), { statusCode: 400 });
   const preview = kind === "word" && body.preview === true;
   const base = { id: String(body.id || `api-d${day}-${kind}-${slug(english)}-${Date.now()}`).trim(), day, learned: preview ? String(body.learned || "").trim() : String(body.learned || today()), preview, english, chinese, directions: Array.isArray(body.directions) && body.directions.length ? body.directions : ["en-zh", "zh-en"] };
   if (kind === "word") return { ...base, phonetic: String(body.phonetic || "").trim(), acceptedChinese: Array.isArray(body.acceptedChinese) && body.acceptedChinese.length ? body.acceptedChinese : [chinese], pronunciation: String(body.pronunciation || "").trim(), example: String(body.example || "").trim(), exampleZh: String(body.exampleZh || "").trim() };
-  return { ...base, acceptedChinese: Array.isArray(body.acceptedChinese) && body.acceptedChinese.length ? body.acceptedChinese : [chinese], acceptedEnglish: Array.isArray(body.acceptedEnglish) && body.acceptedEnglish.length ? body.acceptedEnglish : [english.toLowerCase().replace(/[.,!?;:]/g, "").trim()] };
+  const acceptedChinese = expandRegisteredChineseAnswers(content, english, [chinese, sourceChinese, ...(Array.isArray(body.acceptedChinese) ? body.acceptedChinese : [])], 16);
+  return { ...base, acceptedChinese, acceptedEnglish: Array.isArray(body.acceptedEnglish) && body.acceptedEnglish.length ? body.acceptedEnglish : [english.toLowerCase().replace(/[.,!?;:]/g, "").trim()] };
 }
 
 function boundedContentText(value, maximum = 500) {
@@ -785,6 +804,7 @@ function promoteSelfStudyContent(targetContent, targetState, progress, completed
     promotedIds.push(actualId);
     idMap.set(planned.id, actualId);
   });
+  normalizeStoredContentSentences(targetContent);
 
   const note = { ...lesson.plannedContent.note, day: lesson.studyDay, date: lesson.plannedContent.note.date || learnedDate, sourceLessonId: lesson.lessonId, learnedAt };
   const noteIndex = targetContent.notes.findIndex(item => Number(item.day) === Number(note.day));
@@ -1042,13 +1062,13 @@ function sanitizePreviewSentence(contentValue, target, value, allowedWords) {
   const source = value && typeof value === "object" ? value : {};
   const school = normalizePreviewSchoolSentence({ english: source.english, chinese: source.chinese }, { rewriteChinese: true });
   const english = school.english;
-  const chinese = school.chinese;
+  const chinese = naturalizePlainDeepChinese(english, school.chinese);
   if (!english || !chinese) return null;
   const tokens = previewEnglishTokens(english);
   const targetTokens = previewEnglishTokens(target.english);
   const allowed = new Set(allowedWords);
   if (!tokens.length || tokens.some(token => !allowed.has(token)) || !targetTokens.every(token => tokens.includes(token))) return null;
-  const acceptedChinese = expandPreviewAcceptedChinese(contentValue, english, [String(source.chinese || "").trim(), ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])], chinese, 16);
+  const acceptedChinese = expandPreviewAcceptedChinese(contentValue, english, [school.chinese, String(source.chinese || "").trim(), ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])], chinese, 16);
   return {
     id: previewSentenceId(target.id, english),
     kind: "sentence",
@@ -1152,7 +1172,7 @@ function previewPracticeGradeTask(rawTask, previewData) {
 
   const school = normalizePreviewSchoolSentence({ english: source.english, chinese: source.chinese });
   const english = school.english;
-  const chinese = school.chinese;
+  const chinese = naturalizePlainDeepChinese(english, school.chinese);
   const requiredIds = Array.from(new Set((Array.isArray(source.requiredPreviewWordIds) ? source.requiredPreviewWordIds : []).map(value => String(value || "").trim()).filter(Boolean)));
   if (!english || !chinese || !requiredIds.includes(wordId)) return null;
   const learnedWords = content.words
@@ -1171,7 +1191,7 @@ function previewPracticeGradeTask(rawTask, previewData) {
     english,
     chinese,
     acceptedEnglish: school.acceptedEnglish,
-    acceptedChinese: expandPreviewAcceptedChinese(content, english, [], chinese, 16),
+    acceptedChinese: expandPreviewAcceptedChinese(content, english, [school.chinese], chinese, 16),
     schoolMeaningAmbiguous: school.ambiguousSchool
   };
 }
@@ -2268,9 +2288,12 @@ function localTranslationGrade(direction, english, answer, acceptedAnswers) {
   const partial = quality.gradingStatus === "partial";
   const optionalMeasureOmission = chineseOptionalMeasureOmissionMatches(answer, acceptedAnswers);
   const naturalPersonMeasure = chineseNaturalPersonMeasureMatches(answer, acceptedAnswers, english);
+  const naturalDeep = chineseNaturalDeepMatches(answer, acceptedAnswers, english);
   const explanation = partial
     ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
-    : naturalPersonMeasure
+    : naturalDeep
+      ? NATURAL_DEEP_EXPLANATION
+      : naturalPersonMeasure
       ? NATURAL_PERSON_MEASURE_EXPLANATION
       : optionalMeasureOmission
       ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
@@ -2415,8 +2438,21 @@ async function handleAiGenerate(req, res, user) {
     const profile = buildLearningProfile(content, state, today());
     if (!profile.allowedWords.length) return sendError(res, 409, "no learned words are available");
     const routed = await runAiRoute(selection.route, config => createAiQuestionGenerator(config).generateGroups(profile, selection.count, selection.groupCount));
+    const normalizedGroups = routed.value.map(group => group.map(question => {
+      const sourceChinese = String(question && question.chinese || "").trim();
+      const chinese = naturalizePlainDeepChinese(question && question.english, sourceChinese);
+      return {
+        ...question,
+        chinese,
+        acceptedChinese: expandRegisteredChineseAnswers(content, question && question.english, [
+          chinese,
+          sourceChinese,
+          ...(Array.isArray(question && question.acceptedChinese) ? question.acceptedChinese : [])
+        ], 16)
+      };
+    }));
     const batchId = `aibatch-${crypto.randomUUID()}`;
-    const sets = routed.value.map((questions, index) => createQuestionSet(questions, routed.config, { batchId, groupNumber: index + 1, groupCount: selection.groupCount }));
+    const sets = normalizedGroups.map((questions, index) => createQuestionSet(questions, routed.config, { batchId, groupNumber: index + 1, groupCount: selection.groupCount }));
     const set = sets[0];
     selection.practice.currentSet = set;
     selection.practice.queuedSets = sets.slice(1);

@@ -4,10 +4,12 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const {
   continueSelfStudyStep,
+  localStepGrade,
   markLessonCompleted,
   mergeSelfStudyLessons,
   publicSelfStudyState,
   sanitizeSelfStudyLesson,
+  sanitizeSelfStudyState,
   selfStudyHistory,
   startSelfStudyLesson,
   submitSelfStudyStep
@@ -99,6 +101,72 @@ test("self-study lesson package enforces six stages, ten-test blueprint, and app
   const unsafe = lesson();
   unsafe.stages[1].steps[0].content = "dog apple";
   assert.throws(() => sanitizeSelfStudyLesson(unsafe, { learnedWords: LEARNED_WORDS }), /unapproved English words: apple/);
+});
+
+test("self-study stores natural deep references and repairs a legacy false answer", () => {
+  const source = lesson();
+  source.plannedContent.sentences[0] = {
+    id: "d9-deep-pool",
+    english: "We see a deep pool.",
+    chinese: "我们看见一个深的水池。",
+    acceptedChinese: ["我们看见一个深的水池。"],
+    directions: ["en-zh", "zh-en"]
+  };
+  const rawStep = source.stages[4].steps.find(step => step.stepId === "test-ez-2");
+  Object.assign(rawStep, {
+    prompt: "We see a deep pool.",
+    english: "We see a deep pool.",
+    acceptedAnswers: ["我们看见一个深的水池。"]
+  });
+  const learnedWords = [...LEARNED_WORDS, "we", "see", "deep", "pool"];
+  const normalized = sanitizeSelfStudyLesson(source, { learnedWords });
+  assert.equal(normalized.plannedContent.sentences[0].chinese, "我们看见一个很深的水池。");
+  assert.ok(normalized.plannedContent.sentences[0].acceptedChinese.includes("我们看见一个很深的游泳池。"));
+  const step = normalized.stages[4].steps.find(item => item.stepId === "test-ez-2");
+  assert.equal(step.referenceAnswer, "我们看见一个很深的水池。");
+  assert.equal(localStepGrade(step, "我们看见一个很深的游泳池").score, 1);
+
+  const restored = sanitizeSelfStudyState({
+    enabled: true,
+    lessons: [source],
+    progress: {
+      [source.lessonId]: {
+        lessonVersion: source.version,
+        status: "in-progress",
+        snapshot: source,
+        stageIndex: 4,
+        stepIndex: 3,
+        steps: {
+          "test-ez-2": {
+            status: "needs-correction",
+            firstAttemptId: "legacy-deep-attempt",
+            attempts: [{
+              attemptId: "legacy-deep-attempt",
+              answer: "我们看见一个很深的游泳池",
+              status: "graded",
+              correct: false,
+              score: 0,
+              gradingStatus: "incorrect",
+              explanation: "多写了很。",
+              detailedExplanation: "请删除很。",
+              problemWords: ["deep"],
+              submittedAt: "2026-08-08T01:00:00.000Z",
+              gradedAt: "2026-08-08T01:00:01.000Z",
+              formalEvidence: true,
+              referenceAnswer: "我们看见一个深的水池。"
+            }]
+          }
+        }
+      }
+    }
+  });
+  const repairedProgress = restored.progress[source.lessonId].steps["test-ez-2"];
+  assert.equal(repairedProgress.status, "completed");
+  assert.equal(repairedProgress.attempts[0].correct, true);
+  assert.equal(repairedProgress.attempts[0].score, 1);
+  assert.equal(repairedProgress.attempts[0].formalEvidence, true);
+  assert.deepEqual(repairedProgress.attempts[0].problemWords, []);
+  assert.doesNotMatch(`${repairedProgress.attempts[0].explanation} ${repairedProgress.attempts[0].detailedExplanation}`, /多写了很|删除很/);
 });
 
 test("later planned lessons may reuse words introduced by an earlier planned lesson but not unknown words", () => {

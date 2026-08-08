@@ -45,8 +45,8 @@ test("learning evidence repair is idempotent across review, AI history, current 
   assert.equal(repaired.state.aiExam.currentExam.questions[0].prompt, "选择含有 big 的句子。");
 
   const secondPass = repairLearningEvidence(content, repaired.state);
-  assert.equal(secondPass.changed, false);
   assert.deepEqual(secondPass.state, repaired.state);
+  assert.equal(secondPass.changed, false);
 });
 
 test("measure-word repair records partial credit without clearing mastery and attributes only real word errors", () => {
@@ -102,7 +102,7 @@ test("evidence repair grades a saved AI review variant against its immutable sna
   };
   const repaired = require("../answer-utils").repairReviewEvidence(content, state);
   assert.equal(repaired.state.attempts[0].correct, true);
-  assert.equal(repaired.state.attempts[0].gradingSource, "evidence-repair-v6");
+  assert.equal(repaired.state.attempts[0].gradingSource, "evidence-repair-v7");
   assert.equal(repaired.state.mistakes.length, 0);
   assert.equal(repaired.state.history["2026-08-06"].correct, 1);
 });
@@ -250,7 +250,7 @@ test("evidence repair clears a false pen error using the formal word-bank meanin
   assert.equal(attempt.score, 1);
   assert.equal(attempt.gradingStatus, "correct");
   assert.deepEqual(attempt.problemWords, []);
-  assert.equal(attempt.gradingSource, "evidence-repair-v6");
+  assert.equal(attempt.gradingSource, "evidence-repair-v7");
   assert.ok(attempt.reviewVariant.acceptedChinese.includes("一支大笔在一个箱子上。"));
   assert.match(attempt.detailedExplanation, /正式词库|笔|钢笔/);
   assert.equal(repaired.state.mistakes.length, 0);
@@ -370,7 +370,7 @@ test("evidence repair restores natural person classifiers and recalculates AI sc
   const mom = repairedHistory.find(item => item.id.endsWith(":mom"));
   const cook = repairedHistory.find(item => item.id.endsWith(":cook"));
   assert.equal(repaired.changed, true);
-  assert.equal(repaired.state.evidenceRepairVersion, 6);
+  assert.equal(repaired.state.evidenceRepairVersion, 7);
   [mom, cook].forEach(item => {
     assert.equal(item.correct, true);
     assert.equal(item.score, 1);
@@ -394,4 +394,140 @@ test("evidence repair restores natural person classifiers and recalculates AI sc
   const secondPass = repairLearningEvidence(content, repaired.state);
   assert.equal(secondPass.changed, false);
   assert.deepEqual(secondPass.state, repaired.state);
+});
+
+test("deep evidence repair clears only false 很深 penalties across review, AI, exam, and abilities", () => {
+  const content = {
+    currentDay: 9,
+    words: [
+      { id: "we", day: 4, learned: "2026-08-03", english: "we", chinese: "我们" },
+      { id: "see", day: 9, learned: "2026-08-08", english: "see", chinese: "看见" },
+      { id: "a", day: 1, learned: "2026-07-31", english: "a", chinese: "一个" },
+      { id: "deep", day: 9, learned: "2026-08-08", english: "deep", chinese: "深的" },
+      { id: "pool", day: 8, learned: "2026-08-07", english: "pool", chinese: "水池；游泳池", acceptedChinese: ["水池", "游泳池", "泳池"] }
+    ],
+    sentences: [{
+      id: "deep-base",
+      day: 9,
+      learned: "2026-08-08",
+      english: "We see a deep pool.",
+      chinese: "我们看见一个深的水池。",
+      acceptedChinese: ["我们看见一个深的水池。"],
+      directions: ["en-zh"]
+    }]
+  };
+  const deepHistory = {
+    id: "deep-set:q-deep",
+    setId: "deep-set",
+    questionCount: 2,
+    direction: "en-zh",
+    prompt: "We see a deep pool.",
+    userAnswer: "我们看见一个很深的游泳池",
+    correctAnswer: "我们看见一个深的水池。",
+    correct: false,
+    score: 0,
+    gradingStatus: "incorrect",
+    explanation: "多写了很。",
+    detailedExplanation: "删除很。",
+    problemWords: ["deep"],
+    answeredAt: "2026-08-08T02:00:00.000Z"
+  };
+  const degreeHistory = {
+    id: "deep-set:q-degree",
+    setId: "deep-set",
+    questionCount: 2,
+    direction: "en-zh",
+    prompt: "We see a very deep pool.",
+    userAnswer: "我们看见一个很深的游泳池",
+    correctAnswer: "我们看见一个非常深的游泳池。",
+    correct: false,
+    score: 0,
+    gradingStatus: "incorrect",
+    explanation: "漏掉了程度信息。",
+    problemWords: ["very"],
+    answeredAt: "2026-08-08T02:01:00.000Z"
+  };
+  const exam = {
+    id: "deep-exam",
+    status: "completed",
+    questions: [{
+      id: "deep-exam-q",
+      type: "translation",
+      typeLabel: "翻译题",
+      sourceText: "A pool is deep.",
+      direction: "en-zh",
+      points: 10,
+      answerKey: { kind: "text", language: "zh", acceptedAnswers: ["一个水池是深的。"] }
+    }],
+    answers: { "deep-exam-q": "游泳池很深" },
+    result: {
+      score: 8,
+      possible: 10,
+      grades: [{ questionId: "deep-exam-q", score: 8, correct: true, explanation: "多写了很。", detailedExplanation: "建议删除很。", correctAnswer: "一个水池是深的。" }],
+      typeScores: [{ type: "translation", label: "翻译题", score: 8, possible: 10 }],
+      weakPoints: [{ category: "translation", severity: "low", detail: "不要写很。", recommendation: "删除很。", questionIds: ["deep-exam-q"], relatedWords: ["deep"] }]
+    }
+  };
+  const state = {
+    evidenceRepairVersion: 6,
+    taskStates: { "deep-base:en-zh": { level: 0, lastResult: false, reviewCount: 1, lastReviewed: "2026-08-08" } },
+    history: { "2026-08-08": { reviewed: 1, correct: 0 } },
+    attempts: [{ id: "deep-review", taskId: "deep-base:en-zh", date: "2026-08-08", answer: "我们看见一个很深的游泳池", correct: false, score: 0, gradingStatus: "incorrect", explanation: "多写了很。", problemWords: ["deep"] }],
+    mistakes: [{ id: "deep-mistake", attemptId: "deep-review", taskId: "deep-base:en-zh", userAnswer: "我们看见一个很深的游泳池" }],
+    aiPractice: {
+      currentSet: {
+        id: "deep-set",
+        questions: [
+          { id: "q-deep", direction: "en-zh", english: deepHistory.prompt, chinese: deepHistory.correctAnswer, acceptedChinese: [deepHistory.correctAnswer], userAnswer: deepHistory.userAnswer, correct: false, score: 0, gradingStatus: "incorrect", explanation: deepHistory.explanation, problemWords: ["deep"] },
+          { id: "q-degree", direction: "en-zh", english: degreeHistory.prompt, chinese: degreeHistory.correctAnswer, acceptedChinese: [degreeHistory.correctAnswer], userAnswer: degreeHistory.userAnswer, correct: false, score: 0, gradingStatus: "incorrect", explanation: degreeHistory.explanation, problemWords: ["very"] }
+        ]
+      },
+      queuedSets: [{ id: "queued-deep", questions: [{ id: "queued-q", direction: "en-zh", english: "A pool is deep.", chinese: "一个水池是深的。", acceptedChinese: ["一个水池是深的。"] }] }],
+      history: [deepHistory, degreeHistory]
+    },
+    aiExam: {
+      currentExam: exam,
+      history: [JSON.parse(JSON.stringify(exam))],
+      weakPoints: [{ id: "deep-weak", examId: "deep-exam", category: "translation", detail: "不要写很。", questionIds: ["deep-exam-q"], relatedWords: ["deep"] }]
+    }
+  };
+
+  const before = analyzeAbilities(content, state);
+  const repaired = repairLearningEvidence(content, state);
+  assert.equal(repaired.changed, true);
+  assert.equal(repaired.state.evidenceRepairVersion, 7);
+  assert.equal(repaired.state.attempts[0].correct, true);
+  assert.equal(repaired.state.attempts[0].score, 1);
+  assert.equal(repaired.state.mistakes.length, 0);
+  assert.equal(repaired.state.history["2026-08-08"].correct, 1);
+  const repairedDeep = repaired.state.aiPractice.history.find(item => item.id.endsWith("q-deep"));
+  const retainedDegree = repaired.state.aiPractice.history.find(item => item.id.endsWith("q-degree"));
+  assert.equal(repairedDeep.correct, true);
+  assert.equal(repairedDeep.score, 1);
+  assert.deepEqual(repairedDeep.problemWords, []);
+  assert.match(repairedDeep.explanation, /自然表达|没有改变/);
+  assert.equal(retainedDegree.correct, false);
+  assert.equal(retainedDegree.score, 0);
+  assert.ok(repaired.state.aiPractice.currentSet.questions[0].acceptedChinese.includes("我们看见一个很深的游泳池。"));
+  assert.equal(repaired.state.aiPractice.currentSet.questions[0].correct, true);
+  assert.equal(repaired.state.aiPractice.currentSet.questions[1].correct, false);
+  assert.equal(repaired.state.aiPractice.queuedSets[0].questions[0].chinese, "一个水池很深。");
+  const repairedExam = repaired.state.aiExam.currentExam;
+  assert.equal(repairedExam.result.score, 10);
+  assert.equal(repairedExam.result.grades[0].score, 10);
+  assert.equal(repairedExam.result.grades[0].correct, true);
+  assert.equal(repairedExam.result.typeScores[0].score, 10);
+  assert.deepEqual(repairedExam.result.weakPoints, []);
+  assert.deepEqual(repaired.state.aiExam.weakPoints, []);
+  assert.ok(repairedExam.questions[0].answerKey.acceptedAnswers.includes("一个游泳池很深。"));
+
+  const after = analyzeAbilities(content, repaired.state);
+  assert.ok(after.abilities.find(item => item.id === "translation").measuredAccuracy > before.abilities.find(item => item.id === "translation").measuredAccuracy);
+  const profile = buildLearningSyncProfile(content, repaired.state, { username: "test", role: "user" });
+  assert.equal(profile.weakPoints.recentAiMistakes.some(item => item.id.endsWith("q-deep")), false);
+  assert.equal(profile.weakPoints.recentAiMistakes.some(item => item.id.endsWith("q-degree")), true);
+
+  const secondPass = repairLearningEvidence(content, repaired.state);
+  assert.deepEqual(secondPass.state, repaired.state);
+  assert.equal(secondPass.changed, false);
 });

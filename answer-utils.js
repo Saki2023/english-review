@@ -7,7 +7,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function (REVIEW_VARIANTS) {
   "use strict";
 
-  const EVIDENCE_REPAIR_VERSION = 6;
+  const EVIDENCE_REPAIR_VERSION = 7;
   const MISTAKE_AUTO_RESOLVE_STREAK = 2;
   const PARTIAL_TRANSLATION_SCORE = 0.8;
   const REQUIRED_ENGLISH_FUNCTION_WORDS = ["a", "an", "the", "on", "in", "am", "is", "are"];
@@ -16,6 +16,7 @@
   const CHINESE_QUANTITY_MEASURE_WORDS = `${CHINESE_MEASURE_WORDS}|双|对|碗|瓶|套|群`;
   const OPTIONAL_MEASURE_OMISSION_EXPLANATION = "中文省略了可选的“一+量词”，但主语、性质、对象和数量含义没有改变，本题判为正确。";
   const NATURAL_PERSON_MEASURE_EXPLANATION = "“一个”和“一位”在这里都表示单个人物身份，人物、数量和句意没有改变，本题判为完全正确。";
+  const NATURAL_DEEP_EXPLANATION = "英文 deep 在这里没有额外的程度或比较标记；中文使用“很深/很深的”是自然表达，这里的“很”没有改变对象、数量或句意，本题判为完全正确。";
   const QUANTITY_CONFLICT_EXPLANATION = "中文数量与英文原句不一致；“一双/一对”等表示两个成对对象，不能替代英文单数 a/an。";
   const ENGLISH_PERSON_IDENTITY_NOUNS = new Set([
     "boy", "chef", "cook", "customer", "dad", "doctor", "driver", "father", "friend", "girl", "guest", "man",
@@ -319,6 +320,23 @@
     });
   }
 
+  function naturalChineseReferences(acceptedAnswers, english) {
+    const references = Array.isArray(acceptedAnswers) ? acceptedAnswers : [];
+    return typeof REVIEW_VARIANTS.expandNaturalChineseAnswers === "function"
+      ? REVIEW_VARIANTS.expandNaturalChineseAnswers(english, references, 32)
+      : references;
+  }
+
+  function chineseNaturalDeepMatches(answer, acceptedAnswers, english) {
+    if (typeof REVIEW_VARIANTS.isNaturalDeepChinese !== "function" || !REVIEW_VARIANTS.isNaturalDeepChinese(english, answer)) return false;
+    const references = naturalChineseReferences(acceptedAnswers, english);
+    const normalized = normalizeChinese(answer);
+    if (normalized && references.some(expected => normalizeChinese(expected) === normalized)) return true;
+    const location = relaxedChineseLocation(answer);
+    if (location && references.some(expected => relaxedChineseLocation(expected) === location)) return true;
+    return chineseOptionalMeasureOmissionMatches(answer, references);
+  }
+
   function optionalSingularQuantity(item) {
     return item && item.number === "一" && new RegExp(`^(?:${OPTIONAL_CHINESE_SINGULAR_MEASURE_WORDS})$`).test(item.measure);
   }
@@ -358,7 +376,7 @@
 
   function chineseAnswerQuality(answer, acceptedAnswers, english = "") {
     const normalized = normalizeChinese(answer);
-    const references = Array.isArray(acceptedAnswers) ? acceptedAnswers : [];
+    const references = naturalChineseReferences(acceptedAnswers, english);
     if (normalized && references.some(expected => normalizeChinese(expected) === normalized)) {
       return { correct: true, gradingStatus: "correct", score: 1 };
     }
@@ -433,7 +451,18 @@
     if (!["en-zh", "zh-en"].includes(direction)) return null;
     const items = [...(Array.isArray(content && content.words) ? content.words : []), ...(Array.isArray(content && content.sentences) ? content.sentences : [])];
     const item = items.find(candidate => candidate && candidate.id === itemId);
-    return item ? { item, direction, taskId: value } : null;
+    if (!item) return null;
+    if (direction !== "en-zh" || typeof REVIEW_VARIANTS.expandRegisteredChineseAnswers !== "function") return { item, direction, taskId: value };
+    const sourceChinese = String(item.chinese || "").trim();
+    const chinese = typeof REVIEW_VARIANTS.naturalizePlainDeepChinese === "function"
+      ? REVIEW_VARIANTS.naturalizePlainDeepChinese(item.english, sourceChinese)
+      : sourceChinese;
+    const acceptedChinese = REVIEW_VARIANTS.expandRegisteredChineseAnswers(content, item.english, [
+      chinese,
+      sourceChinese,
+      ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])
+    ], 16);
+    return { item: { ...item, chinese, acceptedChinese }, direction, taskId: value };
   }
 
   function reviewTaskForRecord(content, value) {
@@ -530,9 +559,12 @@
           score = quality.score;
           const optionalMeasureOmission = chineseOptionalMeasureOmissionMatches(attempt.answer, accepted);
           const naturalPersonMeasure = chineseNaturalPersonMeasureMatches(attempt.answer, accepted, task.item.english);
+          const naturalDeep = chineseNaturalDeepMatches(attempt.answer, accepted, task.item.english);
           explanation = quality.gradingStatus === "partial"
             ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
-            : naturalPersonMeasure
+            : naturalDeep
+              ? NATURAL_DEEP_EXPLANATION
+              : naturalPersonMeasure
               ? NATURAL_PERSON_MEASURE_EXPLANATION
               : acceptedByRegisteredMeaning
               ? `你的翻译使用了正式词库登记的同义词${registeredMeaningNote}，意思正确；旧判定已修正。`
@@ -650,6 +682,7 @@
     REQUIRED_ENGLISH_FUNCTION_WORDS,
     buildTranslationExplanation,
     buildMistakePracticeQueue,
+    chineseNaturalDeepMatches,
     chineseNaturalPersonMeasureMatches,
     chineseOptionalMeasureOmissionMatches,
     chineseQuantityConflict,
@@ -667,6 +700,7 @@
     mistakeIsResolved,
     normalizeChinese,
     normalizeEnglish,
+    NATURAL_DEEP_EXPLANATION,
     NATURAL_PERSON_MEASURE_EXPLANATION,
     OPTIONAL_MEASURE_OMISSION_EXPLANATION,
     QUANTITY_CONFLICT_EXPLANATION,

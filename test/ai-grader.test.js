@@ -329,6 +329,30 @@ test("AI preview sentence parser keeps target preview words and translations", a
   assert.deepEqual(JSON.parse(requestBody.messages[1].content).previewWords, [{ wordId: "d5-sun", english: "sun" }]);
 });
 
+test("AI question and preview parsers store natural deep translations with legacy alternatives", () => {
+  const previewPayload = { choices: [{ message: { content: JSON.stringify({ sentences: [{
+    wordId: "d9-deep",
+    english: "A pool is deep.",
+    chinese: "一个水池是深的。",
+    acceptedChinese: ["一个水池是深的。"]
+  }] }) } }] };
+  const preview = parsePreviewSentenceResponse(previewPayload)[0];
+  assert.equal(preview.chinese, "一个水池很深。");
+  assert.ok(preview.acceptedChinese.includes("一个水池是深的。"));
+  assert.ok(preview.acceptedChinese.includes("一个游泳池很深。"));
+
+  const questionPayload = { choices: [{ message: { content: JSON.stringify({ questions: [{
+    direction: "en-zh",
+    english: "We see a deep pool.",
+    chinese: "我们看见一个深的水池。",
+    acceptedChinese: ["我们看见一个深的水池。"]
+  }] }) } }] };
+  const question = parseGeneratedQuestions(questionPayload, { allowedWords: ["we", "see", "a", "deep", "pool"], count: 1 })[0];
+  assert.equal(question.chinese, "我们看见一个很深的水池。");
+  assert.ok(question.acceptedChinese.includes("我们看见一个深的水池。"));
+  assert.ok(question.acceptedChinese.includes("我们看见一个很深的游泳池。"));
+});
+
 test("generated questions reject unlearned English words and duplicates", () => {
   const payload = { choices: [{ message: { content: JSON.stringify({ questions: [
     { direction: "en-zh", english: "big cat", chinese: "\u5927\u732b", acceptedEnglish: ["big cat", "large cat"], acceptedChinese: ["\u5927\u732b"], focus: "big" },

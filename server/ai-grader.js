@@ -1,6 +1,7 @@
 "use strict";
 
 const { QUANTITY_CONFLICT_EXPLANATION, chineseQuantityConflict, chineseSubjectMatchesEnglish, englishFunctionWordDifferences, englishFunctionWordsMatch } = require("../answer-utils");
+const { expandNaturalChineseAnswers, naturalizePlainDeepChinese } = require("../review-variants");
 const { englishTokens, safeQuestionFocus } = require("./ai-question-utils");
 
 const MAX_PROVIDER_RESPONSE_BYTES = 64 * 1024;
@@ -497,9 +498,10 @@ function parseQuestionArray(rawQuestions, options) {
   rawQuestions.forEach(item => {
     if (!item || !["en-zh", "zh-en"].includes(item.direction)) return;
     const english = cleanText(item.english);
-    const chinese = cleanText(item.chinese);
+    const sourceChinese = cleanText(item.chinese);
+    const chinese = naturalizePlainDeepChinese(english, sourceChinese);
     const tokens = englishTokens(english);
-    if (!english || !chinese || !tokens.length || tokens.some(token => !allowedWords.has(token)) || !chineseSubjectMatchesEnglish(english, chinese)) return;
+    if (!english || !sourceChinese || !chinese || !tokens.length || tokens.some(token => !allowedWords.has(token)) || !chineseSubjectMatchesEnglish(english, chinese)) return;
     const key = `${item.direction}|${english.toLocaleLowerCase()}|${chinese}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -511,7 +513,7 @@ function parseQuestionArray(rawQuestions, options) {
         const answerTokens = englishTokens(answer);
         return answerTokens.length && answerTokens.every(token => allowedWords.has(token));
       }),
-      acceptedChinese: acceptedTexts(item.acceptedChinese, chinese).filter(answer => chineseSubjectMatchesEnglish(english, answer)),
+      acceptedChinese: expandNaturalChineseAnswers(english, acceptedTexts([sourceChinese, ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])], chinese), 16).filter(answer => chineseSubjectMatchesEnglish(english, answer)),
       focus: safeQuestionFocus(english)
     });
   });
@@ -660,12 +662,13 @@ function parsePreviewSentenceResponse(payload) {
   if (!Array.isArray(parsed.sentences)) throw new Error("AI provider did not return preview sentences");
   return parsed.sentences.slice(0, 40).map(item => {
     const english = cleanText(item && item.english, 180);
-    const chinese = cleanText(item && item.chinese, 180);
+    const sourceChinese = cleanText(item && item.chinese, 180);
+    const chinese = naturalizePlainDeepChinese(english, sourceChinese);
     return {
       wordId: cleanText(item && item.wordId, 120),
       english,
       chinese,
-      acceptedChinese: acceptedTexts(item && item.acceptedChinese, item && item.chinese).filter(answer => chineseSubjectMatchesEnglish(english, answer))
+      acceptedChinese: expandNaturalChineseAnswers(english, acceptedTexts([sourceChinese, ...(Array.isArray(item && item.acceptedChinese) ? item.acceptedChinese : [])], chinese), 16).filter(answer => chineseSubjectMatchesEnglish(english, answer))
     };
   }).filter(item => item.wordId && item.english && item.chinese && chineseSubjectMatchesEnglish(item.english, item.chinese));
 }

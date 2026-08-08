@@ -108,8 +108,8 @@ function legacyPreviewState(task) {
     correct: false,
     score: 0,
     gradingStatus: "incorrect",
-    explanation: "pool 只能翻译为水池。",
-    detailedExplanation: "误译为游泳池改变了原意。",
+    explanation: "中文多写了“很”。",
+    detailedExplanation: "参考答案要求写成一个水池是深的。",
     problemWords: ["pool"],
     wordResults: [{ english: "pool", correct: false, issue: "meaning" }],
     source: "ai",
@@ -122,7 +122,7 @@ function legacyPreviewState(task) {
     mode: "sentence",
     tasks: [task],
     index: 1,
-    answers: { [task.id]: "一个游泳池是深的" },
+    answers: { [task.id]: "一个游泳池很深" },
     results: { [task.id]: result },
     pending: { [task.id]: "等待 AI 重试" },
     completed: true,
@@ -148,7 +148,7 @@ test("preview pool meanings survive generation, persistence, restart, grading, a
       { id: "d8-pool", day: 8, learned: "2026-08-07", english: "pool", chinese: "水池；游泳池", acceptedChinese: ["水池", "游泳池", "泳池"], directions: ["en-zh", "zh-en"] },
       { id: "d9-deep", day: 9, learned: "", preview: true, english: "deep", chinese: "深的", acceptedChinese: ["深的"], directions: ["en-zh", "zh-en"] }
     ],
-    sentences: [],
+    sentences: [{ id: "legacy-deep-sentence", day: 8, learned: "2026-08-07", english: "A pool is deep.", chinese: "一个水池是深的。", acceptedChinese: ["一个水池是深的。"], acceptedEnglish: ["a pool is deep"], directions: ["en-zh"] }],
     notes: [],
     seedMistakes: [],
     deletedIds: []
@@ -161,6 +161,11 @@ test("preview pool meanings survive generation, persistence, restart, grading, a
     const providerPort = provider.server.address().port;
     app = await startApp(dataDir, await freePort(), apiToken);
     let cookie = await login(app.baseUrl);
+    const migratedContent = await (await fetch(`${app.baseUrl}/api/content`, { headers: { Cookie: cookie } })).json();
+    const migratedSentence = migratedContent.sentences.find(item => item.id === "legacy-deep-sentence");
+    assert.equal(migratedSentence.chinese, "一个水池很深。");
+    assert.ok(migratedSentence.acceptedChinese.includes("一个游泳池很深。"));
+    assert.ok(migratedSentence.acceptedChinese.includes("一个水池是深的。"));
 
     const configured = await fetch(`${app.baseUrl}/api/admin/ai-config`, {
       method: "PUT",
@@ -177,9 +182,12 @@ test("preview pool meanings survive generation, persistence, restart, grading, a
     assert.equal(generatedResponse.status, 200);
     const generated = await generatedResponse.json();
     assert.equal(generated.sentences.length, 1);
+    assert.equal(generated.sentences[0].chinese, "一个水池很深。");
     assert.ok(generated.sentences[0].acceptedChinese.includes("一个水池是深的。"));
     assert.ok(generated.sentences[0].acceptedChinese.includes("一个游泳池是深的。"));
     assert.ok(generated.sentences[0].acceptedChinese.includes("一个泳池是深的。"));
+    assert.ok(generated.sentences[0].acceptedChinese.includes("一个水池很深。"));
+    assert.ok(generated.sentences[0].acceptedChinese.includes("一个游泳池很深。"));
 
     const task = {
       ...generated.sentences[0],
@@ -189,13 +197,14 @@ test("preview pool meanings survive generation, persistence, restart, grading, a
     const gradeResponse = await fetch(`${app.baseUrl}/api/preview/practice/grade`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Cookie: cookie },
-      body: JSON.stringify({ task, answer: "一个游泳池是深的" })
+      body: JSON.stringify({ task, answer: "游泳池很深" })
     });
     assert.equal(gradeResponse.status, 200);
     const grade = await gradeResponse.json();
     assert.equal(grade.correct, true);
     assert.equal(grade.score, 1);
     assert.equal(grade.gradingStatus, "correct");
+    assert.match(grade.explanation, /自然表达|没有改变/);
     assert.equal(provider.calls.length, 1, "registered meanings must be graded locally without another AI call");
 
     const legacy = legacyPreviewState(task);
@@ -215,7 +224,7 @@ test("preview pool meanings survive generation, persistence, restart, grading, a
     assert.equal(saved.previewPractice.results[task.id].score, 1);
     assert.equal(Object.hasOwn(saved.previewPractice.pending, task.id), false);
     assert.equal(saved.previewPracticeHistory[0].score, 100);
-    assert.doesNotMatch(JSON.stringify(saved.previewPracticeHistory[0].results[task.id]), /只能翻译为水池|误译为游泳池|改变了原意/);
+    assert.doesNotMatch(JSON.stringify(saved.previewPracticeHistory[0].results[task.id]), /只能翻译为水池|误译为游泳池|改变了原意|多写了“很”|要求写成/);
     assert.deepEqual(saved.attempts, []);
     assert.deepEqual(saved.mistakes, []);
 
@@ -236,11 +245,15 @@ test("preview pool meanings survive generation, persistence, restart, grading, a
     await stopApp(app);
     app = await startApp(dataDir, await freePort(), apiToken);
     cookie = await login(app.baseUrl);
+    const restoredContent = await (await fetch(`${app.baseUrl}/api/content`, { headers: { Cookie: cookie } })).json();
+    assert.equal(restoredContent.sentences.find(item => item.id === "legacy-deep-sentence").chinese, "一个水池很深。");
     const restored = await (await fetch(`${app.baseUrl}/api/state`, { headers: { Cookie: cookie } })).json();
     assert.ok(restored.previewPractice.tasks[0].acceptedChinese.includes("一个游泳池是深的。"));
+    assert.equal(restored.previewPractice.tasks[0].chinese, "一个水池很深。");
+    assert.ok(restored.previewPractice.tasks[0].acceptedChinese.includes("一个游泳池很深。"));
     assert.equal(restored.previewPractice.results[task.id].correct, true);
     assert.equal(restored.previewPracticeHistory[0].score, 100);
-    assert.doesNotMatch(JSON.stringify(restored.previewPracticeHistory[0]), /只能翻译为水池|误译为游泳池|改变了原意/);
+    assert.doesNotMatch(JSON.stringify(restored.previewPracticeHistory[0]), /只能翻译为水池|误译为游泳池|改变了原意|多写了“很”|要求写成/);
   } finally {
     await stopApp(app);
     await new Promise(resolve => provider.server.close(resolve));

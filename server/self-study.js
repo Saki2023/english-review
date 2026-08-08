@@ -2,8 +2,10 @@
 
 const crypto = require("node:crypto");
 const {
+  NATURAL_DEEP_EXPLANATION,
   buildTranslationExplanation,
   chineseAnswerQuality,
+  chineseNaturalDeepMatches,
   englishAnswerDifferences,
   englishAnswerMatches,
   englishSourceWordResults,
@@ -11,6 +13,7 @@ const {
   normalizeChinese,
   normalizeEnglish
 } = require("../answer-utils");
+const { expandNaturalChineseAnswers, naturalizePlainDeepChinese } = require("../review-variants");
 
 const SELF_STUDY_STAGE_TYPES = Object.freeze(["review", "phonics", "pattern", "reading", "test", "summary"]);
 const SELF_STUDY_STEP_TYPES = new Set(["teach", "read-aloud", "choice", "short-answer", "en-zh", "zh-en", "reading-question", "correction", "summary"]);
@@ -105,7 +108,16 @@ function sanitizeStep(value, index, stageType) {
   if (!SELF_STUDY_STEP_TYPES.has(type)) fail(`unsupported self-study step type: ${type || "empty"}`);
   const direction = type === "zh-en" ? "zh-en" : type === "en-zh" ? "en-zh" : (["en-zh", "zh-en"].includes(source.direction) ? source.direction : "");
   const choices = (Array.isArray(source.choices) ? source.choices : []).slice(0, 12).map(sanitizeChoice).filter(item => item.text);
-  const acceptedAnswers = acceptedAnswersForStep(source, direction);
+  const english = cleanInline(source.english, 1000);
+  const sourceChinese = cleanInline(source.chinese, 1000);
+  const chinese = naturalizePlainDeepChinese(english || source.prompt, sourceChinese);
+  const sourceAcceptedAnswers = acceptedAnswersForStep(source, direction);
+  const acceptedAnswers = direction === "en-zh"
+    ? expandNaturalChineseAnswers(english || source.prompt, [
+      ...sourceAcceptedAnswers.map(answer => naturalizePlainDeepChinese(english || source.prompt, answer)),
+      ...sourceAcceptedAnswers
+    ], 20)
+    : sourceAcceptedAnswers;
   const question = QUESTION_STEP_TYPES.has(type);
   if (question && !acceptedAnswers.length) fail(`step ${source.stepId || index + 1} requires acceptedAnswers`);
   if (type === "choice" && choices.length < 2) fail(`choice step ${source.stepId || index + 1} requires at least two choices`);
@@ -125,8 +137,8 @@ function sanitizeStep(value, index, stageType) {
     content: cleanText(source.content || source.teachingText, 5000),
     prompt: cleanText(source.prompt || source.question, 2000),
     passage: cleanText(source.passage || source.reading, 5000),
-    english: cleanInline(source.english, 1000),
-    chinese: cleanInline(source.chinese, 1000),
+    english,
+    chinese,
     phonetic: cleanInline(source.phonetic, 200),
     pronunciation: cleanInline(source.pronunciation, 500),
     choices,
@@ -168,8 +180,9 @@ function sanitizePlannedWord(value, lessonDay) {
 function sanitizePlannedSentence(value, lessonDay) {
   const source = value && typeof value === "object" ? value : {};
   const english = cleanInline(source.english, 1000);
-  const chinese = cleanInline(source.chinese, 1000);
-  if (!english || !chinese) fail("planned sentence requires english and chinese");
+  const sourceChinese = cleanInline(source.chinese, 1000);
+  const chinese = naturalizePlainDeepChinese(english, sourceChinese);
+  if (!english || !sourceChinese || !chinese) fail("planned sentence requires english and chinese");
   return {
     id: cleanId(source.id, "planned sentence id"),
     day: lessonDay,
@@ -178,7 +191,7 @@ function sanitizePlannedSentence(value, lessonDay) {
     preview: false,
     english,
     chinese,
-    acceptedChinese: uniqueStrings([...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : []), chinese], 20, 1000),
+    acceptedChinese: expandNaturalChineseAnswers(english, [chinese, sourceChinese, ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])], 20),
     acceptedEnglish: uniqueStrings([...(Array.isArray(source.acceptedEnglish) ? source.acceptedEnglish : []), english], 20, 1000),
     directions: uniqueStrings(Array.isArray(source.directions) ? source.directions : ["en-zh", "zh-en"], 2, 20).filter(item => ["en-zh", "zh-en"].includes(item))
   };
@@ -368,6 +381,38 @@ function sanitizeStepProgress(value) {
   };
 }
 
+function repairNaturalDeepStepProgress(step, value) {
+  const progress = value && typeof value === "object" ? value : sanitizeStepProgress({});
+  if (!step || (step.direction !== "en-zh" && step.type !== "en-zh")) return progress;
+  const english = step.english || step.prompt;
+  let changed = false;
+  const attempts = progress.attempts.map(attempt => {
+    if (attempt.status !== "graded" || !chineseNaturalDeepMatches(attempt.answer, step.acceptedAnswers, english)) return attempt;
+    const repaired = {
+      ...attempt,
+      correct: true,
+      score: 1,
+      gradingStatus: "correct",
+      explanation: NATURAL_DEEP_EXPLANATION,
+      detailedExplanation: buildTranslationExplanation({ direction: "en-zh", referenceAnswer: step.referenceAnswer, answer: attempt.answer, correct: true, gradingStatus: "correct", explanation: NATURAL_DEEP_EXPLANATION, problemWords: [] }),
+      problemWords: [],
+      wordResults: englishSourceWordResults(english, true),
+      referenceAnswer: step.referenceAnswer
+    };
+    if (JSON.stringify(repaired) !== JSON.stringify(attempt)) changed = true;
+    return repaired;
+  });
+  const last = attempts.at(-1);
+  const complete = last && last.status === "graded" && last.correct === true && last.gradingStatus === "correct";
+  if (!changed && !(complete && ["pending", "needs-correction"].includes(progress.status))) return progress;
+  return {
+    ...progress,
+    status: complete && ["pending", "needs-correction"].includes(progress.status) ? "completed" : progress.status,
+    completedAt: complete && !progress.completedAt ? (last.gradedAt || last.submittedAt) : progress.completedAt,
+    attempts
+  };
+}
+
 function sanitizeProgress(value) {
   const source = value && typeof value === "object" ? value : {};
   let snapshot = null;
@@ -377,6 +422,9 @@ function sanitizeProgress(value) {
   Object.entries(source.steps && typeof source.steps === "object" ? source.steps : {}).forEach(([stepId, step]) => {
     if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(stepId)) steps[stepId] = sanitizeStepProgress(step);
   });
+  snapshot.stages.forEach(stage => stage.steps.forEach(step => {
+    if (steps[step.stepId]) steps[step.stepId] = repairNaturalDeepStepProgress(step, steps[step.stepId]);
+  }));
   return {
     lessonId: snapshot.lessonId,
     lessonVersion: cleanInline(source.lessonVersion || snapshot.version, 80),

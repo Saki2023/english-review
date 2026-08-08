@@ -2,7 +2,8 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, chineseQuantityConflict, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
+const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, chineseQuantityConflict, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
+const { expandNaturalChineseAnswers, naturalizePlainDeepChinese } = require("../review-variants");
 
 test("today review accepts only formally learned content", () => {
   const today = "2026-08-03";
@@ -55,6 +56,22 @@ test("natural person classifiers are fully correct without relaxing object or an
   assert.deepEqual(chineseAnswerQuality("它是一位猫", ["它是一只猫"], "It is a cat."), { correct: true, gradingStatus: "partial", score: 0.8 });
   assert.deepEqual(chineseAnswerQuality("它是一只红色的笔", ["它是一支红色的笔"], "It is a red pen."), { correct: true, gradingStatus: "partial", score: 0.8 });
   assert.deepEqual(chineseAnswerQuality("她是一双厨师", ["她是一个厨师"], "She is a cook."), { correct: false, gradingStatus: "incorrect", score: 0 });
+});
+
+test("plain deep accepts natural Chinese 很深 without erasing real degree differences", () => {
+  const attributive = ["我们看见一个深的水池。"];
+  const predicate = ["一个水池是深的。"];
+  assert.deepEqual(chineseAnswerQuality("我们看见一个很深的游泳池", attributive, "We see a deep pool."), { correct: true, gradingStatus: "correct", score: 1 });
+  assert.deepEqual(chineseAnswerQuality("游泳池很深", predicate, "A pool is deep."), { correct: true, gradingStatus: "correct", score: 1 });
+  assert.equal(chineseNaturalDeepMatches("水池很深", predicate, "A pool is deep."), true);
+  assert.equal(naturalizePlainDeepChinese("A pool is deep.", "一个水池是深的。"), "一个水池很深。");
+  const variants = expandNaturalChineseAnswers("We see a deep pool.", attributive, 16);
+  assert.ok(variants.includes("我们看见一个很深的水池。"));
+  assert.ok(variants.includes("我们看见一个很深的游泳池。"));
+
+  assert.deepEqual(chineseAnswerQuality("一个很深的水池", ["一个非常深的水池"], "A very deep pool."), { correct: false, gradingStatus: "incorrect", score: 0 });
+  assert.deepEqual(chineseAnswerQuality("水池很深", ["水池不深"], "A pool is not deep."), { correct: false, gradingStatus: "incorrect", score: 0 });
+  assert.deepEqual(chineseAnswerQuality("它很大", ["它大"], "It is big."), { correct: false, gradingStatus: "incorrect", score: 0 });
 });
 
 test("Chinese answers may omit optional singular classifiers without changing number", () => {

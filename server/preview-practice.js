@@ -1,7 +1,7 @@
 "use strict";
 
-const { chineseAnswerMatches, englishAnswerMatches } = require("../answer-utils");
-const { expandRegisteredChineseAnswers } = require("../review-variants");
+const { NATURAL_DEEP_EXPLANATION, chineseAnswerMatches, chineseNaturalDeepMatches, englishAnswerMatches } = require("../answer-utils");
+const { expandRegisteredChineseAnswers, naturalizePlainDeepChinese } = require("../review-variants");
 
 const MAX_TASKS = 80;
 const MAX_MAP_ENTRIES = 100;
@@ -82,13 +82,16 @@ function repairRegisteredChineseResults(tasks, answers, results) {
     const answer = answers[task.id];
     if (!result || !answer || (result.correct && result.gradingStatus === "correct" && Number(result.score) >= 1)) return;
     if (!chineseAnswerMatches(answer, task.acceptedChinese, task.english)) return;
+    const naturalDeep = chineseNaturalDeepMatches(answer, task.acceptedChinese, task.english);
     results[task.id] = {
       ...result,
       correct: true,
       score: 1,
       gradingStatus: "correct",
-      explanation: "你的答案使用了正式词库登记的中文同义词，整句意思正确。",
-      detailedExplanation: "正式词库允许这个单词使用多种中文表达；替换后整句语义、数量和句子结构都没有改变，因此本次预习答案已改判为完全正确。预习记录仅供学习窗口查看，不会计入正式错题、待复习、薄弱点或能力分。",
+      explanation: naturalDeep ? NATURAL_DEEP_EXPLANATION : "你的答案使用了正式词库登记的中文同义词，整句意思正确。",
+      detailedExplanation: naturalDeep
+        ? `${NATURAL_DEEP_EXPLANATION}旧的错误解释已删除；这条预习记录仅供学习窗口查看，不会计入正式错题、待复习、薄弱点或能力分。`
+        : "正式词库允许这个单词使用多种中文表达；替换后整句语义、数量和句子结构都没有改变，因此本次预习答案已改判为完全正确。预习记录仅供学习窗口查看，不会计入正式错题、待复习、薄弱点或能力分。",
       problemWords: [],
       wordResults: [],
       source: "local"
@@ -104,9 +107,10 @@ function normalizeTask(value, content) {
   const kind = source.kind === "sentence" ? "sentence" : source.kind === "word" ? "word" : "";
   const direction = source.direction === "zh-en" ? "zh-en" : source.direction === "en-zh" ? "en-zh" : "";
   const english = clean(source.english, 180);
-  const chinese = clean(source.chinese, 180);
-  if (!id || !kind || !direction || !english || !chinese) return null;
-  const school = normalizePreviewSchoolSentence({ english, chinese });
+  const sourceChinese = clean(source.chinese, 180);
+  if (!id || !kind || !direction || !english || !sourceChinese) return null;
+  const school = normalizePreviewSchoolSentence({ english, chinese: sourceChinese });
+  const chinese = naturalizePlainDeepChinese(english, school.chinese);
   return {
     id,
     kind,
@@ -117,7 +121,7 @@ function normalizeTask(value, content) {
     chinese,
     acceptedEnglish: uniqueTexts([...school.acceptedEnglish, ...(Array.isArray(source.acceptedEnglish) ? source.acceptedEnglish : [])], english),
     acceptedChinese: kind === "sentence"
-      ? expandPreviewAcceptedChinese(content, english, source.acceptedChinese, chinese)
+      ? expandPreviewAcceptedChinese(content, english, [sourceChinese, school.chinese, ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])], chinese)
       : uniqueTexts(source.acceptedChinese, chinese)
   };
 }
