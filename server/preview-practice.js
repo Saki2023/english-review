@@ -81,7 +81,7 @@ function repairRegisteredChineseResults(tasks, answers, results) {
     const result = results[task.id];
     const answer = answers[task.id];
     if (!result || !answer || (result.correct && result.gradingStatus === "correct" && Number(result.score) >= 1)) return;
-    if (!chineseAnswerMatches(answer, task.acceptedChinese)) return;
+    if (!chineseAnswerMatches(answer, task.acceptedChinese, task.english)) return;
     results[task.id] = {
       ...result,
       correct: true,

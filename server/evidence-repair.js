@@ -1,11 +1,13 @@
 "use strict";
 
 const {
+  NATURAL_PERSON_MEASURE_EXPLANATION,
   OPTIONAL_MEASURE_OMISSION_EXPLANATION,
   QUANTITY_CONFLICT_EXPLANATION,
   buildTranslationExplanation,
   chineseAnswerQuality,
   chineseAnswerMatches,
+  chineseNaturalPersonMeasureMatches,
   chineseOptionalMeasureOmissionMatches,
   chineseQuantityConflict,
   englishAnswerMatches,
@@ -27,16 +29,19 @@ function correctedAiHistoryItem(value) {
   let detailedExplanation = String(item.detailedExplanation || "");
   let problemWords = Array.isArray(item.problemWords) ? item.problemWords : [];
   if (item.direction === "en-zh") {
-    const quality = chineseAnswerQuality(item.userAnswer, acceptedAnswers);
+    const quality = chineseAnswerQuality(item.userAnswer, acceptedAnswers, item.prompt);
     if (quality.gradingStatus === "correct" || quality.gradingStatus === "partial") {
       correct = true;
       score = quality.score;
       gradingStatus = quality.gradingStatus;
       problemWords = [];
       const optionalMeasureOmission = chineseOptionalMeasureOmissionMatches(item.userAnswer, acceptedAnswers);
+      const naturalPersonMeasure = chineseNaturalPersonMeasureMatches(item.userAnswer, acceptedAnswers, item.prompt);
       explanation = quality.gradingStatus === "partial"
         ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
-        : optionalMeasureOmission
+        : naturalPersonMeasure
+          ? NATURAL_PERSON_MEASURE_EXPLANATION
+          : optionalMeasureOmission
           ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
           : (item.correct ? (explanation || "中文表达与参考答案等义。") : "中文表达与参考答案等义，已按当前规则修正。");
       detailedExplanation = buildTranslationExplanation({ direction: item.direction, referenceAnswer: item.correctAnswer, answer: item.userAnswer, correct: true, gradingStatus, explanation, problemWords });

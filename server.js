@@ -5,7 +5,7 @@ const vm = require("vm");
 const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
-const { OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
+const { NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
 const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
@@ -1315,7 +1315,7 @@ function latestReviewAttempt(state, taskId, variantId = "") {
 
 function localSentenceAnswerMatches(task, answer) {
   if (task.direction === "zh-en") return englishAnswerMatches(answer, task.item.acceptedEnglish || [task.item.english]);
-  return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese]);
+  return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese], task.item.english);
 }
 
 function recentReviewVariants(state) {
@@ -2254,7 +2254,7 @@ async function handleAiAdmin(req, res, url, user) {
 
 function aiQuestionMatches(question, answer) {
   if (question.direction === "zh-en") return englishAnswerMatches(answer, question.acceptedEnglish || [question.english]);
-  return chineseAnswerMatches(answer, question.acceptedChinese || [question.chinese]);
+  return chineseAnswerMatches(answer, question.acceptedChinese || [question.chinese], question.english);
 }
 
 function localTranslationGrade(direction, english, answer, acceptedAnswers) {
@@ -2263,15 +2263,18 @@ function localTranslationGrade(direction, english, answer, acceptedAnswers) {
     const explanation = "本地规则已接受这个答案。";
     return { correct: true, score: 1, gradingStatus: "correct", explanation, detailedExplanation: buildTranslationExplanation({ direction, referenceAnswer: acceptedAnswers[0] || english, answer, correct: true, explanation }), problemWords: [], wordResults: englishWordResults(english, answer), source: "local" };
   }
-  const quality = chineseAnswerQuality(answer, acceptedAnswers);
+  const quality = chineseAnswerQuality(answer, acceptedAnswers, english);
   if (!quality.correct) return null;
   const partial = quality.gradingStatus === "partial";
   const optionalMeasureOmission = chineseOptionalMeasureOmissionMatches(answer, acceptedAnswers);
+  const naturalPersonMeasure = chineseNaturalPersonMeasureMatches(answer, acceptedAnswers, english);
   const explanation = partial
     ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
-    : optionalMeasureOmission
+    : naturalPersonMeasure
+      ? NATURAL_PERSON_MEASURE_EXPLANATION
+      : optionalMeasureOmission
       ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
-      : !chineseAnswerMatches(answer, [acceptedAnswers[0] || ""])
+      : !chineseAnswerMatches(answer, [acceptedAnswers[0] || ""], english)
         ? "你的翻译使用了课程词库允许的同义表达，意思正确。"
         : "本地规则已接受这个答案。";
   return {

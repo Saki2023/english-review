@@ -434,7 +434,7 @@ test("admin configures AI on the web and progress-based questions use the select
           { direction: "zh-en", english: "A cat sat on a mat.", chinese: "\u4e00\u53ea\u732b\u5750\u5728\u4e00\u5f20\u57ab\u5b50\u4e0a\u3002", acceptedEnglish: ["a cat sat on a mat"], acceptedChinese: ["\u4e00\u53ea\u732b\u5750\u5728\u57ab\u5b50\u4e0a"], focus: "cat" },
           { direction: "en-zh", english: "I am Sam.", chinese: "\u6211\u662f\u8428\u59c6\u3002", acceptedEnglish: ["i am sam"], acceptedChinese: ["\u6211\u662f\u8428\u59c6"], focus: "am" },
           { direction: "zh-en", english: "It is a big pig.", chinese: "\u5b83\u662f\u4e00\u5934\u5927\u732a\u3002", acceptedEnglish: ["it is a big pig"], acceptedChinese: ["\u5b83\u662f\u4e00\u5934\u5927\u732a"], focus: "pig" },
-          { direction: "en-zh", english: "A big cat sat on a mat.", chinese: "\u4e00\u53ea\u5927\u732b\u5750\u5728\u4e00\u5f20\u57ab\u5b50\u4e0a\u3002", acceptedEnglish: ["a big cat sat on a mat"], acceptedChinese: ["\u4e00\u53ea\u5927\u732b\u5750\u5728\u57ab\u5b50\u4e0a"], focus: "sat" }
+          { direction: "en-zh", english: "She is a mom.", chinese: "她是一位妈妈。", acceptedEnglish: ["she is a mom"], acceptedChinese: ["她是一位妈妈"], focus: "mom" }
         ];
         const groupMatch = system.match(/Return exactly (\d+) independent groups/);
         content = groupMatch
@@ -708,6 +708,23 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(secondReviewTutorBody.exchange.prompt, "It is big.");
     assert.equal(JSON.parse(providerRequests.at(-1).body.messages[1].content).exercise.english, "It is big.");
 
+    const momQuestion = generatedBody.set.questions.find(question => question.english === "She is a mom.");
+    assert.ok(momQuestion);
+    const beforeMomGradeRequests = providerRequests.length;
+    const momGradeResponse = await fetch(`${baseUrl}/api/ai/questions/grade`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ setId: generatedBody.set.id, questionId: momQuestion.id, answer: "她是一个妈妈" })
+    });
+    assert.equal(momGradeResponse.status, 200);
+    const momGrade = await momGradeResponse.json();
+    assert.equal(momGrade.correct, true);
+    assert.equal(momGrade.score, 1);
+    assert.equal(momGrade.gradingStatus, "correct");
+    assert.equal(momGrade.source, "local");
+    assert.match(momGrade.explanation, /一个.*一位|一位.*一个/);
+    assert.equal(providerRequests.length, beforeMomGradeRequests, "a natural person classifier must not require an upstream AI judgment");
+
     const earlyNext = await fetch(`${baseUrl}/api/ai/questions/next`, { method: "POST", headers: { "Content-Type": "application/json", "Cookie": cookie }, body: "{}" });
     assert.equal(earlyNext.status, 409, "a prepared group must never start before the learner finishes the current group");
 
@@ -725,7 +742,7 @@ test("admin configures AI on the web and progress-based questions use the select
 
     const preparedAdvanceRequestCount = providerRequests.length;
     const currentQuestions = stateWithPreparedGroups.aiPractice.currentSet.questions;
-    for (const question of currentQuestions.slice(1)) {
+    for (const question of currentQuestions.filter(question => typeof question.correct !== "boolean")) {
       const localAnswer = question.direction === "zh-en" ? question.english : question.chinese;
       const completion = await fetch(`${baseUrl}/api/ai/questions/grade`, {
         method: "POST",

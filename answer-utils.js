@@ -7,7 +7,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function (REVIEW_VARIANTS) {
   "use strict";
 
-  const EVIDENCE_REPAIR_VERSION = 5;
+  const EVIDENCE_REPAIR_VERSION = 6;
   const MISTAKE_AUTO_RESOLVE_STREAK = 2;
   const PARTIAL_TRANSLATION_SCORE = 0.8;
   const REQUIRED_ENGLISH_FUNCTION_WORDS = ["a", "an", "the", "on", "in", "am", "is", "are"];
@@ -15,7 +15,16 @@
   const OPTIONAL_CHINESE_SINGULAR_MEASURE_WORDS = "个|只|头|张|支|块|家|本|辆|条|位|件|台|把|朵|颗|枚";
   const CHINESE_QUANTITY_MEASURE_WORDS = `${CHINESE_MEASURE_WORDS}|双|对|碗|瓶|套|群`;
   const OPTIONAL_MEASURE_OMISSION_EXPLANATION = "中文省略了可选的“一+量词”，但主语、性质、对象和数量含义没有改变，本题判为正确。";
+  const NATURAL_PERSON_MEASURE_EXPLANATION = "“一个”和“一位”在这里都表示单个人物身份，人物、数量和句意没有改变，本题判为完全正确。";
   const QUANTITY_CONFLICT_EXPLANATION = "中文数量与英文原句不一致；“一双/一对”等表示两个成对对象，不能替代英文单数 a/an。";
+  const ENGLISH_PERSON_IDENTITY_NOUNS = new Set([
+    "boy", "chef", "cook", "customer", "dad", "doctor", "driver", "father", "friend", "girl", "guest", "man",
+    "mom", "mother", "nurse", "officer", "parent", "person", "student", "teacher", "woman", "worker"
+  ]);
+  const CHINESE_PERSON_IDENTITY_NOUNS = [
+    "妈妈", "母亲", "爸爸", "父亲", "厨师", "老师", "教师", "学生", "医生", "护士", "司机", "工人", "朋友",
+    "同学", "客人", "顾客", "男人", "女人", "男孩", "女孩", "好人", "家长", "人员"
+  ];
 
   function normalizeEnglish(value) {
     return String(value || "").toLowerCase().replace(/[“”‘’.,!?;:，。！？；：]/g, "").replace(/\s+/g, " ").trim();
@@ -230,7 +239,13 @@
     let match;
     while ((match = expression.exec(normalized))) {
       base += normalized.slice(cursor, match.index);
-      measures.push({ offset: base.length, text: match[0], number: match[1] || "一", measure: match[2] || match[1] || "" });
+      measures.push({
+        offset: base.length,
+        text: match[0],
+        number: match[1] || "一",
+        measure: match[2] || match[1] || "",
+        following: normalized.slice(expression.lastIndex, expression.lastIndex + 8)
+      });
       cursor = match.index + match[0].length;
     }
     base += normalized.slice(cursor);
@@ -243,6 +258,46 @@
 
   function quantityStructure(value) {
     return measureStructure(value, `([一二两三四五六七八九十])(${CHINESE_QUANTITY_MEASURE_WORDS})(?=[\\u3400-\\u9fff])`);
+  }
+
+  function englishHasSingularPersonIdentity(value) {
+    const tokens = englishWords(value);
+    return tokens.some((token, index) => ENGLISH_PERSON_IDENTITY_NOUNS.has(token)
+      && tokens.slice(Math.max(0, index - 4), index).some(previous => previous === "a" || previous === "an"));
+  }
+
+  function chinesePersonIdentityFollows(item) {
+    const following = String(item && item.following || "").slice(0, 8);
+    return CHINESE_PERSON_IDENTITY_NOUNS.some(noun => {
+      const index = following.indexOf(noun);
+      return index >= 0 && index <= 2;
+    });
+  }
+
+  function chineseNaturalPersonMeasureMatches(answer, acceptedAnswers, english) {
+    if (!englishHasSingularPersonIdentity(english)) return false;
+    const actual = quantityStructure(answer);
+    if (!actual.base || !actual.measures.length) return false;
+    return (Array.isArray(acceptedAnswers) ? acceptedAnswers : []).some(expectedValue => {
+      const expected = quantityStructure(expectedValue);
+      if (!expected.base || expected.base !== actual.base || expected.measures.length !== actual.measures.length) return false;
+      const expectedMeasures = measureMap(expected);
+      const actualMeasures = measureMap(actual);
+      const offsets = new Set([...expectedMeasures.keys(), ...actualMeasures.keys()]);
+      let changed = false;
+      for (const offset of offsets) {
+        const expectedItem = expectedMeasures.get(offset);
+        const actualItem = actualMeasures.get(offset);
+        if (!expectedItem || !actualItem) return false;
+        if (expectedItem.text === actualItem.text) continue;
+        const measures = new Set([expectedItem.measure, actualItem.measure]);
+        if (expectedItem.number !== "一" || actualItem.number !== "一"
+          || measures.size !== 2 || !measures.has("个") || !measures.has("位")
+          || (!chinesePersonIdentityFollows(expectedItem) && !chinesePersonIdentityFollows(actualItem))) return false;
+        changed = true;
+      }
+      return changed;
+    });
   }
 
   function measureMap(structure) {
@@ -301,7 +356,7 @@
     return normalizeChinese(chinese).startsWith(expected);
   }
 
-  function chineseAnswerQuality(answer, acceptedAnswers) {
+  function chineseAnswerQuality(answer, acceptedAnswers, english = "") {
     const normalized = normalizeChinese(answer);
     const references = Array.isArray(acceptedAnswers) ? acceptedAnswers : [];
     if (normalized && references.some(expected => normalizeChinese(expected) === normalized)) {
@@ -314,6 +369,9 @@
     if (chineseOptionalMeasureOmissionMatches(answer, references)) {
       return { correct: true, gradingStatus: "correct", score: 1 };
     }
+    if (chineseNaturalPersonMeasureMatches(answer, references, english)) {
+      return { correct: true, gradingStatus: "correct", score: 1 };
+    }
     const relaxed = relaxedChineseMeasureWords(answer);
     if (relaxed && references.some(expected => relaxedChineseMeasureWords(expected) === relaxed)) {
       return { correct: true, gradingStatus: "partial", score: PARTIAL_TRANSLATION_SCORE };
@@ -321,8 +379,8 @@
     return { correct: false, gradingStatus: "incorrect", score: 0 };
   }
 
-  function chineseAnswerMatches(answer, acceptedAnswers) {
-    return chineseAnswerQuality(answer, acceptedAnswers).gradingStatus === "correct";
+  function chineseAnswerMatches(answer, acceptedAnswers, english = "") {
+    return chineseAnswerQuality(answer, acceptedAnswers, english).gradingStatus === "correct";
   }
 
   function buildMistakePracticeQueue(rows, startTaskId, validTaskIds) {
@@ -409,7 +467,7 @@
 
   function taskAnswerMatches(task, answer) {
     const accepted = taskAcceptedAnswers(task);
-    return task.direction === "zh-en" ? englishAnswerMatches(answer, accepted) : chineseAnswerMatches(answer, accepted);
+    return task.direction === "zh-en" ? englishAnswerMatches(answer, accepted) : chineseAnswerMatches(answer, accepted, task.item.english);
   }
 
   function answerIdentity(task, answer) {
@@ -453,8 +511,8 @@
         ? attempt.reviewVariant.acceptedChinese
         : [task.item.chinese];
       const acceptedByRegisteredMeaning = Boolean(task.reviewVariant) && task.direction === "en-zh"
-        && !chineseAnswerMatches(attempt.answer, storedAcceptedChinese)
-        && chineseAnswerMatches(attempt.answer, accepted);
+        && !chineseAnswerMatches(attempt.answer, storedAcceptedChinese, task.item.english)
+        && chineseAnswerMatches(attempt.answer, accepted, task.item.english);
       const registeredMeaningNote = acceptedByRegisteredMeaning && /\bpen\b/i.test(task.item.english)
         ? "；本题的 pen 在正式词库中可译为“笔”或“钢笔”"
         : "";
@@ -465,15 +523,18 @@
       let detailedExplanation = String(attempt.detailedExplanation || "");
       let problemWords = Array.isArray(attempt.problemWords) ? attempt.problemWords : [];
       if (task.direction === "en-zh") {
-        const quality = chineseAnswerQuality(attempt.answer, accepted);
+        const quality = chineseAnswerQuality(attempt.answer, accepted, task.item.english);
         if (quality.gradingStatus === "correct" || quality.gradingStatus === "partial") {
           correct = true;
           gradingStatus = quality.gradingStatus;
           score = quality.score;
           const optionalMeasureOmission = chineseOptionalMeasureOmissionMatches(attempt.answer, accepted);
+          const naturalPersonMeasure = chineseNaturalPersonMeasureMatches(attempt.answer, accepted, task.item.english);
           explanation = quality.gradingStatus === "partial"
             ? "英语意思理解正确；中文量词不够自然，本题按部分正确记录。"
-            : acceptedByRegisteredMeaning
+            : naturalPersonMeasure
+              ? NATURAL_PERSON_MEASURE_EXPLANATION
+              : acceptedByRegisteredMeaning
               ? `你的翻译使用了正式词库登记的同义词${registeredMeaningNote}，意思正确；旧判定已修正。`
               : optionalMeasureOmission
                 ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
@@ -589,6 +650,7 @@
     REQUIRED_ENGLISH_FUNCTION_WORDS,
     buildTranslationExplanation,
     buildMistakePracticeQueue,
+    chineseNaturalPersonMeasureMatches,
     chineseOptionalMeasureOmissionMatches,
     chineseQuantityConflict,
     chineseAnswerQuality,
@@ -605,6 +667,7 @@
     mistakeIsResolved,
     normalizeChinese,
     normalizeEnglish,
+    NATURAL_PERSON_MEASURE_EXPLANATION,
     OPTIONAL_MEASURE_OMISSION_EXPLANATION,
     QUANTITY_CONFLICT_EXPLANATION,
     reviewTaskForRecord,

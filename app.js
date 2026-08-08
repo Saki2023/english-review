@@ -5,7 +5,7 @@
   const PRONUNCIATION = window.ENGLISH_PRONUNCIATION_DATA || { concepts: [], phonemes: [] };
   const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, expandRegisteredChineseAnswers: (_content, _english, answers) => answers, sanitizeGeneratedSentenceVariant: () => null };
   const STUDY_TIME = window.ENGLISH_REVIEW_STUDY_TIME || {};
-  const { MISTAKE_AUTO_RESOLVE_STREAK, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
+  const { MISTAKE_AUTO_RESOLVE_STREAK, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const FALLBACK_DAILY_STUDY_PLAN = [
     { id: "review", label: "旧知识复习", minutes: 10, view: "home", actionLabel: "直接开始做题" },
     { id: "phonics", label: "拼读与词汇", minutes: 15, view: "pronunciation", actionLabel: "开始发音教学", allowBackground: true },
@@ -1243,7 +1243,7 @@
       const result = results[task.id];
       const answer = answers[task.id];
       if (!result || !answer || (result.correct && result.gradingStatus === "correct" && Number(result.score) >= 1)) return;
-      if (!chineseAnswerMatches(answer, task.acceptedChinese)) return;
+      if (!chineseAnswerMatches(answer, task.acceptedChinese, task.english)) return;
       results[task.id] = {
         ...result,
         correct: true,
@@ -2764,11 +2764,14 @@
 
   function previewPracticeGrade(task, answer) {
     if (task.direction === "en-zh") {
-      const quality = chineseAnswerQuality(answer, task.acceptedChinese || [task.chinese]);
+      const quality = chineseAnswerQuality(answer, task.acceptedChinese || [task.chinese], task.english);
+      const naturalPersonMeasure = chineseNaturalPersonMeasureMatches(answer, task.acceptedChinese || [task.chinese], task.english);
       const explanation = quality.gradingStatus === "partial"
         ? "意思基本正确，中文表达还可以更自然。"
         : quality.gradingStatus === "correct"
-          ? chineseOptionalMeasureOmissionMatches(answer, task.acceptedChinese || [task.chinese])
+          ? naturalPersonMeasure
+            ? NATURAL_PERSON_MEASURE_EXPLANATION
+            : chineseOptionalMeasureOmissionMatches(answer, task.acceptedChinese || [task.chinese])
             ? OPTIONAL_MEASURE_OMISSION_EXPLANATION
             : "中文意思对应正确。"
           : "请对照词义或句意再想一遍。";
@@ -5596,7 +5599,7 @@
   function answerMatches(task, answer) {
     if (!answer.trim()) return false;
     if (task.direction === "zh-en") return englishAnswerMatches(answer, task.item.acceptedEnglish || [task.item.english]);
-    return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese]);
+    return chineseAnswerMatches(answer, task.item.acceptedChinese || [task.item.chinese], task.item.english);
   }
 
   function setGradingState(active) {
@@ -5678,14 +5681,17 @@
     const answer = $("#answerInput").value.trim();
     let correct = answerMatches(task, answer);
     let grading = { source: "local", explanation: "", score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", problemWords: [], wordResults: [] };
-    if (correct && answer && task.direction === "en-zh" && !chineseAnswerMatches(answer, [task.item.chinese])) {
+    if (correct && answer && task.direction === "en-zh" && !chineseAnswerMatches(answer, [task.item.chinese], task.item.english)) {
       grading.explanation = "你的翻译使用了课程词库允许的同义表达，意思正确。";
+    }
+    if (correct && answer && task.direction === "en-zh" && chineseNaturalPersonMeasureMatches(answer, task.item.acceptedChinese || [task.item.chinese], task.item.english)) {
+      grading.explanation = NATURAL_PERSON_MEASURE_EXPLANATION;
     }
     if (correct && answer && task.direction === "en-zh" && chineseOptionalMeasureOmissionMatches(answer, task.item.acceptedChinese || [task.item.chinese])) {
       grading.explanation = OPTIONAL_MEASURE_OMISSION_EXPLANATION;
     }
     if (!correct && answer && task.direction === "en-zh") {
-      const quality = chineseAnswerQuality(answer, task.item.acceptedChinese || [task.item.chinese]);
+      const quality = chineseAnswerQuality(answer, task.item.acceptedChinese || [task.item.chinese], task.item.english);
       if (quality.gradingStatus === "partial") {
         correct = true;
         grading = { ...grading, ...quality, explanation: "英语意思理解正确；中文量词不够自然，本题按部分正确记录。" };
@@ -6429,7 +6435,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=56", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=57", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

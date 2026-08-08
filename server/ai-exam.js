@@ -463,7 +463,7 @@ function gradeObjectiveQuestion(question, answer) {
   if (key.kind === "option") correct = answer === key.correctOption;
   else if (key.kind === "options") correct = Array.isArray(answer) && answer.length === key.correctOptions.length && answer.every((id, index) => id === [...key.correctOptions].sort()[index]);
   else if (key.kind === "boolean") correct = answer === key.correctAnswer;
-  else if (key.kind === "text") correct = key.language === "zh" ? chineseAnswerMatches(answer, key.acceptedAnswers) : englishAnswerMatches(answer, key.acceptedAnswers);
+  else if (key.kind === "text") correct = key.language === "zh" ? chineseAnswerMatches(answer, key.acceptedAnswers, question.sourceText || question.prompt) : englishAnswerMatches(answer, key.acceptedAnswers);
   return {
     questionId: question.id,
     score: correct ? question.points : 0,

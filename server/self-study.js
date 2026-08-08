@@ -624,7 +624,7 @@ function localStepGrade(step, answer) {
       wordResults: englishWordResults(step.referenceAnswer, answer)
     };
   } else if (step.direction === "en-zh" || step.type === "en-zh") {
-    const quality = chineseAnswerQuality(answer, accepted);
+    const quality = chineseAnswerQuality(answer, accepted, step.english || step.prompt);
     result = { ...quality, problemWords: [], wordResults: englishSourceWordResults(step.english || step.prompt, quality.correct) };
   } else {
     const keys = new Set(accepted.map(answerKey));

@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseOptionalMeasureOmissionMatches, chineseQuantityConflict, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
+const { MISTAKE_AUTO_RESOLVE_STREAK, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, chineseQuantityConflict, englishAnswerMatches, englishFunctionWordDifferences, englishFunctionWordsMatch, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, repairReviewEvidence, shouldSubmitOnEnter } = require("../answer-utils");
 
 test("today review accepts only formally learned content", () => {
   const today = "2026-08-03";
@@ -41,6 +41,20 @@ test("Chinese measure-word mistakes preserve semantic understanding as partial c
   assert.deepEqual(chineseAnswerQuality("它是一只红色的笔", accepted), { correct: true, gradingStatus: "partial", score: 0.8 });
   assert.equal(chineseAnswerMatches("它是一只红色的笔", accepted), false);
   assert.deepEqual(chineseAnswerQuality("它是一只红色的猫", accepted), { correct: false, gradingStatus: "incorrect", score: 0 });
+});
+
+test("natural person classifiers are fully correct without relaxing object or animal classifiers", () => {
+  assert.equal(chineseNaturalPersonMeasureMatches("她是一个妈妈", ["她是一位妈妈"], "She is a mom."), true);
+  assert.equal(chineseNaturalPersonMeasureMatches("她是一位厨师", ["她是一个厨师"], "She is a cook."), true);
+  assert.deepEqual(chineseAnswerQuality("她是一个妈妈", ["她是一位妈妈"], "She is a mom."), { correct: true, gradingStatus: "correct", score: 1 });
+  assert.deepEqual(chineseAnswerQuality("她是一位厨师", ["她是一个厨师"], "She is a cook."), { correct: true, gradingStatus: "correct", score: 1 });
+  assert.equal(chineseAnswerMatches("她是一个妈妈", ["她是一位妈妈"], "She is a mom."), true);
+  assert.equal(chineseAnswerMatches("她是一位厨师", ["她是一个厨师"], "She is a cook."), true);
+
+  assert.deepEqual(chineseAnswerQuality("它是一位箱子", ["它是一个箱子"], "It is a box."), { correct: true, gradingStatus: "partial", score: 0.8 });
+  assert.deepEqual(chineseAnswerQuality("它是一位猫", ["它是一只猫"], "It is a cat."), { correct: true, gradingStatus: "partial", score: 0.8 });
+  assert.deepEqual(chineseAnswerQuality("它是一只红色的笔", ["它是一支红色的笔"], "It is a red pen."), { correct: true, gradingStatus: "partial", score: 0.8 });
+  assert.deepEqual(chineseAnswerQuality("她是一双厨师", ["她是一个厨师"], "She is a cook."), { correct: false, gradingStatus: "incorrect", score: 0 });
 });
 
 test("Chinese answers may omit optional singular classifiers without changing number", () => {

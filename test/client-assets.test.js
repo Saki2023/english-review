@@ -165,14 +165,14 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=56/);
+  assert.match(html, /pronunciation-data\.js\?v=57/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /phonemeSoundButtonHtml\(item\)/);
   assert.match(app, /speechButtonHtml\(item\.example, `慢速播放完整示范词/);
   assert.match(app, /data-pronunciation-sound/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=56/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=57/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -433,7 +433,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 56", () => {
+test("PWA client assets consistently use the displayed cache version 57", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -444,8 +444,8 @@ test("PWA client assets consistently use the displayed cache version 56", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "56");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v56"/);
+  assert.equal(displayedVersion[1], "57");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v57"/);
 });
 
 test("complete self-study exposes one-step teaching, recovery, questions, and explicit continuation controls", () => {
@@ -498,6 +498,6 @@ test("daily study plan offers six free-choice projects and records sixty minutes
   assert.doesNotMatch(app, /String\(stage\.index \+ 1\)/);
   assert.doesNotMatch(app, /按顺序完成/);
   assert.doesNotMatch(html, /按顺序学习/);
-  assert.match(html, /study-time\.js\?v=56/);
-  assert.match(serviceWorker, /study-time\.js\?v=56/);
+  assert.match(html, /study-time\.js\?v=57/);
+  assert.match(serviceWorker, /study-time\.js\?v=57/);
 });

@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { repairLearningEvidence } = require("../server/evidence-repair");
 const { analyzeAbilities } = require("../server/ability-analysis");
+const { buildLearningSyncProfile } = require("../server/learning-sync");
 
 test("learning evidence repair is idempotent across review, AI history, current question, and saved exam", () => {
   const content = {
@@ -101,7 +102,7 @@ test("evidence repair grades a saved AI review variant against its immutable sna
   };
   const repaired = require("../answer-utils").repairReviewEvidence(content, state);
   assert.equal(repaired.state.attempts[0].correct, true);
-  assert.equal(repaired.state.attempts[0].gradingSource, "evidence-repair-v5");
+  assert.equal(repaired.state.attempts[0].gradingSource, "evidence-repair-v6");
   assert.equal(repaired.state.mistakes.length, 0);
   assert.equal(repaired.state.history["2026-08-06"].correct, 1);
 });
@@ -249,7 +250,7 @@ test("evidence repair clears a false pen error using the formal word-bank meanin
   assert.equal(attempt.score, 1);
   assert.equal(attempt.gradingStatus, "correct");
   assert.deepEqual(attempt.problemWords, []);
-  assert.equal(attempt.gradingSource, "evidence-repair-v5");
+  assert.equal(attempt.gradingSource, "evidence-repair-v6");
   assert.ok(attempt.reviewVariant.acceptedChinese.includes("一支大笔在一个箱子上。"));
   assert.match(attempt.detailedExplanation, /正式词库|笔|钢笔/);
   assert.equal(repaired.state.mistakes.length, 0);
@@ -259,4 +260,138 @@ test("evidence repair clears a false pen error using the formal word-bank meanin
   const abilities = analyzeAbilities(content, repaired.state).abilities;
   assert.equal(abilities.find(item => item.id === "reading").measuredAccuracy, 100);
   assert.notEqual(abilities.find(item => item.id === "vocabulary").measuredAccuracy, 0, "the repaired pen answer must not remain as a vocabulary penalty");
+});
+
+test("evidence repair restores natural person classifiers and recalculates AI scores without hiding real errors", () => {
+  const content = {
+    currentDay: 8,
+    words: [
+      { id: "mom", day: 4, learned: "2026-08-03", english: "mom", chinese: "妈妈" },
+      { id: "cook", day: 8, learned: "2026-08-07", english: "cook", chinese: "厨师" },
+      { id: "man", day: 1, learned: "2026-07-31", english: "man", chinese: "男人" },
+      { id: "run", day: 8, learned: "2026-08-07", english: "run", chinese: "跑" }
+    ],
+    sentences: []
+  };
+  const personWordResults = english => english.split(" ").map(word => ({ english: word.toLocaleLowerCase().replace(/[^a-z]/g, ""), correct: true, issue: "" })).filter(item => item.english);
+  const history = [
+    {
+      id: "identity-set:mom",
+      setId: "identity-set",
+      questionCount: 4,
+      direction: "en-zh",
+      prompt: "She is a mom.",
+      userAnswer: "她是一个妈妈",
+      correctAnswer: "她是一位妈妈。",
+      correct: true,
+      score: 0.8,
+      gradingStatus: "partial",
+      explanation: "英语意思理解正确；中文量词不够自然，本题按部分正确记录。",
+      detailedExplanation: "量词“个”与参考答案“位”不同，建议使用“位”。",
+      problemWords: [],
+      wordResults: personWordResults("She is a mom"),
+      answeredAt: "2026-08-08T07:14:41.505Z"
+    },
+    {
+      id: "identity-set:cook",
+      setId: "identity-set",
+      questionCount: 4,
+      direction: "en-zh",
+      prompt: "She is a cook.",
+      userAnswer: "她是一位厨师",
+      correctAnswer: "她是一个厨师。",
+      correct: true,
+      score: 0.8,
+      gradingStatus: "partial",
+      explanation: "英语意思理解正确；中文量词不够自然，本题按部分正确记录。",
+      detailedExplanation: "量词“位”与参考答案“个”不同，建议使用“个”。",
+      problemWords: [],
+      wordResults: personWordResults("She is a cook"),
+      answeredAt: "2026-08-08T07:14:59.078Z"
+    },
+    {
+      id: "identity-set:missing",
+      setId: "identity-set",
+      questionCount: 4,
+      direction: "zh-en",
+      prompt: "我是一个男人。",
+      userAnswer: "I am",
+      correctAnswer: "I am a man.",
+      correct: false,
+      score: 0,
+      gradingStatus: "incorrect",
+      explanation: "漏写 a man。",
+      problemWords: ["a", "man"],
+      answeredAt: "2026-08-08T07:15:10.000Z"
+    },
+    {
+      id: "identity-set:meaning",
+      setId: "identity-set",
+      questionCount: 4,
+      direction: "en-zh",
+      prompt: "We run.",
+      userAnswer: "我们看",
+      correctAnswer: "我们跑。",
+      correct: false,
+      score: 0,
+      gradingStatus: "incorrect",
+      explanation: "把 run 误译为看。",
+      problemWords: ["run"],
+      answeredAt: "2026-08-08T07:15:20.000Z"
+    }
+  ];
+  const state = {
+    evidenceRepairVersion: 5,
+    aiPractice: {
+      currentSet: {
+        id: "identity-set",
+        questions: history.map((item, index) => ({
+          id: item.id.split(":")[1],
+          direction: item.direction,
+          english: item.direction === "en-zh" ? item.prompt : item.correctAnswer,
+          chinese: item.direction === "en-zh" ? item.correctAnswer : item.prompt,
+          acceptedEnglish: item.direction === "zh-en" ? [item.correctAnswer] : [item.prompt],
+          acceptedChinese: item.direction === "en-zh" ? [item.correctAnswer] : [item.prompt],
+          correct: item.correct,
+          score: item.score,
+          gradingStatus: item.gradingStatus,
+          explanation: item.explanation,
+          problemWords: item.problemWords,
+          index
+        }))
+      },
+      history
+    }
+  };
+
+  const before = analyzeAbilities(content, state);
+  const repaired = repairLearningEvidence(content, state);
+  const repairedHistory = repaired.state.aiPractice.history;
+  const mom = repairedHistory.find(item => item.id.endsWith(":mom"));
+  const cook = repairedHistory.find(item => item.id.endsWith(":cook"));
+  assert.equal(repaired.changed, true);
+  assert.equal(repaired.state.evidenceRepairVersion, 6);
+  [mom, cook].forEach(item => {
+    assert.equal(item.correct, true);
+    assert.equal(item.score, 1);
+    assert.equal(item.gradingStatus, "correct");
+    assert.deepEqual(item.problemWords, []);
+    assert.match(item.explanation, /一个.*一位|一位.*一个/);
+    assert.doesNotMatch(`${item.explanation}${item.detailedExplanation}`, /不够自然|建议使用/);
+  });
+  assert.deepEqual(repaired.state.aiPractice.currentSet.questions.slice(0, 2).map(item => item.score), [1, 1]);
+  assert.deepEqual(repairedHistory.filter(item => item.correct === false).map(item => item.id), ["identity-set:missing", "identity-set:meaning"]);
+
+  const after = analyzeAbilities(content, repaired.state);
+  assert.ok(after.abilities.find(item => item.id === "reading").measuredAccuracy > before.abilities.find(item => item.id === "reading").measuredAccuracy);
+  const profile = buildLearningSyncProfile(content, repaired.state, { username: "test", role: "user" });
+  assert.equal(profile.summary.aiCorrect, 2);
+  assert.equal(profile.summary.aiAccuracy, 50);
+  assert.equal(profile.activity.aiSets[0].accuracy, 50);
+  assert.deepEqual(profile.weakPoints.recentAiMistakes.map(item => item.id), ["identity-set:meaning", "identity-set:missing"]);
+  assert.equal(profile.weakPoints.aiWordSignals.some(item => ["mom", "cook"].includes(item.english)), false);
+
+  const secondPass = repairLearningEvidence(content, repaired.state);
+  assert.equal(secondPass.changed, false);
+  assert.deepEqual(secondPass.state, repaired.state);
 });
