@@ -66,3 +66,74 @@ test("ambiguous school preview prompts accept both meanings while new prompts ar
   assert.equal(building.chinese, "萨姆在一所学校里。");
   assert.deepEqual(building.acceptedEnglish, ["Sam is in a school."]);
 });
+
+test("preview sentences inherit formal word meanings and repair legacy pool results idempotently", () => {
+  const content = {
+    words: [{
+      id: "d8-pool",
+      day: 8,
+      learned: "2026-08-07",
+      english: "pool",
+      chinese: "水池；游泳池",
+      acceptedChinese: ["水池", "游泳池", "泳池"]
+    }]
+  };
+  const legacy = {
+    key: "8|9|d9-deep",
+    currentDay: 8,
+    nextDay: 9,
+    mode: "sentence",
+    tasks: [{
+      id: "preview-sentence-d9-deep",
+      kind: "sentence",
+      direction: "en-zh",
+      wordId: "d9-deep",
+      requiredPreviewWordIds: ["d9-deep"],
+      english: "A pool is deep.",
+      chinese: "一个水池是深的。",
+      acceptedChinese: ["一个水池是深的。"]
+    }],
+    answers: { "preview-sentence-d9-deep": "一个游泳池是深的" },
+    pending: { "preview-sentence-d9-deep": "等待重试" },
+    results: {
+      "preview-sentence-d9-deep": {
+        correct: false,
+        score: 0,
+        gradingStatus: "incorrect",
+        explanation: "pool 只能翻译为水池。",
+        detailedExplanation: "误译为游泳池改变了原意。",
+        problemWords: ["pool"],
+        wordResults: [{ english: "pool", correct: false, issue: "meaning" }],
+        source: "ai",
+        answeredAt: "2026-08-08T01:00:00.000Z"
+      }
+    }
+  };
+
+  const restored = sanitizePreviewPractice(JSON.parse(JSON.stringify(legacy)), content);
+  const task = restored.tasks[0];
+  const result = restored.results[task.id];
+  assert.ok(task.acceptedChinese.includes("一个水池是深的。"));
+  assert.ok(task.acceptedChinese.includes("一个游泳池是深的。"));
+  assert.ok(task.acceptedChinese.includes("一个泳池是深的。"));
+  assert.equal(result.correct, true);
+  assert.equal(result.score, 1);
+  assert.equal(result.gradingStatus, "correct");
+  assert.deepEqual(result.problemWords, []);
+  assert.deepEqual(result.wordResults, []);
+  assert.equal(Object.hasOwn(restored.pending, task.id), false);
+  assert.doesNotMatch(`${result.explanation} ${result.detailedExplanation}`, /只能翻译为水池|误译为游泳池|改变了原意/);
+  assert.match(result.detailedExplanation, /不会计入正式错题、待复习、薄弱点或能力分/);
+  assert.deepEqual(sanitizePreviewPractice(JSON.parse(JSON.stringify(restored)), content), restored);
+
+  const history = sanitizePreviewPracticeHistory([{
+    ...legacy,
+    id: "preview-round-pool",
+    score: 0,
+    completedAt: "2026-08-08T01:02:00.000Z"
+  }], content);
+  assert.equal(history[0].correct, 1);
+  assert.equal(history[0].partial, 0);
+  assert.equal(history[0].score, 100);
+  assert.equal(history[0].results[task.id].correct, true);
+});

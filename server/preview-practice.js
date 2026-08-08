@@ -1,6 +1,7 @@
 "use strict";
 
-const { englishAnswerMatches } = require("../answer-utils");
+const { chineseAnswerMatches, englishAnswerMatches } = require("../answer-utils");
+const { expandRegisteredChineseAnswers } = require("../review-variants");
 
 const MAX_TASKS = 80;
 const MAX_MAP_ENTRIES = 100;
@@ -22,6 +23,10 @@ function uniqueTexts(value, primary, maximum = 8) {
     result.push(text);
   });
   return result;
+}
+
+function expandPreviewAcceptedChinese(content, english, value, primary, maximum = 16) {
+  return expandRegisteredChineseAnswers(content, english, uniqueTexts(value, primary, maximum), maximum);
 }
 
 function normalizePreviewSchoolSentence(value, { rewriteChinese = false } = {}) {
@@ -69,7 +74,31 @@ function repairAmbiguousSchoolResults(tasks, answers, results) {
   });
 }
 
-function normalizeTask(value) {
+function repairRegisteredChineseResults(tasks, answers, results) {
+  const repaired = new Set();
+  tasks.forEach(task => {
+    if (task.kind !== "sentence" || task.direction !== "en-zh") return;
+    const result = results[task.id];
+    const answer = answers[task.id];
+    if (!result || !answer || (result.correct && result.gradingStatus === "correct" && Number(result.score) >= 1)) return;
+    if (!chineseAnswerMatches(answer, task.acceptedChinese)) return;
+    results[task.id] = {
+      ...result,
+      correct: true,
+      score: 1,
+      gradingStatus: "correct",
+      explanation: "你的答案使用了正式词库登记的中文同义词，整句意思正确。",
+      detailedExplanation: "正式词库允许这个单词使用多种中文表达；替换后整句语义、数量和句子结构都没有改变，因此本次预习答案已改判为完全正确。预习记录仅供学习窗口查看，不会计入正式错题、待复习、薄弱点或能力分。",
+      problemWords: [],
+      wordResults: [],
+      source: "local"
+    };
+    repaired.add(task.id);
+  });
+  return repaired;
+}
+
+function normalizeTask(value, content) {
   const source = value && typeof value === "object" ? value : {};
   const id = clean(source.id, 160);
   const kind = source.kind === "sentence" ? "sentence" : source.kind === "word" ? "word" : "";
@@ -87,7 +116,9 @@ function normalizeTask(value) {
     english,
     chinese,
     acceptedEnglish: uniqueTexts([...school.acceptedEnglish, ...(Array.isArray(source.acceptedEnglish) ? source.acceptedEnglish : [])], english),
-    acceptedChinese: uniqueTexts(source.acceptedChinese, chinese)
+    acceptedChinese: kind === "sentence"
+      ? expandPreviewAcceptedChinese(content, english, source.acceptedChinese, chinese)
+      : uniqueTexts(source.acceptedChinese, chinese)
   };
 }
 
@@ -124,10 +155,10 @@ function normalizePendingMap(value) {
   return Object.fromEntries(Object.entries(value).slice(-MAX_MAP_ENTRIES).map(([key, item]) => [clean(key, 160), clean(item, 240)]).filter(([key]) => key));
 }
 
-function normalizeHistoryEntry(value) {
+function normalizeHistoryEntry(value, content) {
   const source = value && typeof value === "object" ? value : {};
   const id = clean(source.id, 160);
-  const tasks = (Array.isArray(source.tasks) ? source.tasks : []).map(normalizeTask).filter(Boolean).slice(0, MAX_TASKS);
+  const tasks = (Array.isArray(source.tasks) ? source.tasks : []).map(item => normalizeTask(item, content)).filter(Boolean).slice(0, MAX_TASKS);
   if (!id || !tasks.length) return null;
   const taskIds = new Set(tasks.map(task => task.id));
   const answers = normalizeMap(source.answers, 500);
@@ -135,6 +166,7 @@ function normalizeHistoryEntry(value) {
   Object.keys(answers).forEach(key => { if (!taskIds.has(key)) delete answers[key]; });
   Object.keys(results).forEach(key => { if (!taskIds.has(key)) delete results[key]; });
   repairAmbiguousSchoolResults(tasks, answers, results);
+  repairRegisteredChineseResults(tasks, answers, results);
   const total = tasks.length;
   const completed = tasks.filter(task => results[task.id]).length;
   const correct = tasks.filter(task => results[task.id] && results[task.id].correct).length;
@@ -152,19 +184,19 @@ function normalizeHistoryEntry(value) {
     completed,
     correct,
     partial,
-    score: Math.max(0, Math.min(100, Number(source.score) || (total ? Math.round(tasks.reduce((sum, task) => sum + (Number(results[task.id]?.score) || 0), 0) / total * 100) : 0))),
+    score: total ? Math.round(tasks.reduce((sum, task) => sum + (Number(results[task.id]?.score) || 0), 0) / total * 100) : 0,
     startedAt: clean(source.startedAt, 40),
     completedAt: clean(source.completedAt, 40)
   };
 }
 
-function sanitizePreviewPracticeHistory(value) {
-  return (Array.isArray(value) ? value : []).map(normalizeHistoryEntry).filter(Boolean).slice(-MAX_HISTORY);
+function sanitizePreviewPracticeHistory(value, content) {
+  return (Array.isArray(value) ? value : []).map(item => normalizeHistoryEntry(item, content)).filter(Boolean).slice(-MAX_HISTORY);
 }
 
-function sanitizePreviewPractice(value) {
+function sanitizePreviewPractice(value, content) {
   const source = value && typeof value === "object" ? value : {};
-  const tasks = (Array.isArray(source.tasks) ? source.tasks : []).map(normalizeTask).filter(Boolean).slice(0, MAX_TASKS);
+  const tasks = (Array.isArray(source.tasks) ? source.tasks : []).map(item => normalizeTask(item, content)).filter(Boolean).slice(0, MAX_TASKS);
   const taskIds = new Set(tasks.map(task => task.id));
   const answers = normalizeMap(source.answers, 500);
   const results = normalizeResultMap(source.results);
@@ -173,6 +205,7 @@ function sanitizePreviewPractice(value) {
   Object.keys(results).forEach(key => { if (!taskIds.has(key)) delete results[key]; });
   Object.keys(pending).forEach(key => { if (!taskIds.has(key)) delete pending[key]; });
   repairAmbiguousSchoolResults(tasks, answers, results);
+  repairRegisteredChineseResults(tasks, answers, results).forEach(key => { delete pending[key]; });
   return {
     key: clean(source.key, 240),
     currentDay: Math.max(0, Number(source.currentDay) || 0),
@@ -192,4 +225,4 @@ function sanitizePreviewPractice(value) {
   };
 }
 
-module.exports = { normalizePreviewSchoolSentence, normalizeTask, sanitizePreviewPractice, sanitizePreviewPracticeHistory };
+module.exports = { expandPreviewAcceptedChinese, normalizePreviewSchoolSentence, normalizeTask, sanitizePreviewPractice, sanitizePreviewPracticeHistory };

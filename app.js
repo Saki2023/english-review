@@ -1179,6 +1179,14 @@
     return { ambiguous, acceptedEnglish: Array.from(new Set(answers.map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8) };
   }
 
+  function clientPreviewAcceptedChinese(english, chinese, acceptedChinese = []) {
+    const answers = Array.from(new Set([chinese, ...(Array.isArray(acceptedChinese) ? acceptedChinese : [])]
+      .map(item => String(item || "").trim()).filter(Boolean))).slice(0, 16);
+    return typeof REVIEW_VARIANTS.expandRegisteredChineseAnswers === "function"
+      ? REVIEW_VARIANTS.expandRegisteredChineseAnswers(DATA, english, answers, 16)
+      : answers;
+  }
+
   function normalizeClientPreviewPractice(value) {
     const source = value && typeof value === "object" ? value : {};
     const tasks = (Array.isArray(source.tasks) ? source.tasks : []).map(item => {
@@ -1199,7 +1207,9 @@
         english,
         chinese,
         acceptedEnglish: school.acceptedEnglish,
-        acceptedChinese: Array.from(new Set((Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [chinese]).map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8)
+        acceptedChinese: kind === "sentence"
+          ? clientPreviewAcceptedChinese(english, chinese, item.acceptedChinese)
+          : Array.from(new Set((Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [chinese]).map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8)
       };
     }).filter(Boolean).slice(0, 80);
     const taskIds = new Set(tasks.map(item => item.id));
@@ -1227,6 +1237,25 @@
         wordResults: [],
         source: "local"
       };
+    });
+    tasks.forEach(task => {
+      if (task.kind !== "sentence" || task.direction !== "en-zh") return;
+      const result = results[task.id];
+      const answer = answers[task.id];
+      if (!result || !answer || (result.correct && result.gradingStatus === "correct" && Number(result.score) >= 1)) return;
+      if (!chineseAnswerMatches(answer, task.acceptedChinese)) return;
+      results[task.id] = {
+        ...result,
+        correct: true,
+        score: 1,
+        gradingStatus: "correct",
+        explanation: "你的答案使用了正式词库登记的中文同义词，整句意思正确。",
+        detailedExplanation: "正式词库允许这个单词使用多种中文表达；替换后整句语义、数量和句子结构都没有改变，因此本次预习答案已改判为完全正确。预习记录仅供学习窗口查看，不会计入正式错题、待复习、薄弱点或能力分。",
+        problemWords: [],
+        wordResults: [],
+        source: "local"
+      };
+      delete pending[task.id];
     });
     return {
       key: String(source.key || "").slice(0, 240),
@@ -1260,7 +1289,7 @@
       const completed = normalized.tasks.filter(task => normalized.results[task.id]).length;
       const correct = normalized.tasks.filter(task => normalized.results[task.id]?.correct).length;
       const partial = normalized.tasks.filter(task => normalized.results[task.id]?.gradingStatus === "partial").length;
-      const score = Math.max(0, Math.min(100, Number(item.score) || Math.round(normalized.tasks.reduce((sum, task) => sum + (Number(normalized.results[task.id]?.score) || 0), 0) / total * 100)));
+      const score = Math.round(normalized.tasks.reduce((sum, task) => sum + (Number(normalized.results[task.id]?.score) || 0), 0) / total * 100);
       return {
         id: String(item.id || "").trim().slice(0, 180),
         key: String(item.key || "").slice(0, 240),
@@ -2698,7 +2727,7 @@
             english: String(sentence.english).trim(),
             chinese: String(sentence.chinese).trim(),
             acceptedEnglish: Array.from(new Set([String(sentence.english).trim(), ...(Array.isArray(sentence.acceptedEnglish) ? sentence.acceptedEnglish : [])].map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8),
-            acceptedChinese: Array.from(new Set([String(sentence.chinese).trim(), ...(Array.isArray(sentence.acceptedChinese) ? sentence.acceptedChinese : [])].map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8)
+            acceptedChinese: clientPreviewAcceptedChinese(sentence.english, sentence.chinese, sentence.acceptedChinese)
           };
         });
         const targetState = ensurePreviewPracticeState();
@@ -6400,7 +6429,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=55", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=56", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

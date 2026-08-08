@@ -62,6 +62,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | GET | `/api/preview` | 获取当前账号最新及近期预习，需要登录 |
 | GET | `/api/preview/words` | 获取当前课程紧邻下一天的未学预习词，需要登录 |
 | POST | `/api/preview/practice/sentences` | 按当前预习词生成预习句子练习，需要登录及已配置的 AI |
+| POST | `/api/preview/practice/grade` | 判定预习翻译；继承正式词库同义词但始终保持非正式证据 |
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
 | POST | `/api/review/sentence-variants` | 创建或恢复今日复习的后台 AI 句子变式任务，需要登录；返回 `202` 时按 `jobId` 查询 |
 | GET | `/api/review/sentence-variants?jobId=...` | 查询当前账号的后台句子变式任务；单次上游等待最多 10 分钟，网络/上游失败后每 5 分钟重试，内容连续 3 轮不合格后停止自动重试 |
@@ -182,7 +183,9 @@ Invoke-RestMethod -Uri 'http://localhost:8080/api/content' -Headers $headers
 { "wordIds": ["d6-dog", "d6-run"] }
 ```
 
-每个返回句子都对应一个 `wordId`，并且必须包含该预习词；句子可以组合已经正式学过的单词来帮助记忆，但服务端会拒绝未学过且不在当前预习列表中的英文词。返回的 `source` 固定为 `ai`，不会把句子写入正式词库、今日复习、错题本或能力统计。
+每个返回句子都对应一个 `wordId`，并且必须包含该预习词；句子可以组合已经正式学过的单词来帮助记忆，但服务端会拒绝未学过且不在当前预习列表中的英文词。返回句子的 `acceptedChinese` 会按正式词库登记的词义扩展到完整句子，例如正式词条 `pool` 允许“水池/游泳池/泳池”时，`A pool is deep.` 会接受这些词义组成的等义整句。该规则同时用于生成、状态保存、刷新恢复、判题和旧预习历史迁移；旧错误解释会被替换并重算预习分数。
+
+返回的 `source` 固定为 `ai`，不会把句子写入正式词库、今日复习、错题本或能力统计。预习轮次和逐题结果始终导出为 `formalEvidence: false`，不得影响正式错题、待复习、薄弱点或能力分。
 
 AI 未配置、上游失败、限流或返回不完整时，接口返回 `503`（限流也可能返回 `429`），并包含 `retryAfterMs: 300000` 及 `Retry-After: 300`。前端会保留“待生成”状态，每 5 分钟自动重试；不会用固定本地句子冒充 AI 结果。
 

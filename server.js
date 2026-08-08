@@ -26,7 +26,7 @@ const {
   sanitizeReviewVariantPool,
   storeReviewVariantPoolResults
 } = require("./server/review-variant-pool");
-const { normalizePreviewSchoolSentence, sanitizePreviewPractice, sanitizePreviewPracticeHistory } = require("./server/preview-practice");
+const { expandPreviewAcceptedChinese, normalizePreviewSchoolSentence, sanitizePreviewPractice, sanitizePreviewPracticeHistory } = require("./server/preview-practice");
 const { repairLearningEvidence } = require("./server/evidence-repair");
 const { normalizeStudyTime } = require("./study-time");
 const {
@@ -243,8 +243,8 @@ function sanitizeState(value) {
     sessions: source.sessions && typeof source.sessions === "object" ? source.sessions : {},
     mistakes: Array.isArray(source.mistakes) ? source.mistakes.slice(-80) : [],
     studyTime: normalizeStudyTime(source.studyTime),
-    previewPractice: sanitizePreviewPractice(source.previewPractice),
-    previewPracticeHistory: sanitizePreviewPracticeHistory(source.previewPracticeHistory),
+    previewPractice: sanitizePreviewPractice(source.previewPractice, content),
+    previewPracticeHistory: sanitizePreviewPracticeHistory(source.previewPracticeHistory, content),
     aiPractice: sanitizeAiPractice(source.aiPractice),
     aiExam: sanitizeAiExamState(source.aiExam),
     dictation: sanitizeDictationState(source.dictation),
@@ -1048,7 +1048,7 @@ function sanitizePreviewSentence(contentValue, target, value, allowedWords) {
   const targetTokens = previewEnglishTokens(target.english);
   const allowed = new Set(allowedWords);
   if (!tokens.length || tokens.some(token => !allowed.has(token)) || !targetTokens.every(token => tokens.includes(token))) return null;
-  const acceptedChinese = Array.from(new Set([chinese, String(source.chinese || "").trim(), ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])].map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8);
+  const acceptedChinese = expandPreviewAcceptedChinese(contentValue, english, [String(source.chinese || "").trim(), ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])], chinese, 16);
   return {
     id: previewSentenceId(target.id, english),
     kind: "sentence",
@@ -1171,7 +1171,7 @@ function previewPracticeGradeTask(rawTask, previewData) {
     english,
     chinese,
     acceptedEnglish: school.acceptedEnglish,
-    acceptedChinese: [chinese],
+    acceptedChinese: expandPreviewAcceptedChinese(content, english, [], chinese, 16),
     schoolMeaningAmbiguous: school.ambiguousSchool
   };
 }

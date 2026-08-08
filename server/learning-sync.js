@@ -267,8 +267,8 @@ function tutorEvidence(state) {
   }));
 }
 
-function previewPracticeEvidence(state) {
-  return sanitizePreviewPracticeHistory(state.previewPracticeHistory).filter(round => (
+function previewPracticeEvidence(state, content) {
+  return sanitizePreviewPracticeHistory(state.previewPracticeHistory, content).filter(round => (
     round.total > 0
     && round.completed >= round.total
     && Boolean(round.completedAt)
@@ -339,7 +339,7 @@ function buildLearningSyncProfile(content, state, user) {
   const dictation = dictationEvidence(state);
   const focused = focusedEvidence(state);
   const tutorHistory = tutorEvidence(state);
-  const previewPracticeHistory = previewPracticeEvidence(state);
+  const previewPracticeHistory = previewPracticeEvidence(state, content);
   const previewPracticeQuestions = previewPracticeHistory.flatMap(round => round.questions);
   const dictationScores = dictation.sessions.map(session => session.percentage).filter(value => Number.isFinite(value));
   const dictationWrong = dictation.sessions.flatMap(session => session.items).filter(item => item.correct === false).length;
