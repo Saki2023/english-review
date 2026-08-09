@@ -131,13 +131,35 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .direction-label { margin-bottom: 14px; color: var(--muted); font-size: 13px; }
 .review-pool-status-card { margin: 8px 0 14px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 .review-pool-status-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+.review-pool-status-summary { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
 .review-pool-status-head strong { color: var(--ink); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.review-pool-toggle { min-height: 32px; padding: 0 10px; font-size: 12px; }
 .review-pool-track { height: 8px; margin-top: 9px; overflow: hidden; border-radius: 999px; background: var(--surface-soft); }
 .review-pool-progress { width: 0; height: 100%; border-radius: inherit; background: var(--primary); transition: width .25s ease; }
 .review-pool-status-card[data-status="ready"] .review-pool-progress { background: var(--primary-deep); }
 .review-pool-status-card[data-status="failed"] .review-pool-progress,
 .review-pool-status-card[data-status="needs-attention"] .review-pool-progress { background: var(--gold); }
 .review-pool-status { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; text-align: left; min-height: 18px; }
+.review-pool-browser { min-width: 0; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.review-pool-controls { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 9px; }
+.review-pool-search { min-width: 180px; max-width: none; }
+.review-pool-page-size { flex: 0 0 auto; padding-left: 10px; }
+.review-pool-page-size span { white-space: nowrap; }
+.review-pool-chinese-toggle { min-height: 36px; padding: 0 4px; }
+.review-pool-list-meta { min-height: 18px; margin: 10px 0 3px; color: var(--muted); font-size: 11px; }
+.review-pool-list { min-width: 0; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--border); }
+.review-pool-item { min-width: 0; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 11px 4px; border-bottom: 1px solid var(--border); }
+.review-pool-item.is-current { background: var(--primary-soft); box-shadow: inset 3px 0 0 var(--primary); }
+.review-pool-sequence { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; text-align: center; }
+.review-pool-copy { min-width: 0; }
+.review-pool-english, .review-pool-chinese { margin: 0; overflow-wrap: anywhere; word-break: normal; }
+.review-pool-english { color: var(--ink); font-size: 13px; line-height: 1.45; }
+.review-pool-chinese { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.review-pool-current { align-self: start; min-height: 22px; display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 4px; color: var(--primary-deep); background: #d7eee7; font-size: 10px; white-space: nowrap; }
+.review-pool-empty { padding: 24px 8px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; text-align: center; }
+.review-pool-pagination { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; color: var(--muted); font-size: 11px; }
+.review-pool-page-actions { display: flex; align-items: center; gap: 6px; }
+.review-pool-page-actions .icon-button { width: 32px; height: 32px; }
 .prompt-text { min-height: 58px; color: var(--ink); font-size: 34px; line-height: 1.35; font-weight: 500; overflow-wrap: anywhere; }
 .phonetic-line { min-height: 22px; margin-top: 8px; color: var(--primary); font-size: 16px; }
 .review-variant-retry { display: flex; align-items: center; justify-content: center; gap: 10px; margin: 18px auto 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
@@ -851,6 +873,15 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
   .self-study-complete { align-items: stretch; flex-direction: column; }
   .study-plan-dock-home small { display: none; }
   .review-toolbar, .library-controls { align-items: flex-start; flex-direction: column; }
+  .review-pool-status-head { align-items: flex-start; flex-direction: column; }
+  .review-pool-status-summary { width: 100%; justify-content: space-between; }
+  .review-pool-controls { align-items: stretch; flex-direction: column; }
+  .review-pool-search, .review-pool-page-size { width: 100%; max-width: none; flex: none; }
+  .review-pool-page-size select { flex: 1; }
+  .review-pool-chinese-toggle { align-self: flex-start; }
+  .review-pool-item { grid-template-columns: 30px minmax(0, 1fr); gap: 8px; padding-inline: 0; }
+  .review-pool-current { grid-column: 2; justify-self: start; }
+  .review-pool-pagination { align-items: stretch; }
   .pronunciation-heading { align-items: flex-end; }
   .pronunciation-total { min-width: 78px; padding-left: 12px; }
   .pronunciation-total strong { font-size: 22px; }

@@ -165,14 +165,14 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=58/);
+  assert.match(html, /pronunciation-data\.js\?v=59/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /phonemeSoundButtonHtml\(item\)/);
   assert.match(app, /speechButtonHtml\(item\.example, `慢速播放完整示范词/);
   assert.match(app, /data-pronunciation-sound/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=58/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=59/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -403,6 +403,37 @@ test("daily sentence pools persist fifty variants and client merges cannot erase
   assert.match(server, /accepted only when the server has assigned that exact/);
 });
 
+test("sentence pool viewer exposes searchable paginated read-only sentences and the current assignment", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  const css = read("styles.css");
+  assert.match(html, /id="reviewVariantPoolToggle"[^>]*aria-controls="reviewVariantPoolBrowser"/);
+  assert.match(html, /id="reviewVariantPoolSearch"[^>]*placeholder="搜索英文或中文"/);
+  assert.match(html, /id="reviewVariantPoolPageSize"[\s\S]*value="10" selected[\s\S]*value="20"[\s\S]*value="50"/);
+  assert.match(html, /id="reviewVariantPoolShowChinese"[^>]*type="checkbox"/);
+  assert.match(html, /id="reviewVariantPoolList"/);
+  assert.match(html, /id="reviewVariantPoolPrevPage"/);
+  assert.match(html, /id="reviewVariantPoolNextPage"/);
+  assert.match(app, /Array\.isArray\(value\.sentences\)[\s\S]*\.slice\(0, 50\)/);
+  assert.match(app, /normalizeEnglish\(item\.english\)\.includes\(englishQuery\)/);
+  assert.match(app, /normalizeChinese\(item\.chinese\)\.includes\(chineseQuery\)/);
+  assert.match(app, /filtered\.slice\(start, start \+ reviewVariantPoolPageSize\)/);
+  assert.match(app, /currentVariantId \? item\.id === currentVariantId/);
+  assert.match(app, /class="review-pool-current">当前复习/);
+  assert.match(app, /reviewVariantPoolShowChinese \? `<p class="review-pool-chinese"/);
+  assert.match(css, /\.review-pool-item\.is-current/);
+  assert.match(css, /\.review-pool-english[^}]*overflow-wrap:\s*anywhere/s);
+  assert.match(css, /@media \(max-width: 520px\)[\s\S]*\.review-pool-item\s*\{[^}]*grid-template-columns:\s*30px minmax\(0, 1fr\)/s);
+
+  const handlerStart = app.indexOf('$("#reviewVariantPoolToggle").addEventListener');
+  const handlerEnd = app.indexOf('$$("[data-library-type]")', handlerStart);
+  const handlers = app.slice(handlerStart, handlerEnd);
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart);
+  assert.doesNotMatch(handlers, /fetch\(|saveModel\(|scheduleRemoteSave\(|syncRemoteState\(/);
+  const currentRender = app.slice(app.indexOf("function renderCurrentReviewVariantPoolBrowser"), app.indexOf("function renderReviewVariantPoolStatus"));
+  assert.doesNotMatch(currentRender, /getSession\(|saveModel\(|fetch\(/);
+});
+
 test("review redraws preserve an unsubmitted answer for the same task", () => {
   const app = read("app.js");
   assert.match(app, /let reviewAnswerResetRequested = true/);
@@ -441,7 +472,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 58", () => {
+test("PWA client assets consistently use the displayed cache version 59", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -452,8 +483,8 @@ test("PWA client assets consistently use the displayed cache version 58", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "58");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v58"/);
+  assert.equal(displayedVersion[1], "59");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v59"/);
 });
 
 test("complete self-study exposes one-step teaching, recovery, questions, and explicit continuation controls", () => {
@@ -506,6 +537,6 @@ test("daily study plan offers six free-choice projects and records sixty minutes
   assert.doesNotMatch(app, /String\(stage\.index \+ 1\)/);
   assert.doesNotMatch(app, /按顺序完成/);
   assert.doesNotMatch(html, /按顺序学习/);
-  assert.match(html, /study-time\.js\?v=58/);
-  assert.match(serviceWorker, /study-time\.js\?v=58/);
+  assert.match(html, /study-time\.js\?v=59/);
+  assert.match(serviceWorker, /study-time\.js\?v=59/);
 });

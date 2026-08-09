@@ -122,24 +122,25 @@ async function startApp(dataDir, port, autofill = true) {
   return child;
 }
 
-async function login(baseUrl) {
+async function login(baseUrl, username = "pool-owner", password = "pool-test-password") {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "pool-owner", password: "pool-test-password" })
+    body: JSON.stringify({ username, password })
   });
   assert.equal(response.status, 200);
   return response.headers.get("set-cookie").split(";")[0];
 }
 
-test("daily sentence pool survives refresh, stale state PUT, and server restart", async () => {
+test("daily sentence pool exposes an isolated stable read-only list across refresh and restart", async () => {
   const dataDir = temporaryDataDir();
   const providerInfo = createProvider();
   let app;
   let restarted;
   try {
     const users = loadUsers(dataDir);
-    createUser(users, { username: "pool-owner", password: "pool-test-password" });
+    const owner = createUser(users, { username: "pool-owner", password: "pool-test-password" });
+    createUser(users, { username: "pool-other", password: "other-pool-password" });
     saveUsers(dataDir, users);
     await new Promise((resolve, reject) => providerInfo.provider.listen(0, "127.0.0.1", error => error ? reject(error) : resolve()));
     const providerPort = providerInfo.provider.address().port;
@@ -171,11 +172,22 @@ test("daily sentence pool survives refresh, stale state PUT, and server restart"
     }
     assert.equal(poolState.reviewVariantPool.status, "ready");
     assert.equal(poolState.reviewVariantPool.generatedCount, 50);
+    assert.equal(poolState.reviewVariantPool.sentences.length, 50);
+    assert.deepEqual(poolState.reviewVariantPool.sentences.map(item => item.index), Array.from({ length: 50 }, (_, index) => index + 1));
+    assert.deepEqual(Object.keys(poolState.reviewVariantPool.sentences[0]).sort(), ["assignedTaskIds", "chinese", "english", "id", "index"]);
+    assert.doesNotMatch(JSON.stringify(poolState.reviewVariantPool), /pool-test-password|other-pool-password|pool-test-key/);
     assert.ok(providerInfo.calls.length >= 3);
 
     const diskState = JSON.parse(fs.readFileSync(path.join(dataDir, "user-states.json"), "utf8"));
-    const storedState = Object.values(diskState.users)[0];
+    const storedState = diskState.users[owner.id];
     assert.equal(storedState.reviewVariantPool.variants.length, 50);
+    assert.deepEqual(poolState.reviewVariantPool.sentences.map(item => ({ id: item.id, english: item.english, chinese: item.chinese })), storedState.reviewVariantPool.variants.map(item => ({ id: item.id, english: item.english, chinese: item.chinese })));
+
+    const otherCookie = await login(baseUrl, "pool-other", "other-pool-password");
+    const otherState = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": otherCookie } })).json();
+    assert.equal(otherState.reviewVariantPool.generatedCount, 0);
+    assert.deepEqual(otherState.reviewVariantPool.sentences, []);
+    assert.equal(otherState.reviewVariantPool.sentences.some(item => poolState.reviewVariantPool.sentences.some(ownerItem => ownerItem.id === item.id)), false);
 
     const assigned = await fetch(`${baseUrl}/api/review/sentence-variants`, {
       method: "POST",
@@ -186,6 +198,19 @@ test("daily sentence pool survives refresh, stale state PUT, and server restart"
     assert.equal(assigned.status, 200);
     assert.equal(assignedBody.variants.length, 1);
     const assignedId = assignedBody.variants[0].id;
+    const assignedState = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
+    const assignedSentence = assignedState.reviewVariantPool.sentences.find(item => item.id === assignedId);
+    assert.ok(assignedSentence);
+    assert.ok(assignedSentence.assignedTaskIds.includes("d4-s5:en-zh"));
+    const stableSentences = assignedState.reviewVariantPool.sentences;
+
+    const stateFile = path.join(dataDir, "user-states.json");
+    const beforeRead = fs.readFileSync(stateFile, "utf8");
+    const beforeReadMtime = fs.statSync(stateFile).mtimeMs;
+    const repeatedReads = await Promise.all(Array.from({ length: 3 }, () => fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } }).then(response => response.json())));
+    repeatedReads.forEach(value => assert.deepEqual(value.reviewVariantPool.sentences, stableSentences));
+    assert.equal(fs.readFileSync(stateFile, "utf8"), beforeRead, "reading the public pool must not rewrite account state");
+    assert.equal(fs.statSync(stateFile).mtimeMs, beforeReadMtime, "reading the public pool must not touch the account state file");
 
     const stale = { ...(await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json()), sessions: {} };
     const stalePut = await fetch(`${baseUrl}/api/state`, { method: "PUT", headers: { "Content-Type": "application/json", "Cookie": cookie }, body: JSON.stringify(stale) });
@@ -202,6 +227,7 @@ test("daily sentence pool survives refresh, stale state PUT, and server restart"
     const persisted = await (await fetch(`${restartedUrl}/api/state`, { headers: { "Cookie": restartedCookie } })).json();
     assert.equal(persisted.reviewVariantPool.status, "ready");
     assert.equal(persisted.reviewVariantPool.generatedCount, 50);
+    assert.deepEqual(persisted.reviewVariantPool.sentences, stableSentences);
   } finally {
     for (const child of [app, restarted]) {
       if (child && child.exitCode === null) child.kill();

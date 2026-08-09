@@ -168,6 +168,25 @@ function reviewVariantPoolSummary(value) {
   };
 }
 
+function publicReviewVariantPool(value) {
+  const pool = sanitizeReviewVariantPool(value);
+  const assignedTaskIdsByVariant = new Map();
+  Object.entries(pool.assignments).forEach(([taskId, variantId]) => {
+    if (!assignedTaskIdsByVariant.has(variantId)) assignedTaskIdsByVariant.set(variantId, []);
+    assignedTaskIdsByVariant.get(variantId).push(taskId);
+  });
+  return {
+    ...reviewVariantPoolSummary(pool),
+    sentences: pool.variants.map((variant, index) => ({
+      index: index + 1,
+      id: variant.id,
+      english: variant.english,
+      chinese: variant.chinese,
+      assignedTaskIds: (assignedTaskIdsByVariant.get(variant.id) || []).sort()
+    }))
+  };
+}
+
 function learnedSentenceFamilies(content) {
   const currentDay = Math.max(0, Number(content && content.currentDay) || 0);
   const grouped = new Map();
@@ -305,6 +324,7 @@ module.exports = {
   buildReviewVariantPoolTasks,
   createReviewVariantPool,
   ensureReviewVariantPool,
+  publicReviewVariantPool,
   reviewVariantContentSignature,
   reviewVariantPoolSummary,
   reviewVariantSyncKey,

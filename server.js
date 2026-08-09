@@ -20,6 +20,7 @@ const {
   assignReviewVariantPoolTasks,
   buildReviewVariantPoolTasks,
   ensureReviewVariantPool,
+  publicReviewVariantPool,
   reviewVariantContentSignature,
   reviewVariantPoolSummary,
   reviewVariantSyncKey,
@@ -274,7 +275,7 @@ function sanitizeState(value) {
 
 function publicReviewState(value) {
   const { aiExam, dictation, focusedPractice, teachingProfile, reviewVariantPool, selfStudy, ...reviewState } = sanitizeState(value);
-  return { ...reviewState, reviewVariantPool: reviewVariantPoolSummary(reviewVariantPool) };
+  return { ...reviewState, reviewVariantPool: publicReviewVariantPool(reviewVariantPool) };
 }
 
 function defaultState() { return repairLearningEvidence(content, sanitizeState({})).state; }

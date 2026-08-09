@@ -8,6 +8,7 @@ const {
   buildReviewVariantPoolTasks,
   createReviewVariantPool,
   ensureReviewVariantPool,
+  publicReviewVariantPool,
   reviewVariantContentSignature,
   reviewVariantPoolSummary,
   reviewVariantSyncKey,
@@ -68,6 +69,48 @@ test("daily review variant pool keeps 50 variants and stable assignments after s
   assert.equal(reviewVariantPoolSummary(second.pool).generatedCount, 50);
   assert.equal(reviewVariantPoolSummary(second.pool).remainingCount, 0);
   assert.equal(reviewVariantPoolSummary(second.pool).assignedCount, 2);
+});
+
+test("public sentence pool exposes stable read-only sentence fields and assignment matches", () => {
+  const source = createReviewVariantPool({ date: "2026-08-09", syncKey: "sync-public", contentSignature: "content-public" });
+  source.variants = Array.from({ length: 55 }, (_, index) => ({
+    id: `variant-${index}`,
+    family: "description",
+    english: `It is big ${index}.`,
+    chinese: `它很大 ${index}。`,
+    acceptedEnglish: [`it is big ${index}`],
+    acceptedChinese: [`它很大 ${index}`],
+    requiredWords: ["it", "is", "big"],
+    providerId: "private-provider",
+    model: "private-model-label",
+    generatedAt: "2026-08-09T00:00:00.000Z"
+  }));
+  source.assignments = {
+    "d4-s2:en-zh": "variant-2",
+    "d4-s5:zh-en": "variant-2",
+    "d4-s3:en-zh": "variant-7"
+  };
+  source.model = "private-model-label";
+  const before = JSON.stringify(source);
+
+  const first = publicReviewVariantPool(source);
+  const second = publicReviewVariantPool(source);
+
+  assert.equal(first.sentences.length, 50);
+  assert.deepEqual(first.sentences.map(item => item.index), Array.from({ length: 50 }, (_, index) => index + 1));
+  assert.deepEqual(first.sentences.map(item => item.id), Array.from({ length: 50 }, (_, index) => `variant-${index}`));
+  assert.deepEqual(first.sentences[2], {
+    index: 3,
+    id: "variant-2",
+    english: "It is big 2.",
+    chinese: "它很大 2。",
+    assignedTaskIds: ["d4-s2:en-zh", "d4-s5:zh-en"]
+  });
+  assert.deepEqual(Object.keys(first.sentences[0]).sort(), ["assignedTaskIds", "chinese", "english", "id", "index"]);
+  assert.equal(Object.hasOwn(first.sentences[0], "acceptedChinese"), false);
+  assert.equal(Object.hasOwn(first.sentences[0], "providerId"), false);
+  assert.deepEqual(second, first);
+  assert.equal(JSON.stringify(source), before, "public reads must not mutate or reorder the persisted pool");
 });
 
 test("legacy 100-sentence pools are capped at the new 50-sentence target", () => {

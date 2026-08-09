@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=58">
+  <link rel="stylesheet" href="styles.css?v=59">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v58">v58</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v59">v59</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -185,15 +185,51 @@
             <span class="review-source" id="reviewSource"><i data-lucide="list-checks" aria-hidden="true"></i>间隔复习</span>
           </div>
 
-          <section class="review-pool-status-card" id="reviewVariantPoolStatusCard" hidden aria-live="polite">
+          <section class="review-pool-status-card" id="reviewVariantPoolStatusCard" hidden>
             <div class="review-pool-status-head">
               <span>本轮 AI 句子池</span>
-              <strong id="reviewVariantPoolCount">已保存 0 / 50 条</strong>
+              <div class="review-pool-status-summary">
+                <strong id="reviewVariantPoolCount">已保存 0 / 50 条</strong>
+                <button class="secondary-button compact-button review-pool-toggle" type="button" id="reviewVariantPoolToggle" aria-expanded="false" aria-controls="reviewVariantPoolBrowser" disabled>
+                  <i data-lucide="chevron-down" aria-hidden="true"></i><span id="reviewVariantPoolToggleLabel">查看句子</span>
+                </button>
+              </div>
             </div>
             <div class="review-pool-track" id="reviewVariantPoolTrack" role="progressbar" aria-label="本轮 AI 句子池生成进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0 / 50 条已保存">
               <div class="review-pool-progress" id="reviewVariantPoolProgress"></div>
             </div>
-            <p class="review-pool-status" id="reviewVariantPoolStatus"></p>
+            <p class="review-pool-status" id="reviewVariantPoolStatus" aria-live="polite"></p>
+            <div class="review-pool-browser" id="reviewVariantPoolBrowser" hidden>
+              <div class="review-pool-controls">
+                <label class="search-field review-pool-search" for="reviewVariantPoolSearch">
+                  <i data-lucide="search" aria-hidden="true"></i>
+                  <span class="sr-only">搜索句子池中的英文或中文</span>
+                  <input id="reviewVariantPoolSearch" type="search" autocomplete="off" placeholder="搜索英文或中文">
+                </label>
+                <label class="select-field review-pool-page-size" for="reviewVariantPoolPageSize">
+                  <span>每页</span>
+                  <select id="reviewVariantPoolPageSize" aria-label="句子池每页显示数量">
+                    <option value="10" selected>10 条</option>
+                    <option value="20">20 条</option>
+                    <option value="50">50 条</option>
+                  </select>
+                </label>
+                <label class="toggle-option review-pool-chinese-toggle" for="reviewVariantPoolShowChinese">
+                  <input id="reviewVariantPoolShowChinese" type="checkbox">
+                  <span class="toggle-track" aria-hidden="true"><span></span></span>
+                  <span>显示中文</span>
+                </label>
+              </div>
+              <p class="review-pool-list-meta" id="reviewVariantPoolListMeta"></p>
+              <ol class="review-pool-list" id="reviewVariantPoolList"></ol>
+              <div class="review-pool-pagination">
+                <span id="reviewVariantPoolPageInfo">第 1 / 1 页</span>
+                <div class="review-pool-page-actions">
+                  <button class="icon-button" type="button" id="reviewVariantPoolPrevPage" data-tooltip="上一页" aria-label="句子池上一页"><i data-lucide="chevron-left" aria-hidden="true"></i></button>
+                  <button class="icon-button" type="button" id="reviewVariantPoolNextPage" data-tooltip="下一页" aria-label="句子池下一页"><i data-lucide="chevron-right" aria-hidden="true"></i></button>
+                </div>
+              </div>
+            </div>
           </section>
           <article class="review-panel" id="reviewPanel">
             <div class="review-panel-top">
@@ -1104,12 +1140,12 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=58"></script>
-  <script src="data.js?v=58"></script>
-  <script src="pronunciation-data.js?v=58"></script>
-  <script src="review-variants.js?v=58"></script>
-  <script src="answer-utils.js?v=58"></script>
-  <script src="study-time.js?v=58"></script>
+  <script src="vendor/lucide.min.js?v=59"></script>
+  <script src="data.js?v=59"></script>
+  <script src="pronunciation-data.js?v=59"></script>
+  <script src="review-variants.js?v=59"></script>
+  <script src="answer-utils.js?v=59"></script>
+  <script src="study-time.js?v=59"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1125,7 +1161,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=58";
+      appScript.src = "app.js?v=59";
       document.body.appendChild(appScript);
     })();
   </script>

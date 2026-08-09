@@ -58,6 +58,7 @@
   const REVIEW_VARIANT_POLL_MS = 2000;
   const REVIEW_VARIANT_RETRY_MS = 5 * 60 * 1000;
   const REVIEW_VARIANT_POOL_STATUS_POLL_MS = 2000;
+  const REVIEW_VARIANT_POOL_PAGE_SIZES = [10, 20, 50];
   const REVIEW_VARIANT_WAIT_TIMEOUT_MS = 12 * 60 * 1000;
   const REVIEW_VARIANT_POLL_REQUEST_TIMEOUT_MS = 15000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
@@ -101,6 +102,11 @@
   let reviewVariantStatusMessage = "";
   let reviewVariantPoolStatus = null;
   let reviewVariantPoolStatusTimer = null;
+  let reviewVariantPoolExpanded = false;
+  let reviewVariantPoolShowChinese = false;
+  let reviewVariantPoolSearch = "";
+  let reviewVariantPoolPage = 1;
+  let reviewVariantPoolPageSize = REVIEW_VARIANT_POOL_PAGE_SIZES[0];
   let studyClockTimer = null;
   let studyClockRunning = false;
   let studyClockLastTickAt = 0;
@@ -1428,12 +1434,28 @@
     if (!value || typeof value !== "object") return null;
     const targetCount = Math.max(0, Number(value.targetCount) || 0);
     const generatedCount = Math.max(0, Math.min(targetCount || Number.MAX_SAFE_INTEGER, Number(value.generatedCount) || 0));
+    const sentences = (Array.isArray(value.sentences) ? value.sentences : []).slice(0, 50).map((item, index) => ({
+      index: Math.max(1, Number(item && item.index) || index + 1),
+      id: String(item && item.id || "").trim(),
+      english: String(item && item.english || "").trim(),
+      chinese: String(item && item.chinese || "").trim(),
+      assignedTaskIds: Array.from(new Set(Array.isArray(item && item.assignedTaskIds) ? item.assignedTaskIds.map(taskId => String(taskId || "").trim()).filter(Boolean) : [])).sort()
+    })).filter(item => item.id && item.english);
     return {
       ...value,
       targetCount,
       generatedCount,
-      remainingCount: Math.max(0, targetCount - generatedCount)
+      remainingCount: Math.max(0, targetCount - generatedCount),
+      sentences
     };
+  }
+
+  function resetReviewVariantPoolViewer() {
+    reviewVariantPoolExpanded = false;
+    reviewVariantPoolShowChinese = false;
+    reviewVariantPoolSearch = "";
+    reviewVariantPoolPage = 1;
+    reviewVariantPoolPageSize = REVIEW_VARIANT_POOL_PAGE_SIZES[0];
   }
 
   function reviewVariantPoolStatusKey(value) {
@@ -1451,7 +1473,8 @@
       pool.nextRetryAt,
       pool.error,
       pool.model,
-      pool.reasoningEffort
+      pool.reasoningEffort,
+      pool.sentences.map(item => `${item.index}:${item.id}:${item.english}:${item.chinese}:${item.assignedTaskIds.join(",")}`).join("~")
     ].map(item => String(item || "")).join("|");
   }
 
@@ -1488,7 +1511,16 @@
   }
 
   function updateReviewVariantPoolStatus(value, render = false) {
-    const next = normalizeReviewVariantPoolStatus(value);
+    const previous = normalizeReviewVariantPoolStatus(reviewVariantPoolStatus);
+    const sameCycle = previous && value && String(previous.syncKey || "") === String(value.syncKey || "");
+    const source = sameCycle && !Array.isArray(value.sentences)
+      ? { ...value, sentences: previous.sentences }
+      : value;
+    const next = normalizeReviewVariantPoolStatus(source);
+    if (previous && next && String(previous.syncKey || "") !== String(next.syncKey || "")) {
+      reviewVariantPoolSearch = "";
+      reviewVariantPoolPage = 1;
+    }
     const changed = reviewVariantPoolStatusKey(reviewVariantPoolStatus) !== reviewVariantPoolStatusKey(next);
     reviewVariantPoolStatus = next;
     if (next && next.status === "pending" && activeView === "home") scheduleReviewVariantPoolStatusPolling();
@@ -1519,6 +1551,7 @@
   function showAuthView() {
     clearReviewVariantPoolStatusPolling();
     reviewVariantPoolStatus = null;
+    resetReviewVariantPoolViewer();
     document.body.classList.add("auth-mode");
     $("#appBody").hidden = true;
     $("#authScreen").hidden = false;
@@ -1575,6 +1608,7 @@
       stopStudyClock("切换账号", false);
       clearReviewVariantPoolStatusPolling();
       reviewVariantPoolStatus = null;
+      resetReviewVariantPoolViewer();
       currentUser = data.user;
       model = loadModel();
       previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
@@ -1600,6 +1634,7 @@
     stopStudyClock("退出账号", false);
     clearReviewVariantPoolStatusPolling();
     reviewVariantPoolStatus = null;
+    resetReviewVariantPoolViewer();
     if (API_ENABLED) { try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch (_) {} }
     currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
     previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
@@ -5453,6 +5488,77 @@
     renderHome();
   }
 
+  function renderReviewVariantPoolBrowser(session, baseTask, poolValue = reviewVariantPoolStatus) {
+    const browser = $("#reviewVariantPoolBrowser");
+    const toggle = $("#reviewVariantPoolToggle");
+    const toggleLabel = $("#reviewVariantPoolToggleLabel");
+    const search = $("#reviewVariantPoolSearch");
+    const pageSizeSelect = $("#reviewVariantPoolPageSize");
+    const showChinese = $("#reviewVariantPoolShowChinese");
+    const meta = $("#reviewVariantPoolListMeta");
+    const list = $("#reviewVariantPoolList");
+    const pageInfo = $("#reviewVariantPoolPageInfo");
+    const previous = $("#reviewVariantPoolPrevPage");
+    const next = $("#reviewVariantPoolNextPage");
+    if (!browser || !toggle || !toggleLabel || !search || !pageSizeSelect || !showChinese || !meta || !list || !pageInfo || !previous || !next) return;
+
+    const pool = normalizeReviewVariantPoolStatus(poolValue);
+    const sentences = pool ? pool.sentences : [];
+    toggle.disabled = sentences.length === 0;
+    toggle.setAttribute("aria-expanded", String(reviewVariantPoolExpanded && sentences.length > 0));
+    toggle.innerHTML = `<i data-lucide="${reviewVariantPoolExpanded ? "chevron-up" : "chevron-down"}" aria-hidden="true"></i><span id="reviewVariantPoolToggleLabel">${reviewVariantPoolExpanded ? "收起句子" : "查看句子"}</span>`;
+    browser.hidden = !reviewVariantPoolExpanded || sentences.length === 0;
+    if (browser.hidden) {
+      refreshIcons();
+      return;
+    }
+
+    search.value = reviewVariantPoolSearch;
+    pageSizeSelect.value = String(reviewVariantPoolPageSize);
+    showChinese.checked = reviewVariantPoolShowChinese;
+    const query = reviewVariantPoolSearch.trim();
+    const englishQuery = normalizeEnglish(query);
+    const chineseQuery = normalizeChinese(query);
+    const filtered = sentences.filter(item => {
+      if (!query) return true;
+      return Boolean(
+        (englishQuery && normalizeEnglish(item.english).includes(englishQuery))
+        || (chineseQuery && normalizeChinese(item.chinese).includes(chineseQuery))
+      );
+    });
+    const pageCount = Math.max(1, Math.ceil(filtered.length / reviewVariantPoolPageSize));
+    reviewVariantPoolPage = Math.max(1, Math.min(reviewVariantPoolPage, pageCount));
+    const start = (reviewVariantPoolPage - 1) * reviewVariantPoolPageSize;
+    const pageItems = filtered.slice(start, start + reviewVariantPoolPageSize);
+    const currentTaskId = String(baseTask && baseTask.taskId || "");
+    const currentVariantId = String(session && session.variants && currentTaskId && session.variants[currentTaskId] && session.variants[currentTaskId].id || "");
+
+    meta.textContent = filtered.length
+      ? `显示第 ${start + 1}-${Math.min(start + pageItems.length, filtered.length)} 条，共 ${filtered.length} 条`
+      : `没有找到“${query}”`;
+    list.innerHTML = pageItems.length ? pageItems.map(item => {
+      const current = currentVariantId ? item.id === currentVariantId : Boolean(currentTaskId && item.assignedTaskIds.includes(currentTaskId));
+      return `<li class="review-pool-item${current ? " is-current" : ""}" data-pool-sentence-id="${escapeHtml(item.id)}"${current ? ' aria-current="true"' : ""}>
+        <span class="review-pool-sequence">${item.index}</span>
+        <div class="review-pool-copy">
+          <p class="review-pool-english" lang="en">${escapeHtml(item.english)}</p>
+          ${reviewVariantPoolShowChinese ? `<p class="review-pool-chinese">${escapeHtml(item.chinese)}</p>` : ""}
+        </div>
+        ${current ? '<span class="review-pool-current">当前复习</span>' : ""}
+      </li>`;
+    }).join("") : '<li class="review-pool-empty">没有符合条件的句子</li>';
+    pageInfo.textContent = `第 ${reviewVariantPoolPage} / ${pageCount} 页`;
+    previous.disabled = reviewVariantPoolPage <= 1;
+    next.disabled = reviewVariantPoolPage >= pageCount;
+    refreshIcons();
+  }
+
+  function renderCurrentReviewVariantPoolBrowser() {
+    const session = model.sessions && model.sessions[localDate()] ? model.sessions[localDate()] : null;
+    const taskId = String(session && Array.isArray(session.taskIds) && session.taskIds[Number(session.index) || 0] || "");
+    renderReviewVariantPoolBrowser(session, taskId ? taskById.get(taskId) : null);
+  }
+
   function renderReviewVariantPoolStatus(session, baseTask) {
     const card = $("#reviewVariantPoolStatusCard");
     const count = $("#reviewVariantPoolCount");
@@ -5464,6 +5570,7 @@
     if (!pool || !pool.targetCount) {
       card.hidden = true;
       status.textContent = "";
+      renderReviewVariantPoolBrowser(session, baseTask, null);
       return;
     }
     const generated = pool.generatedCount;
@@ -5496,6 +5603,7 @@
       if (detail && !message.includes(detail)) message += ` 当前题：${detail}`;
     }
     status.textContent = message;
+    renderReviewVariantPoolBrowser(session, baseTask, pool);
   }
 
   function renderHome() {
@@ -6243,6 +6351,34 @@
       $("#selfStudyQuestionForm").requestSubmit();
     });
     $$("[data-mode]").forEach(button => button.addEventListener("click", () => setReviewMode(button.dataset.mode)));
+    $("#reviewVariantPoolToggle").addEventListener("click", () => {
+      if (!reviewVariantPoolStatus || !reviewVariantPoolStatus.sentences.length) return;
+      reviewVariantPoolExpanded = !reviewVariantPoolExpanded;
+      renderCurrentReviewVariantPoolBrowser();
+    });
+    $("#reviewVariantPoolSearch").addEventListener("input", event => {
+      reviewVariantPoolSearch = event.target.value;
+      reviewVariantPoolPage = 1;
+      renderCurrentReviewVariantPoolBrowser();
+    });
+    $("#reviewVariantPoolPageSize").addEventListener("change", event => {
+      const requested = Number(event.target.value);
+      reviewVariantPoolPageSize = REVIEW_VARIANT_POOL_PAGE_SIZES.includes(requested) ? requested : REVIEW_VARIANT_POOL_PAGE_SIZES[0];
+      reviewVariantPoolPage = 1;
+      renderCurrentReviewVariantPoolBrowser();
+    });
+    $("#reviewVariantPoolShowChinese").addEventListener("change", event => {
+      reviewVariantPoolShowChinese = event.target.checked;
+      renderCurrentReviewVariantPoolBrowser();
+    });
+    $("#reviewVariantPoolPrevPage").addEventListener("click", () => {
+      reviewVariantPoolPage = Math.max(1, reviewVariantPoolPage - 1);
+      renderCurrentReviewVariantPoolBrowser();
+    });
+    $("#reviewVariantPoolNextPage").addEventListener("click", () => {
+      reviewVariantPoolPage += 1;
+      renderCurrentReviewVariantPoolBrowser();
+    });
     $$("[data-library-type]").forEach(button => button.addEventListener("click", () => { libraryType = button.dataset.libraryType; libraryPage = 1; renderLibrary(); }));
     $("#librarySearch").addEventListener("input", () => { libraryPage = 1; renderLibrary(); });
     $("#dayFilter").addEventListener("change", () => { libraryPage = 1; renderLibrary(); });
@@ -6456,7 +6592,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=58", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=59", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
