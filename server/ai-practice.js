@@ -10,11 +10,15 @@ const { sanitizeFocusedState } = require("./focused-practice");
 const MAX_AI_HISTORY = 1000;
 const MAX_QUESTION_COUNT = 10;
 const MAX_AI_GROUPS = 5;
-const MAX_QUEUED_SETS = MAX_AI_GROUPS - 1;
+const MAX_QUEUED_SETS = 150;
+const MAX_GENERATION_QUEUE = 30;
+const MAX_GENERATION_RECEIPTS = 100;
 const MAX_TUTOR_MESSAGES = 12;
 const MAX_TUTOR_HISTORY = 1000;
 const MAX_TUTOR_RESETS = 1000;
 const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const QUESTION_SET_PHASES = ["answering", "review", "grading", "completed"];
+const QUESTION_SET_VERSION = 1;
 
 function cleanText(value, maximum = 300) {
   return Array.from(String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()).slice(0, maximum).join("");
@@ -152,6 +156,7 @@ function sanitizeQuestion(value) {
   const correct = typeof source.correct === "boolean" ? source.correct : null;
   return {
     id: cleanText(source.id, 80) || `aiq-${crypto.randomUUID()}`,
+    poolVariantId: cleanText(source.poolVariantId, 180),
     direction,
     english,
     chinese,
@@ -175,9 +180,14 @@ function sanitizeQuestionSet(value) {
   const questions = (Array.isArray(value.questions) ? value.questions : []).map(sanitizeQuestion).filter(Boolean).slice(0, MAX_QUESTION_COUNT);
   if (!questions.length) return null;
   const index = Math.min(Math.max(Number(value.index) || 0, 0), questions.length);
+  const completed = Boolean(value.completed || questions.every(question => typeof question.correct === "boolean"));
+  const phase = QUESTION_SET_PHASES.includes(value.phase) ? value.phase : (completed ? "completed" : "answering");
   return {
     id: cleanText(value.id, 80) || `aiset-${crypto.randomUUID()}`,
     batchId: cleanText(value.batchId, 80),
+    generationRequestId: cleanText(value.generationRequestId, 180),
+    questionVersion: Math.max(1, Number(value.questionVersion) || QUESTION_SET_VERSION),
+    requestedCount: [5, 10].includes(Number(value.requestedCount)) ? Number(value.requestedCount) : questions.length,
     groupNumber: Math.min(Math.max(Number(value.groupNumber) || 1, 1), MAX_AI_GROUPS),
     groupCount: Math.min(Math.max(Number(value.groupCount) || 1, 1), MAX_AI_GROUPS),
     createdAt: cleanText(value.createdAt, 40) || new Date().toISOString(),
@@ -187,7 +197,14 @@ function sanitizeQuestionSet(value) {
     reasoningEffort: AI_EFFORTS.includes(value.reasoningEffort) ? value.reasoningEffort : "medium",
     questions,
     index,
-    completed: Boolean(value.completed || index >= questions.length)
+    phase,
+    completed: phase === "completed",
+    gradeRequestId: cleanText(value.gradeRequestId, 180),
+    reviewOpenedAt: cleanText(value.reviewOpenedAt, 40),
+    gradingStartedAt: cleanText(value.gradingStartedAt, 40),
+    completedAt: cleanText(value.completedAt, 40),
+    lastError: cleanText(value.lastError, 300),
+    updatedAt: cleanText(value.updatedAt, 40) || cleanText(value.createdAt, 40) || new Date().toISOString()
   };
 }
 
@@ -197,7 +214,13 @@ function sanitizeQueuedQuestionSet(value) {
   return {
     ...set,
     index: 0,
+    phase: "answering",
     completed: false,
+    gradeRequestId: "",
+    reviewOpenedAt: "",
+    gradingStartedAt: "",
+    completedAt: "",
+    lastError: "",
     questions: set.questions.map(question => ({
       ...question,
       userAnswer: "",
@@ -213,6 +236,90 @@ function sanitizeQueuedQuestionSet(value) {
   };
 }
 
+function publicQuestion(value, completed = false) {
+  const question = sanitizeQuestion(value);
+  if (!question) return null;
+  const prompt = question.direction === "en-zh" ? question.english : question.chinese;
+  return {
+    id: question.id,
+    poolVariantId: question.poolVariantId,
+    direction: question.direction,
+    prompt,
+    userAnswer: question.userAnswer,
+    answeredAt: question.answeredAt,
+    ...(completed ? {
+      focus: question.focus,
+      english: question.english,
+      chinese: question.chinese,
+      referenceAnswer: question.direction === "zh-en" ? question.english : question.chinese,
+      correct: question.correct,
+      score: question.score,
+      gradingStatus: question.gradingStatus,
+      problemWords: question.problemWords,
+      wordResults: question.wordResults,
+      explanation: question.explanation,
+      detailedExplanation: question.detailedExplanation
+    } : {})
+  };
+}
+
+function publicQuestionSet(value) {
+  const set = sanitizeQuestionSet(value);
+  if (!set) return null;
+  const completed = set.phase === "completed";
+  return {
+    id: set.id,
+    batchId: set.batchId,
+    generationRequestId: set.generationRequestId,
+    questionVersion: set.questionVersion,
+    requestedCount: set.requestedCount,
+    groupNumber: set.groupNumber,
+    groupCount: set.groupCount,
+    createdAt: set.createdAt,
+    providerId: set.providerId,
+    providerName: set.providerName,
+    model: set.model,
+    reasoningEffort: set.reasoningEffort,
+    questions: set.questions.map(question => publicQuestion(question, completed)).filter(Boolean),
+    index: set.index,
+    phase: set.phase,
+    completed,
+    gradeRequestId: set.gradeRequestId,
+    reviewOpenedAt: set.reviewOpenedAt,
+    gradingStartedAt: set.gradingStartedAt,
+    completedAt: set.completedAt,
+    lastError: set.lastError,
+    updatedAt: set.updatedAt
+  };
+}
+
+function publicAiPractice(value) {
+  const practice = sanitizeAiPractice(value);
+  return {
+    ...practice,
+    currentSet: publicQuestionSet(practice.currentSet),
+    queuedSets: [],
+    generationQueue: practice.generationQueue.filter(item => item.status !== "consumed").map(item => {
+      const visibleSetIds = item.status === "ready" ? item.setIds : item.plannedSetIds;
+      const groups = visibleSetIds.map((setId, index) => {
+        const set = practice.queuedSets.find(candidate => candidate.id === setId);
+        return {
+          id: setId,
+          groupNumber: set ? set.groupNumber : index + 1,
+          questionCount: set ? set.questions.length : item.count,
+          model: set ? set.model : item.model,
+          reasoningEffort: set ? set.reasoningEffort : item.reasoningEffort,
+          createdAt: set ? set.createdAt : item.createdAt,
+          questionVersion: set ? set.questionVersion : QUESTION_SET_VERSION,
+          status: item.status === "ready" ? "ready" : item.status
+        };
+      });
+      const { setIds, plannedSetIds, ...metadata } = item;
+      return { ...metadata, readyGroups: setIds.length, groups };
+    })
+  };
+}
+
 function sanitizeHistoryItem(value) {
   const source = value && typeof value === "object" ? value : {};
   const id = cleanText(source.id, 180) || `aihistory-${crypto.randomUUID()}`;
@@ -225,6 +332,7 @@ function sanitizeHistoryItem(value) {
   return {
     id,
     setId: cleanText(source.setId, 80) || cleanText(legacySetId, 80),
+    batchId: cleanText(source.batchId, 80),
     setCreatedAt: cleanText(source.setCreatedAt, 40),
     answeredAt: cleanText(source.answeredAt, 40),
     date: cleanText(source.date, 20),
@@ -234,6 +342,7 @@ function sanitizeHistoryItem(value) {
     reasoningEffort: AI_EFFORTS.includes(source.reasoningEffort) ? source.reasoningEffort : "",
     questionNumber,
     questionCount,
+    poolVariantId: cleanText(source.poolVariantId, 180),
     direction,
     prompt: cleanText(source.prompt),
     userAnswer: cleanText(source.userAnswer, 500),
@@ -245,7 +354,31 @@ function sanitizeHistoryItem(value) {
     wordResults: sanitizeWordResults(source.wordResults),
     focus: safeQuestionFocus(english),
     explanation: cleanText(source.explanation, 240),
-    detailedExplanation: cleanText(source.detailedExplanation, 320)
+    detailedExplanation: cleanText(source.detailedExplanation, 320),
+    formalEvidence: source.formalEvidence !== false
+  };
+}
+
+function sanitizeGenerationQueueItem(value) {
+  if (!value || typeof value !== "object") return null;
+  const requestId = cleanText(value.requestId, 180);
+  if (!requestId) return null;
+  return {
+    id: cleanText(value.id, 180) || requestId,
+    requestId,
+    batchId: cleanText(value.batchId, 80),
+    status: ["pending", "ready", "failed", "consumed"].includes(value.status) ? value.status : "pending",
+    createdAt: cleanText(value.createdAt, 40) || new Date().toISOString(),
+    updatedAt: cleanText(value.updatedAt, 40),
+    providerId: cleanText(value.providerId, 64),
+    providerName: cleanText(value.providerName, 60),
+    model: cleanText(value.model, 120),
+    reasoningEffort: AI_EFFORTS.includes(value.reasoningEffort) ? value.reasoningEffort : "medium",
+    count: [5, 10].includes(Number(value.count)) ? Number(value.count) : 5,
+    groupCount: [1, 2, 3, 5].includes(Number(value.groupCount)) ? Number(value.groupCount) : 1,
+    plannedSetIds: sanitizeStringArray(value.plannedSetIds, []).slice(0, MAX_AI_GROUPS),
+    setIds: sanitizeStringArray(value.setIds, []).slice(0, MAX_AI_GROUPS),
+    error: cleanText(value.error, 300)
   };
 }
 
@@ -261,6 +394,30 @@ function sanitizeAiPractice(value) {
     const previous = tutorResetMap.get(key);
     if (!previous || item.resetAt > previous.resetAt) tutorResetMap.set(key, item);
   });
+  const queuedSets = (Array.isArray(source.queuedSets) ? source.queuedSets : []).map(sanitizeQueuedQuestionSet).filter(Boolean).slice(0, MAX_QUEUED_SETS);
+  const parsedGenerationQueue = (Array.isArray(source.generationQueue) ? source.generationQueue : []).map(sanitizeGenerationQueueItem).filter(Boolean);
+  const activeGenerationQueue = parsedGenerationQueue.filter(item => item.status !== "consumed").slice(0, MAX_GENERATION_QUEUE);
+  const activeRequestIds = new Set(activeGenerationQueue.map(item => item.requestId));
+  const retainedConsumedIds = new Set(parsedGenerationQueue
+    .filter(item => item.status === "consumed")
+    .slice(-MAX_GENERATION_RECEIPTS)
+    .map(item => item.requestId));
+  const generationQueue = parsedGenerationQueue.filter(item => activeRequestIds.has(item.requestId) || retainedConsumedIds.has(item.requestId));
+  if (!generationQueue.length && queuedSets.length) {
+    generationQueue.push(sanitizeGenerationQueueItem({
+      requestId: `legacy-queue-${queuedSets[0].batchId || queuedSets[0].id}`,
+      batchId: queuedSets[0].batchId,
+      status: "ready",
+      createdAt: queuedSets[0].createdAt,
+      updatedAt: queuedSets[queuedSets.length - 1].createdAt,
+      model: queuedSets[0].model,
+      reasoningEffort: queuedSets[0].reasoningEffort,
+      count: queuedSets[0].questions.length,
+      groupCount: queuedSets.length,
+      plannedSetIds: queuedSets.map(set => set.id),
+      setIds: queuedSets.map(set => set.id)
+    }));
+  }
   return {
     settings: {
       model: cleanText(settings.model, 120),
@@ -274,7 +431,8 @@ function sanitizeAiPractice(value) {
       reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
     },
     currentSet: sanitizeQuestionSet(source.currentSet),
-    queuedSets: (Array.isArray(source.queuedSets) ? source.queuedSets : []).map(sanitizeQueuedQuestionSet).filter(Boolean).slice(0, MAX_QUEUED_SETS),
+    queuedSets,
+    generationQueue,
     tutor,
     tutorHistory: (savedTutorHistory.length ? savedTutorHistory : legacyTutorHistory(tutor)).slice(-MAX_TUTOR_HISTORY),
     tutorResets: Array.from(tutorResetMap.values()).slice(-MAX_TUTOR_RESETS),
@@ -389,17 +547,21 @@ function buildLearningProfile(content, state, studyDate = "") {
 
 function createQuestionSet(questions, selection, metadata = {}) {
   return sanitizeQuestionSet({
-    id: `aiset-${crypto.randomUUID()}`,
+    id: metadata.id || `aiset-${crypto.randomUUID()}`,
     batchId: metadata.batchId,
+    generationRequestId: metadata.generationRequestId,
+    questionVersion: metadata.questionVersion || QUESTION_SET_VERSION,
+    requestedCount: metadata.requestedCount || questions.length,
     groupNumber: metadata.groupNumber,
     groupCount: metadata.groupCount,
-    createdAt: new Date().toISOString(),
+    createdAt: metadata.createdAt || new Date().toISOString(),
     providerId: selection.providerId,
     providerName: selection.providerName,
     model: selection.model,
     reasoningEffort: selection.reasoningEffort,
     questions: questions.map(question => ({ ...question, id: `aiq-${crypto.randomUUID()}` })),
     index: 0,
+    phase: "answering",
     completed: false
   });
 }
@@ -413,6 +575,8 @@ module.exports = {
   MAX_TUTOR_RESETS,
   buildLearningProfile,
   createQuestionSet,
+  publicAiPractice,
+  publicQuestionSet,
   sanitizeAiPractice,
   sanitizeQuestion,
   sanitizeQuestionSet,

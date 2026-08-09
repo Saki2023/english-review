@@ -624,30 +624,63 @@ test("admin configures AI on the web and progress-based questions use the select
     });
     assert.equal(generated.status, 201);
     const generatedBody = await generated.json();
-    assert.equal(generatedBody.set.questions.length, 5);
-    assert.equal(generatedBody.set.model, "strong-model");
-    assert.equal(generatedBody.set.groupNumber, 1);
-    assert.equal(generatedBody.set.groupCount, 3);
-    assert.equal(generatedBody.queuedSets.length, 2);
-    assert.deepEqual(generatedBody.queuedSets.map(set => set.questions.length), [5, 5]);
-    assert.deepEqual(generatedBody.queuedSets.map(set => set.groupNumber), [2, 3]);
+    const generatedSet = generatedBody.practice.currentSet;
+    assert.equal(generatedSet.questions.length, 5);
+    assert.equal(generatedSet.model, "strong-model");
+    assert.equal(generatedSet.groupNumber, 1);
+    assert.equal(generatedSet.groupCount, 3);
+    assert.deepEqual(generatedBody.practice.queuedSets, []);
+    assert.equal(generatedBody.practice.generationQueue.length, 1);
+    assert.equal(generatedBody.practice.generationQueue[0].readyGroups, 2);
+    assert.doesNotMatch(JSON.stringify(generatedBody.practice.generationQueue), /It is big|一只猫|acceptedChinese|acceptedEnglish/);
     assert.equal(generatedBody.settings.groupCount, 3);
     assert.equal(providerRequests.length, 3);
     const profile = JSON.parse(providerRequests[2].body.messages[1].content);
     assert.equal(profile.recentMistakes[0].correctAnswer, "\u732b");
     assert.equal(providerRequests[2].body.reasoning_effort, "high");
 
-    const firstQuestion = generatedBody.set.questions[0];
-    const questionGrade = await fetch(`${baseUrl}/api/ai/questions/grade`, {
+    const earlyNext = await fetch(`${baseUrl}/api/ai/questions/next`, { method: "POST", headers: { "Content-Type": "application/json", "Cookie": cookie }, body: "{}" });
+    assert.equal(earlyNext.status, 409, "a prepared group must never start before the learner finishes the current group");
+    const stateWithPreparedGroups = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
+    assert.equal(stateWithPreparedGroups.aiPractice.generationQueue[0].readyGroups, 2);
+    const legacySave = await fetch(`${baseUrl}/api/state`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ ...stateWithPreparedGroups, aiPractice: {} })
+    });
+    assert.equal(legacySave.status, 200);
+    assert.equal((await legacySave.json()).aiPractice.generationQueue[0].readyGroups, 2, "an older page must not erase server-prepared groups");
+
+    const answers = ["\u5b83\u975e\u5e38\u5927", "A cat sat on a mat.", "\u6211\u662f\u8428\u59c6", "It is a big pig.", "\u5979\u662f\u4e00\u4e2a\u5988\u5988"];
+    for (let index = 0; index < generatedSet.questions.length; index += 1) {
+      const draft = await fetch(`${baseUrl}/api/ai/questions/batch/draft`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "Cookie": cookie },
+        body: JSON.stringify({ setId: generatedSet.id, questionId: generatedSet.questions[index].id, index, nextIndex: Math.min(index + 1, generatedSet.questions.length - 1), answer: answers[index] })
+      });
+      assert.equal(draft.status, 200);
+    }
+    const reviewResponse = await fetch(`${baseUrl}/api/ai/questions/batch/review`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Cookie": cookie },
-      body: JSON.stringify({ setId: generatedBody.set.id, questionId: firstQuestion.id, answer: "\u5b83\u975e\u5e38\u5927" })
+      body: JSON.stringify({ setId: generatedSet.id })
     });
-    assert.equal(questionGrade.status, 200);
-    const questionResult = await questionGrade.json();
+    assert.equal(reviewResponse.status, 200);
+    const reviewedSet = (await reviewResponse.json()).practice.currentSet;
+    assert.equal(reviewedSet.phase, "review");
+    assert.doesNotMatch(JSON.stringify(reviewedSet), /acceptedChinese|acceptedEnglish|correctAnswer|referenceAnswer/);
+    const groupGrade = await fetch(`${baseUrl}/api/ai/questions/batch/grade`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ setId: generatedSet.id, gradeRequestId: reviewedSet.gradeRequestId })
+    });
+    assert.equal(groupGrade.status, 200);
+    const groupResult = await groupGrade.json();
+    const questionResult = { ...groupResult.practice.currentSet.questions[0], practice: groupResult.practice };
     assert.equal(questionResult.correct, true);
-    assert.equal(questionResult.practice.history.length, 1);
-    assert.equal(questionResult.practice.history[0].setId, generatedBody.set.id);
+    assert.equal(questionResult.practice.currentSet.phase, "completed");
+    assert.equal(questionResult.practice.history.length, 5);
+    assert.equal(questionResult.practice.history[0].setId, generatedSet.id);
     assert.equal(questionResult.practice.history[0].model, "strong-model");
     assert.equal(questionResult.practice.history[0].reasoningEffort, "high");
     assert.equal(questionResult.practice.history[0].questionNumber, 1);
@@ -732,51 +765,7 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(secondReviewTutorBody.exchange.prompt, "It is big.");
     assert.equal(JSON.parse(providerRequests.at(-1).body.messages[1].content).exercise.english, "It is big.");
 
-    const momQuestion = generatedBody.set.questions.find(question => question.english === "She is a mom.");
-    assert.ok(momQuestion);
-    const beforeMomGradeRequests = providerRequests.length;
-    const momGradeResponse = await fetch(`${baseUrl}/api/ai/questions/grade`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Cookie": cookie },
-      body: JSON.stringify({ setId: generatedBody.set.id, questionId: momQuestion.id, answer: "她是一个妈妈" })
-    });
-    assert.equal(momGradeResponse.status, 200);
-    const momGrade = await momGradeResponse.json();
-    assert.equal(momGrade.correct, true);
-    assert.equal(momGrade.score, 1);
-    assert.equal(momGrade.gradingStatus, "correct");
-    assert.equal(momGrade.source, "local");
-    assert.match(momGrade.explanation, /一个.*一位|一位.*一个/);
-    assert.equal(providerRequests.length, beforeMomGradeRequests, "a natural person classifier must not require an upstream AI judgment");
-
-    const earlyNext = await fetch(`${baseUrl}/api/ai/questions/next`, { method: "POST", headers: { "Content-Type": "application/json", "Cookie": cookie }, body: "{}" });
-    assert.equal(earlyNext.status, 409, "a prepared group must never start before the learner finishes the current group");
-
-    const stateWithPreparedGroups = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
-    assert.equal(stateWithPreparedGroups.aiPractice.queuedSets.length, 2);
-    const legacyAiPractice = { ...stateWithPreparedGroups.aiPractice };
-    delete legacyAiPractice.queuedSets;
-    const legacySave = await fetch(`${baseUrl}/api/state`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", "Cookie": cookie },
-      body: JSON.stringify({ ...stateWithPreparedGroups, aiPractice: legacyAiPractice })
-    });
-    assert.equal(legacySave.status, 200);
-    assert.equal((await legacySave.json()).aiPractice.queuedSets.length, 2, "an older page must not erase server-prepared groups");
-
     const preparedAdvanceRequestCount = providerRequests.length;
-    const currentQuestions = stateWithPreparedGroups.aiPractice.currentSet.questions;
-    for (const question of currentQuestions.filter(question => typeof question.correct !== "boolean")) {
-      const localAnswer = question.direction === "zh-en" ? question.english : question.chinese;
-      const completion = await fetch(`${baseUrl}/api/ai/questions/grade`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Cookie": cookie },
-        body: JSON.stringify({ setId: generatedBody.set.id, questionId: question.id, answer: localAnswer })
-      });
-      assert.equal(completion.status, 200);
-    }
-    assert.equal(providerRequests.length, preparedAdvanceRequestCount, "exact answers should complete the group without another upstream request");
-
     const nextPrepared = await fetch(`${baseUrl}/api/ai/questions/next`, { method: "POST", headers: { "Content-Type": "application/json", "Cookie": cookie }, body: "{}" });
     assert.equal(nextPrepared.status, 200);
     const nextPreparedBody = await nextPrepared.json();
@@ -793,7 +782,7 @@ test("admin configures AI on the web and progress-based questions use the select
     const ownerReloginCookie = ownerRelogin.headers.get("set-cookie").split(";")[0];
     const stateAfterRelogin = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": ownerReloginCookie } })).json();
     assert.equal(stateAfterRelogin.aiPractice.currentSet.groupNumber, 2);
-    assert.equal(stateAfterRelogin.aiPractice.queuedSets.length, 1, "prepared groups must survive a fresh login");
+    assert.equal(stateAfterRelogin.aiPractice.generationQueue[0].readyGroups, 1, "prepared groups must survive a fresh login");
 
     const unavailableGeneration = await fetch(`${baseUrl}/api/ai/questions/generate`, {
       method: "POST",

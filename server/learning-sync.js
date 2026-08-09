@@ -8,6 +8,7 @@ const { sanitizeDictationState } = require("./dictation");
 const { sanitizeFocusedState, skillSummaries } = require("./focused-practice");
 const { sanitizePreviewPracticeHistory } = require("./preview-practice");
 const { selfStudyHistory } = require("./self-study");
+const { formalPracticeSummary } = require("./formal-practice");
 const { publicTeachingProfile } = require("./teaching-profile");
 const { DAILY_STUDY_PLAN, normalizeStudyTime, STUDY_TIME_TARGET_SECONDS } = require("../study-time");
 
@@ -346,9 +347,20 @@ function buildLearningSyncProfile(content, state, user) {
   const focusedWeakPoints = focused.sessions.flatMap(session => session.weakPoints);
   const studyTime = normalizeStudyTime(state.studyTime);
   const selfStudy = selfStudyHistory(state.selfStudy);
+  const reviewBatches = formalPracticeSummary(state.formalPractice);
+  const aiCurrentSet = aiPractice.currentSet ? {
+    id: aiPractice.currentSet.id,
+    batchId: aiPractice.currentSet.batchId,
+    phase: aiPractice.currentSet.phase,
+    questionCount: aiPractice.currentSet.questions.length,
+    answeredCount: aiPractice.currentSet.questions.filter(question => question.userAnswer).length,
+    createdAt: aiPractice.currentSet.createdAt,
+    updatedAt: aiPractice.currentSet.updatedAt,
+    completedAt: aiPractice.currentSet.completedAt
+  } : null;
 
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     generatedAt: new Date().toISOString(),
     user: { username: user.username, role: user.role },
     course: {
@@ -385,6 +397,11 @@ function buildLearningSyncProfile(content, state, user) {
       selfStudyUnattempted: selfStudy.summary.unattempted,
       selfStudyPending: selfStudy.summary.pending,
       selfStudyLastStudiedAt: selfStudy.summary.lastStudiedAt,
+      reviewBatchDrafts: reviewBatches.filter(batch => ["answering", "review"].includes(batch.phase)).length,
+      reviewBatchesGrading: reviewBatches.filter(batch => batch.phase === "grading").length,
+      reviewBatchesCompleted: reviewBatches.filter(batch => batch.phase === "completed").length,
+      aiCurrentBatchPhase: aiCurrentSet ? aiCurrentSet.phase : "",
+      aiQueuedGroups: aiPractice.generationQueue.filter(item => item.status !== "consumed").reduce((sum, item) => sum + (item.status === "ready" ? item.setIds.length : item.groupCount), 0),
       exams: examHistory.length,
       examAveragePercentage: examPercentages.length ? Math.round(examPercentages.reduce((sum, value) => sum + value, 0) / examPercentages.length) : null,
       latestExamScore: latestExam ? latestExam.score : null,
@@ -437,6 +454,11 @@ function buildLearningSyncProfile(content, state, user) {
     selfStudyHistory: selfStudy.lessons,
     selfStudyPlannedLessons: selfStudy.plannedLessons,
     selfStudySummary: selfStudy.summary,
+    formalPracticeBatches: {
+      review: reviewBatches,
+      aiCurrent: aiCurrentSet,
+      aiQueue: aiPractice.generationQueue.filter(item => item.status !== "consumed").map(item => ({ requestId: item.requestId, status: item.status, createdAt: item.createdAt, updatedAt: item.updatedAt, model: item.model, reasoningEffort: item.reasoningEffort, count: item.count, groupCount: item.groupCount, readyGroups: item.setIds.length, error: item.error }))
+    },
     examHistory,
     dictationHistory: dictation.sessions,
     dictationWeights: dictation.weights,

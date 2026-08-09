@@ -60,7 +60,7 @@ test("AI practice state keeps a bounded current set, prepared groups, and per-ac
   assert.equal(practice.currentSet.providerName, "NewAPI");
   assert.equal(practice.currentSet.batchId, "batch-a");
   assert.equal(practice.currentSet.groupNumber, 1);
-  assert.equal(practice.queuedSets.length, 4);
+  assert.equal(practice.queuedSets.length, 5);
   assert.equal(practice.queuedSets[0].groupNumber, 2);
   assert.equal(practice.queuedSets[0].index, 0);
   assert.equal(practice.queuedSets[0].completed, false);

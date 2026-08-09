@@ -5,9 +5,10 @@ const vm = require("vm");
 const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
-const { NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults } = require("./answer-utils");
+const { NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults, mistakeIsResolved } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
-const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
+const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, publicAiPractice, publicQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
+const { createReviewBatch, publicFormalPractice, publicReviewBatch, sanitizeFormalPractice, sanitizeReviewBatch } = require("./server/formal-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
 const { buildLearningSyncProfile } = require("./server/learning-sync");
 const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./server/learning-sync-token");
@@ -104,6 +105,7 @@ const SESSION_MAX_AGE = 30 * 24 * 60 * 60;
 const MAX_BODY = 2 * 1024 * 1024;
 const MAX_AI_ANSWER_LENGTH = 500;
 const MAX_AI_TUTOR_MESSAGE_LENGTH = 500;
+const MAX_SENTENCE_PRACTICE_EVENTS = 10000;
 const EXAM_GENERATION_TIMEOUT_MS = 120000;
 const EXAM_GENERATION_API_VERSION = "2";
 const AI_SENTENCE_RETRY_MS = 5 * 60 * 1000;
@@ -129,6 +131,7 @@ const reviewVariantJobIdsByKey = new Map();
 const reviewVariantPoolJobsByUserId = new Map();
 const reviewVariantPoolRetryTimersByUserId = new Map();
 const selfStudyLocksByUserId = new Map();
+const formalPracticeLocksByUserId = new Map();
 const legacyState = repairLearningEvidence(content, sanitizeState(readJson(LEGACY_STATE_FILE, {}))).state;
 repairStoredUserStates();
 
@@ -250,6 +253,34 @@ function refreshContent() {
   }
 }
 
+function sanitizeSentencePracticeEvent(value) {
+  if (!value || typeof value !== "object") return null;
+  const id = String(value.id || "").trim().slice(0, 180);
+  const variantId = String(value.variantId || "").trim().slice(0, 180);
+  const date = validStudyDate(value.date);
+  if (!id || !variantId || !date || typeof value.correct !== "boolean") return null;
+  return {
+    id,
+    variantId,
+    date,
+    practicedAt: String(value.practicedAt || value.submittedAt || value.answeredAt || date).trim().slice(0, 40),
+    correct: value.correct === true,
+    source: value.source === "ai" ? "ai" : "review"
+  };
+}
+
+function sanitizeSentencePracticeEvents(value) {
+  const unique = new Map();
+  (Array.isArray(value) ? value : []).map(sanitizeSentencePracticeEvent).filter(Boolean).forEach(event => unique.set(event.id, event));
+  return Array.from(unique.values()).slice(-MAX_SENTENCE_PRACTICE_EVENTS);
+}
+
+function appendSentencePracticeEvents(state, values) {
+  const unique = new Map(sanitizeSentencePracticeEvents(state.sentencePracticeEvents).map(event => [event.id, event]));
+  (Array.isArray(values) ? values : []).map(sanitizeSentencePracticeEvent).filter(Boolean).forEach(event => unique.set(event.id, event));
+  state.sentencePracticeEvents = Array.from(unique.values()).slice(-MAX_SENTENCE_PRACTICE_EVENTS);
+}
+
 function sanitizeState(value) {
   const source = value && typeof value === "object" ? value : {};
   return {
@@ -260,6 +291,7 @@ function sanitizeState(value) {
     attempts: Array.isArray(source.attempts) ? source.attempts.slice(-120) : [],
     sessions: source.sessions && typeof source.sessions === "object" ? source.sessions : {},
     mistakes: Array.isArray(source.mistakes) ? source.mistakes.slice(-80) : [],
+    sentencePracticeEvents: sanitizeSentencePracticeEvents(source.sentencePracticeEvents),
     studyTime: normalizeStudyTime(source.studyTime),
     previewPractice: sanitizePreviewPractice(source.previewPractice, content),
     previewPracticeHistory: sanitizePreviewPracticeHistory(source.previewPracticeHistory, content),
@@ -269,13 +301,14 @@ function sanitizeState(value) {
     focusedPractice: sanitizeFocusedState(source.focusedPractice),
     teachingProfile: sanitizeTeachingProfile(source.teachingProfile),
     reviewVariantPool: sanitizeReviewVariantPool(source.reviewVariantPool),
-    selfStudy: sanitizeSelfStudyState(source.selfStudy)
+    selfStudy: sanitizeSelfStudyState(source.selfStudy),
+    formalPractice: sanitizeFormalPractice(source.formalPractice)
   };
 }
 
 function publicReviewState(value) {
-  const { aiExam, dictation, focusedPractice, teachingProfile, reviewVariantPool, selfStudy, ...reviewState } = sanitizeState(value);
-  return { ...reviewState, reviewVariantPool: publicReviewVariantPool(reviewVariantPool) };
+  const { aiExam, dictation, focusedPractice, teachingProfile, reviewVariantPool, selfStudy, formalPractice, aiPractice, sentencePracticeEvents, ...reviewState } = sanitizeState(value);
+  return { ...reviewState, aiPractice: publicAiPractice(aiPractice), formalPractice: publicFormalPractice(formalPractice), reviewVariantPool: publicReviewVariantPool(reviewVariantPool) };
 }
 
 function defaultState() { return repairLearningEvidence(content, sanitizeState({})).state; }
@@ -284,6 +317,7 @@ function isEmptyState(value) {
   return !value || (!Object.keys(value.taskStates || {}).length
     && !Object.keys(value.history || {}).length
     && !value.attempts?.length
+    && !value.sentencePracticeEvents?.length
     && !value.mistakes?.length
     && !Object.keys(studyTime.daily).length);
 }
@@ -314,10 +348,45 @@ function advanceAiRotation(config, mode) {
   aiSettings = aiSettingsStore.advanceRotation(config.providerId) || aiSettings;
 }
 
+function recoverInterruptedFormalWork(state) {
+  const now = new Date().toISOString();
+  let changed = false;
+  const formalPractice = sanitizeFormalPractice(state.formalPractice);
+  if (formalPractice.review.current && formalPractice.review.current.phase === "grading") {
+    formalPractice.review.current.phase = "review";
+    formalPractice.review.current.lastError = "服务重启中断了上次批改，整组答案已保留，请重新点击确认并批改。";
+    formalPractice.review.current.updatedAt = now;
+    formalPractice.updatedAt = now;
+    changed = true;
+  }
+  state.formalPractice = formalPractice;
+
+  const aiPractice = sanitizeAiPractice(state.aiPractice);
+  if (aiPractice.currentSet && aiPractice.currentSet.phase === "grading") {
+    aiPractice.currentSet.phase = "review";
+    aiPractice.currentSet.lastError = "服务重启中断了上次批改，整组答案已保留，请重新点击确认并批改。";
+    aiPractice.currentSet.updatedAt = now;
+    aiPractice.updatedAt = now;
+    changed = true;
+  }
+  aiPractice.generationQueue.forEach(item => {
+    if (item.status !== "pending") return;
+    item.status = "failed";
+    item.error = "服务重启中断了本次生成，请在原位置重试。";
+    item.updatedAt = now;
+    aiPractice.updatedAt = now;
+    changed = true;
+  });
+  state.aiPractice = aiPractice;
+  return changed;
+}
+
 function repairStoredUserStates() {
   let changed = false;
   Object.entries(userStates.users).forEach(([userId, value]) => {
-    const repaired = repairLearningEvidence(content, sanitizeState(value));
+    const normalized = sanitizeState(value);
+    const interrupted = recoverInterruptedFormalWork(normalized);
+    const repaired = repairLearningEvidence(content, normalized);
     const ensuredPool = ensureReviewVariantPool(repaired.state.reviewVariantPool, {
       date: today(),
       syncKey: reviewVariantSyncKey(content),
@@ -326,7 +395,7 @@ function repairStoredUserStates() {
     });
     repaired.state.reviewVariantPool = ensuredPool.pool;
     userStates.users[userId] = repaired.state;
-    if (repaired.changed || ensuredPool.changed || JSON.stringify(repaired.state) !== JSON.stringify(value)) changed = true;
+    if (interrupted || repaired.changed || ensuredPool.changed || JSON.stringify(repaired.state) !== JSON.stringify(value)) changed = true;
   });
   if (changed) persistUserStates();
 }
@@ -667,16 +736,23 @@ function handleContent(req, res, url, user) {
 function handleState(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method === "GET") return sendJson(res, 200, publicReviewState(getUserState(user)));
-  if (req.method === "PUT") return readBody(req).then(body => {
+  if (req.method === "PUT") return readBody(req).then(body => withFormalPracticeLock(user.id, async () => {
     const existing = getUserState(user);
-    const incomingAiPractice = body.aiPractice && typeof body.aiPractice === "object" ? body.aiPractice : {};
-    const aiPractice = Object.hasOwn(incomingAiPractice, "queuedSets")
-      ? incomingAiPractice
-      : { ...incomingAiPractice, queuedSets: sanitizeAiPractice(existing.aiPractice).queuedSets };
-    userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({ ...body, aiPractice, aiExam: existing.aiExam, dictation: existing.dictation, focusedPractice: existing.focusedPractice, teachingProfile: existing.teachingProfile, reviewVariantPool: existing.reviewVariantPool, selfStudy: existing.selfStudy })).state;
+    userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({
+      ...body,
+      aiPractice: existing.aiPractice,
+      formalPractice: existing.formalPractice,
+      sentencePracticeEvents: existing.sentencePracticeEvents,
+      aiExam: existing.aiExam,
+      dictation: existing.dictation,
+      focusedPractice: existing.focusedPractice,
+      teachingProfile: existing.teachingProfile,
+      reviewVariantPool: existing.reviewVariantPool,
+      selfStudy: existing.selfStudy
+    })).state;
     persistUserStates();
     sendJson(res, 200, publicReviewState(userStates.users[user.id]));
-  }).catch(error => sendError(res, error.statusCode || 400, error.message));
+  })).catch(error => sendError(res, error.statusCode || 400, error.message));
   return sendError(res, 404, "state endpoint not found");
 }
 
@@ -714,6 +790,15 @@ function withSelfStudyLock(userId, operation) {
   selfStudyLocksByUserId.set(userId, current);
   return current.finally(() => {
     if (selfStudyLocksByUserId.get(userId) === current) selfStudyLocksByUserId.delete(userId);
+  });
+}
+
+function withFormalPracticeLock(userId, operation) {
+  const previous = formalPracticeLocksByUserId.get(userId) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  formalPracticeLocksByUserId.set(userId, current);
+  return current.finally(() => {
+    if (formalPracticeLocksByUserId.get(userId) === current) formalPracticeLocksByUserId.delete(userId);
   });
 }
 
@@ -1262,6 +1347,97 @@ function handleAbilities(req, res, user) {
   if (req.method !== "GET") return sendError(res, 404, "ability endpoint not found");
   refreshContent();
   return sendJson(res, 200, analyzeAbilities(content, getUserState(user)));
+}
+
+function validStudyDate(value) {
+  const date = String(value || "").trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) return "";
+  const parsed = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  return parsed.getUTCFullYear() === Number(match[1])
+    && parsed.getUTCMonth() === Number(match[2]) - 1
+    && parsed.getUTCDate() === Number(match[3]) ? date : "";
+}
+
+function handleReviewSentenceStats(req, res, url, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "GET") return sendError(res, 404, "sentence statistics endpoint not found");
+  const state = getUserState(user);
+  const pool = sanitizeReviewVariantPool(state.reviewVariantPool);
+  const requestedFrom = String(url.searchParams.get("from") || "").trim();
+  const requestedTo = String(url.searchParams.get("to") || "").trim();
+  const from = validStudyDate(requestedFrom);
+  const to = validStudyDate(requestedTo);
+  if (requestedFrom && !from) return sendError(res, 400, "开始日期格式不正确");
+  if (requestedTo && !to) return sendError(res, 400, "结束日期格式不正确");
+  if (from && to && from > to) return sendError(res, 400, "开始日期不能晚于结束日期");
+  const sort = ["index", "attempts", "correct", "wrong", "accuracy", "recent"].includes(url.searchParams.get("sort")) ? url.searchParams.get("sort") : "index";
+  const order = url.searchParams.get("order") === "desc" ? "desc" : "asc";
+  const entries = new Map(pool.variants.map((variant, index) => [variant.id, {
+    id: variant.id,
+    index: index + 1,
+    attempts: 0,
+    correct: 0,
+    wrong: 0,
+    accuracy: null,
+    lastPracticedAt: ""
+  }]));
+  const includeDate = date => (!from || date >= from) && (!to || date <= to);
+  const add = (id, date, practicedAt, correct) => {
+    const entry = entries.get(String(id || ""));
+    if (!entry || !includeDate(String(date || ""))) return;
+    entry.attempts += 1;
+    if (correct) entry.correct += 1;
+    else entry.wrong += 1;
+    if (String(practicedAt || "") > entry.lastPracticedAt) entry.lastPracticedAt = String(practicedAt || "");
+  };
+  const events = new Map(sanitizeSentencePracticeEvents(state.sentencePracticeEvents).map(event => [event.id, event]));
+  (Array.isArray(state.attempts) ? state.attempts : []).forEach(attempt => {
+    if (attempt && attempt.formalEvidence === false) return;
+    const event = sanitizeSentencePracticeEvent({
+      id: attempt && attempt.id,
+      variantId: attempt && attempt.variantId,
+      date: attempt && attempt.date,
+      practicedAt: attempt && (attempt.submittedAt || attempt.date),
+      correct: attempt && attempt.correct === true && attempt.gradingStatus !== "partial" && Number(attempt.score) >= 1,
+      source: "review"
+    });
+    if (event && !events.has(event.id)) events.set(event.id, event);
+  });
+  sanitizeAiPractice(state.aiPractice).history.forEach(item => {
+    if (item.formalEvidence === false) return;
+    const event = sanitizeSentencePracticeEvent({
+      id: item.id,
+      variantId: item.poolVariantId,
+      date: item.date,
+      practicedAt: item.answeredAt || item.date,
+      correct: item.correct === true && item.gradingStatus !== "partial" && Number(item.score) >= 1,
+      source: "ai"
+    });
+    if (event && !events.has(event.id)) events.set(event.id, event);
+  });
+  events.forEach(event => add(event.variantId, event.date, event.practicedAt, event.correct));
+  const rows = Array.from(entries.values()).map(entry => ({
+    ...entry,
+    accuracy: entry.attempts ? Math.round(entry.correct / entry.attempts * 100) : null
+  }));
+  const numeric = entry => sort === "recent" ? 0 : (sort === "index" ? entry.index : (sort === "accuracy" ? (entry.accuracy === null ? -1 : entry.accuracy) : Number(entry[sort]) || 0));
+  rows.sort((left, right) => {
+    let compared = sort === "recent"
+      ? left.lastPracticedAt.localeCompare(right.lastPracticedAt)
+      : numeric(left) - numeric(right);
+    if (order === "desc") compared *= -1;
+    return compared || left.index - right.index;
+  });
+  return sendJson(res, 200, {
+    syncKey: pool.syncKey,
+    from,
+    to,
+    sort,
+    order,
+    generatedAt: new Date().toISOString(),
+    stats: rows
+  });
 }
 
 function findSentenceTask(taskId, variantId = "", suppliedVariant = null) {
@@ -2329,6 +2505,330 @@ function completeTranslationGrade(direction, english, answer, result, referenceA
   };
 }
 
+function addStudyDays(date, days) {
+  const parsed = new Date(`${String(date || today())}T12:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + Number(days || 0));
+  return parsed.toISOString().slice(0, 10);
+}
+
+function reviewQuestionSnapshot(user, taskId, variantId = "") {
+  const task = findReviewTutorTask(user, taskId, variantId);
+  if (!task) throw Object.assign(new Error("review question not found or is not eligible"), { statusCode: 404 });
+  const item = task.item;
+  return {
+    id: `reviewq-${crypto.randomUUID()}`,
+    taskId: task.taskId,
+    variantId: task.variant ? String(task.variant.id || "") : "",
+    direction: task.direction,
+    itemType: Object.hasOwn(item, "phonetic") ? "word" : "sentence",
+    day: Number(item.day) || 0,
+    phonetic: String(item.phonetic || ""),
+    english: item.english,
+    chinese: item.chinese,
+    acceptedEnglish: item.acceptedEnglish || [item.english],
+    acceptedChinese: item.acceptedChinese || [item.chinese],
+    reviewVariant: task.variant ? { ...task.variant } : null,
+    answer: ""
+  };
+}
+
+function saveFormalPracticeState(user, state, practice) {
+  state.formalPractice = sanitizeFormalPractice(practice);
+  userStates.users[user.id] = sanitizeState(state);
+  persistUserStates();
+  return userStates.users[user.id].formalPractice;
+}
+
+function reviewBatchResponse(state) {
+  return { batch: publicReviewBatch(state.formalPractice && state.formalPractice.review && state.formalPractice.review.current) };
+}
+
+async function gradeFormalQuestion(question, answer, route = null) {
+  const acceptedAnswers = question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese;
+  const local = localTranslationGrade(question.direction, question.english, answer, acceptedAnswers);
+  if (local) return local;
+  if (question.itemType === "word") {
+    const explanation = "答案与本题登记的词义或拼写不一致。";
+    return completeTranslationGrade(question.direction, question.english, answer, {
+      correct: false,
+      score: 0,
+      gradingStatus: "incorrect",
+      explanation,
+      problemWords: [question.english],
+      source: "local"
+    }, question.direction === "zh-en" ? question.english : question.chinese);
+  }
+  if (!route) throw Object.assign(new Error("AI grading is not configured"), { statusCode: 503 });
+  const sourceText = question.direction === "zh-en" ? question.chinese : question.english;
+  const routed = await runAiRoute(route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: question.direction, sourceText }));
+  return { ...completeTranslationGrade(question.direction, question.english, answer, routed.value, question.direction === "zh-en" ? question.english : question.chinese), source: "ai" };
+}
+
+async function gradeReviewBatchQuestions(user, batch) {
+  const localResults = batch.questions.map(question => localTranslationGrade(
+    question.direction,
+    question.english,
+    question.answer,
+    question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese
+  ));
+  const needsAi = batch.questions.some((question, index) => !localResults[index] && question.itemType === "sentence");
+  let route = null;
+  if (needsAi) {
+    if (!aiConfigured()) throw Object.assign(new Error("AI 批改暂不可用，整组答案已保留，请稍后重试"), { statusCode: 503 });
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) throw Object.assign(new Error("AI 请求过于频繁，整组答案已保留，请稍后重试"), { statusCode: 429, retryAfterSeconds: rate.retryAfterSeconds });
+    route = selectAiCandidates(aiSettings, { model: batch.model, reasoningEffort: batch.reasoningEffort });
+  }
+  const results = [];
+  for (let index = 0; index < batch.questions.length; index += 1) {
+    results.push(localResults[index] || await gradeFormalQuestion(batch.questions[index], batch.questions[index].answer, route));
+  }
+  return results;
+}
+
+function updateFormalSchedule(state, question, result, studyDate) {
+  const previous = state.taskStates[question.taskId] && typeof state.taskStates[question.taskId] === "object" ? state.taskStates[question.taskId] : {};
+  const next = { ...previous };
+  next.lastReviewed = studyDate;
+  next.reviewCount = (Number(previous.reviewCount) || 0) + 1;
+  next.lastResult = result.correct === true;
+  next.lastScore = result.score;
+  next.gradingStatus = result.gradingStatus;
+  if (result.gradingStatus === "partial") {
+    next.level = Math.max(1, Number(previous.level) || 0);
+    next.nextDue = addStudyDays(studyDate, 1);
+  } else if (result.correct) {
+    const intervals = [1, 3, 7, 14, 30, 60];
+    next.level = Math.min((Number(previous.level) || 0) + 1, intervals.length);
+    next.nextDue = addStudyDays(studyDate, intervals[Math.max(0, next.level - 1)]);
+  } else {
+    next.level = 0;
+    next.nextDue = addStudyDays(studyDate, 1);
+  }
+  state.taskStates[question.taskId] = next;
+}
+
+function applyCompletedReviewBatch(user, expectedBatch, results) {
+  const latest = getUserState(user);
+  const practice = sanitizeFormalPractice(latest.formalPractice);
+  const current = practice.review.current;
+  if (!current || current.id !== expectedBatch.id) throw Object.assign(new Error("review batch changed while grading"), { statusCode: 409 });
+  if (current.phase === "completed") return latest;
+  if (current.gradeRequestId !== expectedBatch.gradeRequestId) throw Object.assign(new Error("review grading request changed"), { statusCode: 409 });
+
+  const next = sanitizeState(JSON.parse(JSON.stringify(latest)));
+  const nextPractice = sanitizeFormalPractice(next.formalPractice);
+  const batch = nextPractice.review.current;
+  const studyDate = batch.date || today();
+  const completedAt = new Date().toISOString();
+  const newAttempts = [];
+  const newMistakes = [];
+  batch.questions.forEach((question, index) => {
+    const result = results[index];
+    question.result = result;
+    updateFormalSchedule(next, question, result, studyDate);
+    const attemptId = `${batch.id}:${question.id}`;
+    const prompt = question.direction === "en-zh" ? question.english : question.chinese;
+    const expected = question.direction === "zh-en" ? question.english : question.chinese;
+    const attempt = {
+      id: attemptId,
+      batchId: batch.id,
+      taskId: question.taskId,
+      variantId: question.variantId,
+      reviewVariant: question.reviewVariant,
+      date: studyDate,
+      submittedAt: completedAt,
+      direction: question.direction,
+      prompt,
+      english: question.english,
+      chinese: question.chinese,
+      answer: question.answer,
+      correct: result.correct,
+      score: result.score,
+      gradingStatus: result.gradingStatus,
+      expected,
+      gradingSource: result.source,
+      explanation: result.explanation,
+      detailedExplanation: result.detailedExplanation,
+      problemWords: result.problemWords,
+      wordResults: result.wordResults,
+      formalEvidence: true
+    };
+    newAttempts.push(attempt);
+    if (result.gradingStatus !== "correct") newMistakes.push({
+      id: `mistake-${attemptId}`,
+      attemptId,
+      batchId: batch.id,
+      taskId: question.taskId,
+      variantId: question.variantId,
+      reviewVariant: question.reviewVariant,
+      date: studyDate,
+      direction: question.direction,
+      day: question.day,
+      prompt,
+      userAnswer: question.answer,
+      correctAnswer: expected,
+      note: result.detailedExplanation || result.explanation || "本次复习未完全答对。"
+    });
+  });
+  const existingAttemptIds = new Set(next.attempts.map(item => String(item && item.id || "")));
+  next.attempts = [...next.attempts, ...newAttempts.filter(item => !existingAttemptIds.has(item.id))].slice(-120);
+  appendSentencePracticeEvents(next, newAttempts.filter(item => item.variantId).map(item => ({
+    id: item.id,
+    variantId: item.variantId,
+    date: item.date,
+    practicedAt: item.submittedAt,
+    correct: item.correct === true && item.gradingStatus !== "partial" && Number(item.score) >= 1,
+    source: "review"
+  })));
+  const history = next.history[studyDate] && typeof next.history[studyDate] === "object" ? next.history[studyDate] : { reviewed: 0, correct: 0 };
+  history.reviewed = (Number(history.reviewed) || 0) + newAttempts.length;
+  history.correct = Math.round(((Number(history.correct) || 0) + results.reduce((sum, result) => sum + result.score, 0)) * 100) / 100;
+  next.history[studyDate] = history;
+  const newMistakeIds = new Set(newMistakes.map(item => item.id));
+  next.mistakes = [...next.mistakes.filter(item => !newMistakeIds.has(item.id)), ...newMistakes]
+    .filter(item => !mistakeIsResolved(next.attempts, item && item.taskId)).slice(-80);
+  const session = next.sessions[studyDate];
+  if (session && Array.isArray(session.taskIds)) {
+    session.doneTaskIds = Array.from(new Set([...(session.doneTaskIds || []), ...batch.questions.map(question => question.taskId)]));
+    session.index = session.taskIds.length;
+    session.currentTaskId = null;
+    session.batchComplete = true;
+    session.updatedAt = completedAt;
+  }
+  batch.phase = "completed";
+  batch.index = Math.max(0, batch.questions.length - 1);
+  batch.completedAt = completedAt;
+  batch.updatedAt = completedAt;
+  batch.lastError = "";
+  nextPractice.updatedAt = completedAt;
+  next.formalPractice = nextPractice;
+  userStates.users[user.id] = sanitizeState(next);
+  persistUserStates();
+  return userStates.users[user.id];
+}
+
+function handleReviewBatches(req, res, url, user) {
+  if (!user) return sendError(res, 401, "login required");
+  const suffix = url.pathname.slice("/api/review/batches".length) || "/";
+  if (req.method === "GET" && suffix === "/") return sendJson(res, 200, reviewBatchResponse(getUserState(user)));
+  return readBody(req).then(body => withFormalPracticeLock(user.id, async () => {
+    const state = getUserState(user);
+    const practice = sanitizeFormalPractice(state.formalPractice);
+    const now = new Date().toISOString();
+    if (suffix === "/start" && req.method === "POST") {
+      const requestedId = String(body.batchId || "").trim().slice(0, 180) || `reviewbatch-${crypto.randomUUID()}`;
+      const current = practice.review.current;
+      if (current && current.id === requestedId) return sendJson(res, 200, { batch: publicReviewBatch(current), reused: true });
+      if (current && current.phase !== "completed") return sendJson(res, 409, { error: "已有未完成的今日复习题组", batch: publicReviewBatch(current) });
+      const taskIds = Array.from(new Set((Array.isArray(body.taskIds) ? body.taskIds : []).map(item => String(item || "").trim()).filter(Boolean))).slice(0, 100);
+      if (!taskIds.length) return sendError(res, 400, "review task IDs are required");
+      refreshContent();
+      const variantIds = body.variantIds && typeof body.variantIds === "object" ? body.variantIds : {};
+      const questions = taskIds.map(taskId => reviewQuestionSnapshot(user, taskId, variantIds[taskId]));
+      const batch = createReviewBatch(questions, {
+        id: requestedId,
+        date: String(body.date || today()),
+        mode: body.mode,
+        model: body.model,
+        reasoningEffort: body.reasoningEffort
+      });
+      if (current && current.phase === "completed") practice.review.history = [...practice.review.history, current].slice(-40);
+      practice.review.current = batch;
+      practice.updatedAt = now;
+      saveFormalPracticeState(user, state, practice);
+      return sendJson(res, 201, { batch: publicReviewBatch(batch), reused: false });
+    }
+    const batch = practice.review.current;
+    if (!batch || batch.id !== String(body.batchId || "")) return sendError(res, 404, "review batch not found");
+    if (suffix === "/draft" && req.method === "PUT") {
+      if (batch.phase !== "answering") return sendJson(res, 409, { error: "当前题组不在作答阶段", batch: publicReviewBatch(batch) });
+      const index = Math.min(Math.max(Number(body.index) || 0, 0), batch.questions.length - 1);
+      const question = batch.questions[index];
+      if (body.questionId && String(body.questionId) !== question.id) return sendError(res, 409, "review question changed");
+      question.answer = String(body.answer || "").trim().slice(0, MAX_AI_ANSWER_LENGTH);
+      question.draftUpdatedAt = now;
+      batch.index = Object.hasOwn(body, "nextIndex")
+        ? Math.min(Math.max(Number(body.nextIndex) || 0, 0), batch.questions.length - 1)
+        : index;
+      batch.updatedAt = now;
+      batch.lastError = "";
+      practice.updatedAt = now;
+      saveFormalPracticeState(user, state, practice);
+      return sendJson(res, 200, { batch: publicReviewBatch(batch) });
+    }
+    if (suffix === "/edit" && req.method === "POST") {
+      if (batch.phase === "completed") return sendJson(res, 409, { error: "题组已经完成批改", batch: publicReviewBatch(batch) });
+      batch.phase = "answering";
+      batch.index = Math.min(Math.max(Number(body.index) || 0, 0), batch.questions.length - 1);
+      batch.updatedAt = now;
+      batch.lastError = "";
+      practice.updatedAt = now;
+      saveFormalPracticeState(user, state, practice);
+      return sendJson(res, 200, { batch: publicReviewBatch(batch) });
+    }
+    if (suffix === "/review" && req.method === "POST") {
+      if (batch.phase === "completed") return sendJson(res, 200, { batch: publicReviewBatch(batch), reused: true });
+      const missingIndex = batch.questions.findIndex(question => !question.answer.trim());
+      if (missingIndex >= 0) {
+        batch.phase = "answering";
+        batch.index = missingIndex;
+        batch.updatedAt = now;
+        practice.updatedAt = now;
+        saveFormalPracticeState(user, state, practice);
+        return sendJson(res, 409, { error: `第 ${missingIndex + 1} 题还没有作答`, missingIndex, batch: publicReviewBatch(batch) });
+      }
+      batch.phase = "review";
+      batch.reviewOpenedAt = batch.reviewOpenedAt || now;
+      batch.gradeRequestId = batch.gradeRequestId || `reviewgrade-${crypto.randomUUID()}`;
+      batch.updatedAt = now;
+      batch.lastError = "";
+      practice.updatedAt = now;
+      saveFormalPracticeState(user, state, practice);
+      return sendJson(res, 200, { batch: publicReviewBatch(batch) });
+    }
+    if (suffix === "/grade" && req.method === "POST") {
+      if (batch.phase === "completed") return sendJson(res, 200, { batch: publicReviewBatch(batch), reused: true, state: publicReviewState(state) });
+      if (!["review", "grading"].includes(batch.phase)) return sendJson(res, 409, { error: "请先核对整组答案", batch: publicReviewBatch(batch) });
+      const requestId = String(body.gradeRequestId || batch.gradeRequestId || "").trim();
+      if (!requestId || (batch.gradeRequestId && batch.gradeRequestId !== requestId)) return sendJson(res, 409, { error: "批改请求标识不一致", batch: publicReviewBatch(batch) });
+      batch.phase = "grading";
+      batch.gradeRequestId = requestId;
+      batch.gradingStartedAt = batch.gradingStartedAt || now;
+      batch.updatedAt = now;
+      batch.lastError = "";
+      practice.updatedAt = now;
+      saveFormalPracticeState(user, state, practice);
+      try {
+        const results = await gradeReviewBatchQuestions(user, batch);
+        const saved = applyCompletedReviewBatch(user, batch, results);
+        return sendJson(res, 200, { batch: publicReviewBatch(saved.formalPractice.review.current), reused: false, state: publicReviewState(saved) });
+      } catch (error) {
+        const latest = getUserState(user);
+        const failedPractice = sanitizeFormalPractice(latest.formalPractice);
+        if (failedPractice.review.current && failedPractice.review.current.id === batch.id && failedPractice.review.current.phase !== "completed") {
+          failedPractice.review.current.phase = "review";
+          failedPractice.review.current.lastError = String(error && error.message || "AI 批改暂不可用，整组答案已保留，请稍后重试").slice(0, 300);
+          failedPractice.review.current.updatedAt = new Date().toISOString();
+          failedPractice.updatedAt = failedPractice.review.current.updatedAt;
+          saveFormalPracticeState(user, latest, failedPractice);
+        }
+        const status = error && [400, 404, 409, 429, 503].includes(error.statusCode) ? error.statusCode : 503;
+        return sendJson(res, status, { error: String(error && error.message || "AI 批改暂不可用，整组答案已保留，请稍后重试"), batch: publicReviewBatch(failedPractice.review.current) }, error && error.retryAfterSeconds ? { "Retry-After": String(error.retryAfterSeconds) } : {});
+      }
+    }
+    if (suffix === "/archive" && req.method === "POST") {
+      if (batch.phase !== "completed") return sendJson(res, 409, { error: "题组尚未完成", batch: publicReviewBatch(batch) });
+      practice.review.history = [...practice.review.history, batch].filter((item, index, items) => items.findIndex(candidate => candidate.id === item.id) === index).slice(-40);
+      practice.review.current = null;
+      practice.updatedAt = now;
+      saveFormalPracticeState(user, state, practice);
+      return sendJson(res, 200, { batch: null });
+    }
+    return sendError(res, 404, "review batch endpoint not found");
+  })).catch(error => sendError(res, error.statusCode || 400, error.message));
+}
+
 function saveAiQuestionResult(state, setId, questionId, answer, result) {
   const practice = sanitizeAiPractice(state.aiPractice);
   const set = practice.currentSet;
@@ -2389,6 +2889,212 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
   return question;
 }
 
+async function gradeAiQuestionSet(user, set) {
+  const localResults = set.questions.map(question => localTranslationGrade(
+    question.direction,
+    question.english,
+    question.userAnswer,
+    question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese
+  ));
+  const needsAi = localResults.some(result => !result);
+  let route = null;
+  if (needsAi) {
+    if (!aiConfigured()) throw Object.assign(new Error("AI 批改暂不可用，整组答案已保留，请稍后重试"), { statusCode: 503 });
+    const rate = takeAiRequest(user.id);
+    if (!rate.allowed) throw Object.assign(new Error("AI 请求过于频繁，整组答案已保留，请稍后重试"), { statusCode: 429, retryAfterSeconds: rate.retryAfterSeconds });
+    route = selectAiCandidates(aiSettings, { model: set.model, reasoningEffort: set.reasoningEffort });
+  }
+  const results = [];
+  for (let index = 0; index < set.questions.length; index += 1) {
+    const question = set.questions[index];
+    results.push(localResults[index] || await gradeFormalQuestion({ ...question, itemType: "sentence" }, question.userAnswer, route));
+  }
+  return results;
+}
+
+function applyCompletedAiQuestionSet(user, expectedSet, results) {
+  const latest = getUserState(user);
+  const practice = sanitizeAiPractice(latest.aiPractice);
+  const set = practice.currentSet;
+  if (!set || set.id !== expectedSet.id) throw Object.assign(new Error("AI question set changed while grading"), { statusCode: 409 });
+  if (set.phase === "completed") return latest;
+  if (set.gradeRequestId !== expectedSet.gradeRequestId) throw Object.assign(new Error("AI grading request changed"), { statusCode: 409 });
+  const completedAt = new Date().toISOString();
+  const nextHistory = [];
+  set.questions.forEach((question, index) => {
+    const result = results[index];
+    const correctAnswer = question.direction === "zh-en" ? question.english : question.chinese;
+    const prompt = question.direction === "en-zh" ? question.english : question.chinese;
+    question.correct = result.correct;
+    question.score = result.score;
+    question.gradingStatus = result.gradingStatus;
+    question.problemWords = result.problemWords;
+    question.wordResults = result.wordResults;
+    question.explanation = result.explanation;
+    question.detailedExplanation = result.detailedExplanation || buildTranslationExplanation({
+      direction: question.direction,
+      referenceAnswer: correctAnswer,
+      answer: question.userAnswer,
+      correct: result.correct,
+      gradingStatus: result.gradingStatus,
+      explanation: result.explanation,
+      problemWords: result.problemWords
+    });
+    question.answeredAt = completedAt;
+    nextHistory.push({
+      id: `${set.id}:${question.id}`,
+      setId: set.id,
+      setCreatedAt: set.createdAt,
+      answeredAt: completedAt,
+      date: today(),
+      providerId: set.providerId,
+      providerName: set.providerName,
+      model: set.model,
+      reasoningEffort: set.reasoningEffort,
+      questionNumber: index + 1,
+      questionCount: set.questions.length,
+      poolVariantId: question.poolVariantId,
+      direction: question.direction,
+      prompt,
+      userAnswer: question.userAnswer,
+      correctAnswer,
+      correct: result.correct,
+      score: result.score,
+      gradingStatus: result.gradingStatus,
+      problemWords: result.problemWords,
+      wordResults: result.wordResults,
+      focus: question.focus,
+      explanation: result.explanation,
+      detailedExplanation: question.detailedExplanation,
+      batchId: set.batchId,
+      formalEvidence: true
+    });
+  });
+  const resultIds = new Set(nextHistory.map(item => item.id));
+  practice.history = [...practice.history.filter(item => !resultIds.has(item.id)), ...nextHistory].slice(-MAX_AI_HISTORY);
+  appendSentencePracticeEvents(latest, nextHistory.filter(item => item.poolVariantId).map(item => ({
+    id: item.id,
+    variantId: item.poolVariantId,
+    date: item.date,
+    practicedAt: item.answeredAt,
+    correct: item.correct === true && item.gradingStatus !== "partial" && Number(item.score) >= 1,
+    source: "ai"
+  })));
+  set.phase = "completed";
+  set.completed = true;
+  set.index = set.questions.length;
+  set.completedAt = completedAt;
+  set.updatedAt = completedAt;
+  set.lastError = "";
+  practice.updatedAt = completedAt;
+  latest.aiPractice = practice;
+  userStates.users[user.id] = sanitizeState(latest);
+  persistUserStates();
+  return userStates.users[user.id];
+}
+
+function handleAiQuestionBatch(req, res, url, user) {
+  if (!user) return sendError(res, 401, "login required");
+  const suffix = url.pathname.slice("/api/ai/questions/batch".length) || "/";
+  if (req.method === "GET" && suffix === "/") return sendJson(res, 200, { practice: publicAiPractice(getUserState(user).aiPractice) });
+  return readBody(req).then(body => withFormalPracticeLock(user.id, async () => {
+    const state = getUserState(user);
+    const practice = sanitizeAiPractice(state.aiPractice);
+    const set = practice.currentSet;
+    if (!set || set.id !== String(body.setId || "")) return sendError(res, 404, "AI question set not found");
+    const now = new Date().toISOString();
+    if (suffix === "/draft" && req.method === "PUT") {
+      if (set.phase !== "answering") return sendJson(res, 409, { error: "当前题组不在作答阶段", practice: publicAiPractice(practice) });
+      const index = Math.min(Math.max(Number(body.index) || 0, 0), set.questions.length - 1);
+      const question = set.questions[index];
+      if (body.questionId && String(body.questionId) !== question.id) return sendError(res, 409, "AI question changed");
+      question.userAnswer = String(body.answer || "").trim().slice(0, MAX_AI_ANSWER_LENGTH);
+      question.answeredAt = "";
+      set.index = Object.hasOwn(body, "nextIndex")
+        ? Math.min(Math.max(Number(body.nextIndex) || 0, 0), set.questions.length - 1)
+        : index;
+      set.updatedAt = now;
+      set.lastError = "";
+      practice.updatedAt = now;
+      state.aiPractice = practice;
+      userStates.users[user.id] = sanitizeState(state);
+      persistUserStates();
+      return sendJson(res, 200, { practice: publicAiPractice(practice) });
+    }
+    if (suffix === "/edit" && req.method === "POST") {
+      if (set.phase === "completed") return sendJson(res, 409, { error: "题组已经完成批改", practice: publicAiPractice(practice) });
+      set.phase = "answering";
+      set.index = Math.min(Math.max(Number(body.index) || 0, 0), set.questions.length - 1);
+      set.updatedAt = now;
+      set.lastError = "";
+      practice.updatedAt = now;
+      state.aiPractice = practice;
+      userStates.users[user.id] = sanitizeState(state);
+      persistUserStates();
+      return sendJson(res, 200, { practice: publicAiPractice(practice) });
+    }
+    if (suffix === "/review" && req.method === "POST") {
+      if (set.phase === "completed") return sendJson(res, 200, { practice: publicAiPractice(practice), reused: true });
+      const missingIndex = set.questions.findIndex(question => !question.userAnswer.trim());
+      if (missingIndex >= 0) {
+        set.phase = "answering";
+        set.index = missingIndex;
+        set.updatedAt = now;
+        practice.updatedAt = now;
+        state.aiPractice = practice;
+        userStates.users[user.id] = sanitizeState(state);
+        persistUserStates();
+        return sendJson(res, 409, { error: `第 ${missingIndex + 1} 题还没有作答`, missingIndex, practice: publicAiPractice(practice) });
+      }
+      set.phase = "review";
+      set.reviewOpenedAt = set.reviewOpenedAt || now;
+      set.gradeRequestId = set.gradeRequestId || `aigrade-${crypto.randomUUID()}`;
+      set.updatedAt = now;
+      set.lastError = "";
+      practice.updatedAt = now;
+      state.aiPractice = practice;
+      userStates.users[user.id] = sanitizeState(state);
+      persistUserStates();
+      return sendJson(res, 200, { practice: publicAiPractice(practice) });
+    }
+    if (suffix === "/grade" && req.method === "POST") {
+      if (set.phase === "completed") return sendJson(res, 200, { practice: publicAiPractice(practice), reused: true, abilities: analyzeAbilities(content, state) });
+      if (!["review", "grading"].includes(set.phase)) return sendJson(res, 409, { error: "请先核对整组答案", practice: publicAiPractice(practice) });
+      const requestId = String(body.gradeRequestId || set.gradeRequestId || "").trim();
+      if (!requestId || (set.gradeRequestId && set.gradeRequestId !== requestId)) return sendJson(res, 409, { error: "批改请求标识不一致", practice: publicAiPractice(practice) });
+      set.phase = "grading";
+      set.gradeRequestId = requestId;
+      set.gradingStartedAt = set.gradingStartedAt || now;
+      set.updatedAt = now;
+      set.lastError = "";
+      practice.updatedAt = now;
+      state.aiPractice = practice;
+      userStates.users[user.id] = sanitizeState(state);
+      persistUserStates();
+      try {
+        const results = await gradeAiQuestionSet(user, set);
+        const saved = applyCompletedAiQuestionSet(user, set, results);
+        return sendJson(res, 200, { practice: publicAiPractice(saved.aiPractice), reused: false, abilities: analyzeAbilities(content, saved) });
+      } catch (error) {
+        const latest = getUserState(user);
+        const failed = sanitizeAiPractice(latest.aiPractice);
+        if (failed.currentSet && failed.currentSet.id === set.id && failed.currentSet.phase !== "completed") {
+          failed.currentSet.phase = "review";
+          failed.currentSet.lastError = String(error && error.message || "AI 批改暂不可用，整组答案已保留，请稍后重试").slice(0, 300);
+          failed.currentSet.updatedAt = new Date().toISOString();
+          failed.updatedAt = failed.currentSet.updatedAt;
+          latest.aiPractice = failed;
+          userStates.users[user.id] = sanitizeState(latest);
+          persistUserStates();
+        }
+        const status = error && [400, 404, 409, 429, 503].includes(error.statusCode) ? error.statusCode : 503;
+        return sendJson(res, status, { error: String(error && error.message || "AI 批改暂不可用，整组答案已保留，请稍后重试"), practice: publicAiPractice(failed) }, error && error.retryAfterSeconds ? { "Retry-After": String(error.retryAfterSeconds) } : {});
+      }
+    }
+    return sendError(res, 404, "AI question batch endpoint not found");
+  })).catch(error => sendError(res, error.statusCode || 400, error.message));
+}
+
 async function handleAiGrade(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI endpoint not found");
@@ -2431,37 +3137,154 @@ async function handleAiGenerate(req, res, user) {
   if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
   try {
     const body = await readBody(req);
-    const state = getUserState(user);
-    const selection = aiSelectionForState(state, body);
-    const rate = takeAiRequest(user.id);
-    if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
+    const requestId = String(body.requestId || "").trim().slice(0, 180) || `aigen-${crypto.randomUUID()}`;
     refreshContent();
-    const profile = buildLearningProfile(content, state, today());
-    if (!profile.allowedWords.length) return sendError(res, 409, "no learned words are available");
-    const routed = await runAiRoute(selection.route, config => createAiQuestionGenerator(config).generateGroups(profile, selection.count, selection.groupCount));
-    const normalizedGroups = routed.value.map(group => group.map(question => {
-      const sourceChinese = String(question && question.chinese || "").trim();
-      const chinese = naturalizePlainDeepChinese(question && question.english, sourceChinese);
+    const prepared = await withFormalPracticeLock(user.id, async () => {
+      const state = getUserState(user);
+      const storedPractice = sanitizeAiPractice(state.aiPractice);
+      let queueItem = storedPractice.generationQueue.find(item => item.requestId === requestId);
+      if (queueItem && ["ready", "consumed"].includes(queueItem.status)) {
+        state.aiPractice = storedPractice;
+        return { response: { statusCode: 200, body: { practice: publicAiPractice(storedPractice), settings: storedPractice.settings, requestId, reused: true } } };
+      }
+      if (queueItem && queueItem.status === "pending") {
+        state.aiPractice = storedPractice;
+        return { response: { statusCode: 202, body: { practice: publicAiPractice(storedPractice), settings: storedPractice.settings, requestId, reused: true, pending: true } } };
+      }
+      state.aiPractice = storedPractice;
+      const selection = aiSelectionForState(state, queueItem ? {
+        model: queueItem.model,
+        reasoningEffort: queueItem.reasoningEffort,
+        count: queueItem.count,
+        groupCount: queueItem.groupCount
+      } : body);
+      const practice = selection.practice;
+      queueItem = practice.generationQueue.find(item => item.requestId === requestId);
+      const now = new Date().toISOString();
+      if (!queueItem) {
+        if (practice.generationQueue.filter(item => item.status !== "consumed").length >= 30) {
+          throw Object.assign(new Error("AI 题组队列已满，请先完成当前队列"), { statusCode: 409 });
+        }
+        queueItem = {
+          id: `aiqueue-${crypto.randomUUID()}`,
+          requestId,
+          batchId: `aibatch-${crypto.randomUUID()}`,
+          status: "pending",
+          createdAt: now,
+          updatedAt: now,
+          providerId: selection.route.candidates[0] && selection.route.candidates[0].providerId || "",
+          providerName: selection.route.candidates[0] && selection.route.candidates[0].providerName || "",
+          model: selection.route.model,
+          reasoningEffort: selection.route.reasoningEffort,
+          count: selection.count,
+          groupCount: selection.groupCount,
+          plannedSetIds: Array.from({ length: selection.groupCount }, () => `aiset-${crypto.randomUUID()}`),
+          setIds: [],
+          error: ""
+        };
+        practice.generationQueue.push(queueItem);
+      } else {
+        if (!Array.isArray(queueItem.plannedSetIds) || queueItem.plannedSetIds.length !== queueItem.groupCount) {
+          queueItem.plannedSetIds = Array.from({ length: queueItem.groupCount }, (_, index) => queueItem.plannedSetIds && queueItem.plannedSetIds[index] || `aiset-${crypto.randomUUID()}`);
+        }
+        queueItem.status = "pending";
+        queueItem.updatedAt = now;
+        queueItem.error = "";
+      }
+      practice.updatedAt = now;
+      state.aiPractice = practice;
+      userStates.users[user.id] = sanitizeState(state);
+      persistUserStates();
       return {
-        ...question,
-        chinese,
-        acceptedChinese: expandRegisteredChineseAnswers(content, question && question.english, [
-          chinese,
-          sourceChinese,
-          ...(Array.isArray(question && question.acceptedChinese) ? question.acceptedChinese : [])
-        ], 16)
+        batchId: queueItem.batchId,
+        currentPool: sanitizeReviewVariantPool(state.reviewVariantPool),
+        profile: buildLearningProfile(content, state, today()),
+        plannedSetIds: [...queueItem.plannedSetIds],
+        createdAt: queueItem.createdAt,
+        selection
       };
-    }));
-    const batchId = `aibatch-${crypto.randomUUID()}`;
-    const sets = normalizedGroups.map((questions, index) => createQuestionSet(questions, routed.config, { batchId, groupNumber: index + 1, groupCount: selection.groupCount }));
-    const set = sets[0];
-    selection.practice.currentSet = set;
-    selection.practice.queuedSets = sets.slice(1);
-    selection.practice.tutor = null;
-    selection.practice.updatedAt = new Date().toISOString();
-    state.aiPractice = selection.practice;
-    persistUserStates();
-    return sendJson(res, 201, { set, queuedSets: selection.practice.queuedSets, settings: selection.practice.settings });
+    });
+    if (prepared.response) return sendJson(res, prepared.response.statusCode, prepared.response.body);
+    try {
+      if (!prepared.profile.allowedWords.length) throw Object.assign(new Error("no learned words are available"), { statusCode: 409 });
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) throw Object.assign(new Error("AI rate limit reached"), { statusCode: 429, retryAfterSeconds: rate.retryAfterSeconds });
+      const routed = await runAiRoute(prepared.selection.route, config => createAiQuestionGenerator(config).generateGroups(prepared.profile, prepared.selection.count, prepared.selection.groupCount));
+      const normalizedGroups = routed.value.map(group => group.map(question => {
+        const sourceChinese = String(question && question.chinese || "").trim();
+        const chinese = naturalizePlainDeepChinese(question && question.english, sourceChinese);
+        const poolVariant = prepared.currentPool.variants.find(item => normalizeVariantEnglish(item.english) === normalizeVariantEnglish(question && question.english));
+        return {
+          ...question,
+          poolVariantId: poolVariant ? poolVariant.id : "",
+          chinese,
+          acceptedChinese: expandRegisteredChineseAnswers(content, question && question.english, [
+            chinese,
+            sourceChinese,
+            ...(Array.isArray(question && question.acceptedChinese) ? question.acceptedChinese : [])
+          ], 16)
+        };
+      }));
+      const sets = normalizedGroups.map((questions, index) => createQuestionSet(questions, routed.config, {
+        id: prepared.plannedSetIds[index],
+        batchId: prepared.batchId,
+        generationRequestId: requestId,
+        questionVersion: 1,
+        requestedCount: prepared.selection.count,
+        createdAt: prepared.createdAt,
+        groupNumber: index + 1,
+        groupCount: prepared.selection.groupCount
+      }));
+      return await withFormalPracticeLock(user.id, async () => {
+        const latest = getUserState(user);
+        const latestPractice = sanitizeAiPractice(latest.aiPractice);
+        const latestItem = latestPractice.generationQueue.find(item => item.requestId === requestId);
+        if (!latestItem) throw Object.assign(new Error("AI generation queue item was lost"), { statusCode: 409 });
+        if (["ready", "consumed"].includes(latestItem.status)) {
+          return sendJson(res, 200, { practice: publicAiPractice(latestPractice), settings: latestPractice.settings, requestId, reused: true });
+        }
+        let queued = sets;
+        let currentSet = latestPractice.currentSet;
+        const itemIndex = latestPractice.generationQueue.findIndex(item => item.requestId === requestId);
+        const earlierUnfinished = itemIndex > 0 && latestPractice.generationQueue.slice(0, itemIndex).some(item => item.status !== "consumed");
+        if (!currentSet && !earlierUnfinished) {
+          currentSet = sets[0];
+          queued = sets.slice(1);
+        }
+        latestPractice.currentSet = currentSet;
+        latestPractice.queuedSets = [...latestPractice.queuedSets, ...queued];
+        latestItem.status = queued.length ? "ready" : "consumed";
+        latestItem.setIds = queued.map(set => set.id);
+        latestItem.providerId = routed.config.providerId;
+        latestItem.providerName = routed.config.providerName;
+        latestItem.model = routed.config.model;
+        latestItem.reasoningEffort = prepared.selection.route.reasoningEffort;
+        latestItem.updatedAt = new Date().toISOString();
+        latestItem.error = "";
+        latestPractice.tutor = currentSet === sets[0] ? null : latestPractice.tutor;
+        latestPractice.updatedAt = latestItem.updatedAt;
+        latest.aiPractice = latestPractice;
+        userStates.users[user.id] = sanitizeState(latest);
+        persistUserStates();
+        return sendJson(res, 201, { practice: publicAiPractice(latestPractice), settings: latestPractice.settings, requestId, reused: false, started: currentSet === sets[0] });
+      });
+    } catch (error) {
+      await withFormalPracticeLock(user.id, async () => {
+        const latest = getUserState(user);
+        const failedPractice = sanitizeAiPractice(latest.aiPractice);
+        const failedItem = failedPractice.generationQueue.find(item => item.requestId === requestId);
+        if (failedItem && !["ready", "consumed"].includes(failedItem.status)) {
+          failedItem.status = "failed";
+          failedItem.updatedAt = new Date().toISOString();
+          failedItem.error = publicAiGenerationFailure(error).message;
+          failedPractice.updatedAt = failedItem.updatedAt;
+          latest.aiPractice = failedPractice;
+          userStates.users[user.id] = sanitizeState(latest);
+          persistUserStates();
+        }
+      });
+      throw error;
+    }
   } catch (error) {
     if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI question generation failed: ${error && error.message ? error.message : "unknown error"}`);
@@ -2476,15 +3299,24 @@ function handleAiNextSet(req, res, user) {
   const state = getUserState(user);
   const practice = sanitizeAiPractice(state.aiPractice);
   const current = practice.currentSet;
-  if (!current || !current.questions.every(question => typeof question.correct === "boolean")) return sendError(res, 409, "current AI question set is not complete");
-  if (!practice.queuedSets.length) return sendError(res, 409, "no prepared AI question set is available");
-  practice.currentSet = practice.queuedSets[0];
-  practice.queuedSets = practice.queuedSets.slice(1);
+  if (!current || current.phase !== "completed" || !current.questions.every(question => typeof question.correct === "boolean")) return sendError(res, 409, "current AI question set is not complete");
+  const queueItem = practice.generationQueue.find(item => item.status !== "consumed");
+  if (!queueItem) return sendError(res, 409, "no prepared AI question set is available");
+  if (queueItem.status === "pending") return sendJson(res, 409, { error: "队首题组仍在生成，请稍后再试", practice: publicAiPractice(practice) });
+  if (queueItem.status === "failed") return sendJson(res, 409, { error: queueItem.error || "队首题组生成失败，请原位重试", requestId: queueItem.requestId, practice: publicAiPractice(practice) });
+  const nextSetId = queueItem.setIds[0];
+  const nextSet = practice.queuedSets.find(set => set.id === nextSetId);
+  if (!nextSet) return sendJson(res, 409, { error: "队首题组快照暂不可用，请重试原生成请求", requestId: queueItem.requestId, practice: publicAiPractice(practice) });
+  practice.currentSet = nextSet;
+  practice.queuedSets = practice.queuedSets.filter(set => set.id !== nextSetId);
+  queueItem.setIds = queueItem.setIds.slice(1);
+  queueItem.status = queueItem.setIds.length ? "ready" : "consumed";
+  queueItem.updatedAt = new Date().toISOString();
   practice.tutor = null;
   practice.updatedAt = new Date().toISOString();
   state.aiPractice = practice;
   persistUserStates();
-  return sendJson(res, 200, { set: practice.currentSet, remainingGroups: practice.queuedSets.length, practice });
+  return sendJson(res, 200, { set: publicQuestionSet(practice.currentSet), remainingGroups: practice.generationQueue.filter(item => item.status !== "consumed").reduce((sum, item) => sum + (item.status === "ready" ? item.setIds.length : item.groupCount), 0), practice: publicAiPractice(practice) });
 }
 
 async function handleAiTutorAsk(req, res, user) {
@@ -2670,6 +3502,7 @@ async function handleAiQuestionGrade(req, res, user) {
     const practice = sanitizeAiPractice(state.aiPractice);
     const set = practice.currentSet;
     if (!set || set.id !== body.setId) return sendError(res, 404, "AI question set not found");
+    if (set.phase !== "completed") return sendJson(res, 409, { error: "当前版本改为整组统一批改，请刷新页面继续", practice: publicAiPractice(practice) });
     const question = set.questions.find(item => item.id === body.questionId);
     if (!question) return sendError(res, 404, "AI question not found");
 
@@ -3176,13 +4009,16 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/preview/practice/grade") return handlePreviewPracticeGrade(req, res, user);
   if (url.pathname === "/api/preview") return handlePreview(req, res, user);
   if (url.pathname === "/api/abilities") return handleAbilities(req, res, user);
+  if (url.pathname === "/api/review/sentence-stats") return handleReviewSentenceStats(req, res, url, user);
   if (url.pathname === "/api/review/sentence-variants") return handleReviewSentenceVariants(req, res, user);
+  if (url.pathname === "/api/review/batches" || url.pathname.startsWith("/api/review/batches/")) return handleReviewBatches(req, res, url, user);
   if (url.pathname === "/api/ai/grade") return handleAiGrade(req, res, user);
   if (url.pathname === "/api/ai/exams" || url.pathname.startsWith("/api/ai/exams/")) return handleAiExams(req, res, url, user);
   if (url.pathname === "/api/ai/dictation" || url.pathname.startsWith("/api/ai/dictation/")) return handleAiDictation(req, res, url, user);
   if (url.pathname === "/api/ai/focused" || url.pathname.startsWith("/api/ai/focused/")) return handleAiFocusedPractice(req, res, url, user);
   if (url.pathname === "/api/ai/questions/generate") return handleAiGenerate(req, res, user);
   if (url.pathname === "/api/ai/questions/next") return handleAiNextSet(req, res, user);
+  if (url.pathname === "/api/ai/questions/batch" || url.pathname.startsWith("/api/ai/questions/batch/")) return handleAiQuestionBatch(req, res, url, user);
   if (url.pathname === "/api/ai/questions/tutor/clear") return handleAiTutorClear(req, res, user);
   if (url.pathname === "/api/ai/questions/ask") return handleAiTutorAsk(req, res, user);
   if (url.pathname === "/api/ai/questions/grade") return handleAiQuestionGrade(req, res, user);

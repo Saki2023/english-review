@@ -35,17 +35,61 @@ test("AI tutor Enter handling is wired to form submission", () => {
 test("AI practice can prepare independent groups and continue without another generation request", () => {
   const app = read("app.js");
   const html = read("index.html");
+  const css = read("styles.css");
   assert.match(html, /<span>每组题数<\/span>[\s\S]*id="aiQuestionCount"/);
   assert.match(html, /<span>生成组数<\/span>[\s\S]*id="aiGroupCount"[\s\S]*value="1"[\s\S]*value="2"[\s\S]*value="3"[\s\S]*value="5"/);
   assert.match(app, /groupCount: AI_GROUP_COUNTS\.includes\(Number\(settings\.groupCount\)\)/);
-  assert.match(app, /queuedSets: \(Array\.isArray\(source\.queuedSets\)/);
+  assert.match(app, /generationQueue: \(Array\.isArray\(source\.generationQueue\)/);
   assert.match(app, /groupCount: Number\(\$\("#aiGroupCount"\)\.value\) \|\| 1/);
-  assert.match(app, /practice\.queuedSets = Array\.isArray\(data\.queuedSets\) \? data\.queuedSets : \[\]/);
+  assert.match(app, /body: JSON\.stringify\(\{ \.\.\.settings, requestId \}\)/);
+  assert.match(app, /let aiGenerationInProgress = false/);
+  assert.match(app, /if \(aiGenerationInProgress \|\| !aiOptions\.configured\) return/);
+  assert.match(app, /answerInput\.disabled = aiRequestInProgress/);
+  assert.match(app, /previousAnswerUi && previousAnswerUi\.key === questionKey/);
+  assert.match(app, /answerInput\.value = preserveAnswerUi \? previousAnswerUi\.value : question\.userAnswer \|\| ""/);
   assert.match(app, /function continuePreparedAiSet\(\)/);
   assert.match(app, /fetch\("\/api\/ai\/questions\/next"/);
-  assert.match(app, /continueButton\.innerHTML = queuedCount[\s\S]*继续下一组（还剩 \$\{queuedCount\} 组）/);
+  assert.match(html, /id="aiQueuePanel"/);
+  assert.match(html, /id="startNextAiBatch"/);
+  assert.match(app, /function renderAiQueue\(practice\)/);
+  assert.match(app, /data-queue-group-id/);
+  assert.match(app, /group\.createdAt \? formatAiHistoryTime/);
+  assert.match(app, /开始下一组（等待 \$\{queuedCount\} 组）/);
   assert.match(app, /generateAnotherAiSet"\)\.addEventListener\("click", continuePreparedAiSet\)/);
-  assert.match(app, /&& !practice\.queuedSets\.length/);
+  assert.match(app, /startNextAiBatch"\)\.addEventListener\("click", continuePreparedAiSet\)/);
+  assert.doesNotMatch(app, /confirm\([^)]*覆盖[^)]*\)/);
+  assert.match(css, /@media \(max-width: 520px\)[\s\S]*?\.ai-queue-item \{ grid-template-columns: 26px minmax\(0, 1fr\)/);
+  assert.match(css, /\.ai-queue-copy strong, \.ai-queue-copy span, \.ai-queue-copy small \{ overflow-wrap: anywhere; \}/);
+});
+
+test("formal review and AI practice use private whole-group review and account-bound responses", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  const css = read("styles.css");
+  assert.match(html, /id="reviewBatchReview"[\s\S]*id="gradeReviewBatch"[\s\S]*确认并批改/);
+  assert.match(html, /id="reviewBatchResults"[\s\S]*id="reviewBatchResultList"/);
+  assert.match(html, /id="aiBatchReview"[\s\S]*id="gradeAiBatch"[\s\S]*确认并批改/);
+  assert.match(html, /id="aiBatchResults"[\s\S]*id="aiBatchResultList"/);
+  assert.match(app, /function renderBatchReviewPanel\(prefix, batch\)/);
+  assert.match(app, /batch-user-answer/);
+  assert.match(app, /question\.answer \|\| question\.userAnswer \|\| "（未填写）"/);
+  assert.match(app, /function renderBatchResultsPanel\(prefix, batch\)/);
+  assert.match(app, /const resultFor = question => question\.result \|\| \(typeof question\.correct === "boolean" \? question : \{\}\)/);
+  assert.match(app, /reviewBatchRequest\("\/review"/);
+  assert.match(app, /reviewBatchRequest\("\/grade"/);
+  assert.match(app, /reviewVariantPreparation = null;[\s\S]*?if \(activeView === "home"\) renderHome\(\)/);
+  assert.match(app, /if \(API_ENABLED && currentUser && !batchMatchesSession\)[\s\S]*?answerInput\.disabled = true[\s\S]*?if \(canStartServerBatch\) void ensureServerReviewBatch\(session\)/);
+  assert.match(app, /aiBatchRequest\("\/review"/);
+  assert.match(app, /aiBatchRequest\("\/grade"/);
+  assert.match(app, /const answer = \$\("#aiAnswerInput"\)\.value\.trim\(\);[\s\S]*?renderAiView\(\);[\s\S]*?nextIndex, answer/s);
+  assert.match(app, /const answer = \$\("#answerInput"\)\.value\.trim\(\);[\s\S]*?renderHome\(\);[\s\S]*?nextIndex, answer/s);
+  assert.match(app, /function captureAccountRequestContext\(\)/);
+  assert.match(app, /if \(!accountRequestContextIsCurrent\(accountContext\)\) throw staleAccountRequestError\(\)/);
+  assert.match(app, /error\.silent/);
+  assert.match(app, /aiPractice: remote && remote\.aiPractice \? normalizeClientAiPractice\(remote\.aiPractice\)/);
+  assert.match(app, /formalPractice: remote && remote\.formalPractice \? normalizeClientFormalPractice\(remote\.formalPractice\)/);
+  assert.match(css, /@media \(max-width: 520px\)[\s\S]*?\.batch-review-panel, \.batch-results-panel \{ padding: 20px 14px 22px; \}/);
+  assert.match(css, /@media \(max-width: 520px\)[\s\S]*?\.batch-result-list dl > div \{ grid-template-columns: 1fr/);
 });
 
 test("AI tutor launcher supports persistent pointer dragging", () => {
@@ -104,11 +148,12 @@ test("mistake book automatically closes mastered items while retaining a two-ans
   const app = read("app.js");
   const answers = read("answer-utils.js");
   const html = read("index.html");
+  const server = read("server.js");
   assert.match(answers, /const MISTAKE_AUTO_RESOLVE_STREAK = 2/);
   assert.match(answers, /function mistakeCorrectStreak\(attempts, taskId\)/);
   assert.match(answers, /attempt\.gradingStatus !== "partial"/);
   assert.match(answers, /function mistakeIsResolved\(attempts, taskId\)/);
-  assert.match(app, /model\.mistakes = \(model\.mistakes \|\| \[\]\)\.filter\(mistake => !mistakeIsResolved/);
+  assert.match(server, /\.filter\(item => !mistakeIsResolved\(next\.attempts, item && item\.taskId\)\)/);
   assert.match(app, /mistakeIsResolved\(model\.attempts, row\.taskId\)/);
   assert.match(app, /连续答对 \$\{row\.correctStreak\}\/\$\{MISTAKE_AUTO_RESOLVE_STREAK\}/);
   assert.match(html, /连续 2 次完全答对后自动销号/);
@@ -165,14 +210,14 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=59/);
+  assert.match(html, /pronunciation-data\.js\?v=60/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /phonemeSoundButtonHtml\(item\)/);
   assert.match(app, /speechButtonHtml\(item\.example, `慢速播放完整示范词/);
   assert.match(app, /data-pronunciation-sound/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=59/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=60/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -414,6 +459,10 @@ test("sentence pool viewer exposes searchable paginated read-only sentences and 
   assert.match(html, /id="reviewVariantPoolList"/);
   assert.match(html, /id="reviewVariantPoolPrevPage"/);
   assert.match(html, /id="reviewVariantPoolNextPage"/);
+  assert.match(html, /id="reviewVariantStatsFrom"[^>]*type="date"/);
+  assert.match(html, /id="reviewVariantStatsTo"[^>]*type="date"/);
+  assert.match(html, /id="reviewVariantStatsSort"[\s\S]*value="attempts"[\s\S]*value="correct"[\s\S]*value="wrong"[\s\S]*value="accuracy"[\s\S]*value="recent"/);
+  assert.match(html, /id="reviewVariantStatsClear"[\s\S]*全部日期/);
   assert.match(app, /Array\.isArray\(value\.sentences\)[\s\S]*\.slice\(0, 50\)/);
   assert.match(app, /normalizeEnglish\(item\.english\)\.includes\(englishQuery\)/);
   assert.match(app, /normalizeChinese\(item\.chinese\)\.includes\(chineseQuery\)/);
@@ -421,9 +470,13 @@ test("sentence pool viewer exposes searchable paginated read-only sentences and 
   assert.match(app, /currentVariantId \? item\.id === currentVariantId/);
   assert.match(app, /class="review-pool-current">当前复习/);
   assert.match(app, /reviewVariantPoolShowChinese \? `<p class="review-pool-chinese"/);
+  assert.match(app, /开始日期不能晚于结束日期/);
+  assert.match(app, /reviewVariantStatsFrom = "";[\s\S]*reviewVariantStatsTo = "";/);
+  assert.match(app, /做 \$\{stats\.attempts\}[\s\S]*对 \$\{stats\.correct\}[\s\S]*错 \$\{stats\.wrong\}/);
   assert.match(css, /\.review-pool-item\.is-current/);
   assert.match(css, /\.review-pool-english[^}]*overflow-wrap:\s*anywhere/s);
   assert.match(css, /@media \(max-width: 520px\)[\s\S]*\.review-pool-item\s*\{[^}]*grid-template-columns:\s*30px minmax\(0, 1fr\)/s);
+  assert.match(css, /@media \(max-width: 520px\)[\s\S]*?\.review-pool-stats-controls \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/s);
 
   const handlerStart = app.indexOf('$("#reviewVariantPoolToggle").addEventListener');
   const handlerEnd = app.indexOf('$$("[data-library-type]")', handlerStart);
@@ -434,13 +487,15 @@ test("sentence pool viewer exposes searchable paginated read-only sentences and 
   assert.doesNotMatch(currentRender, /getSession\(|saveModel\(|fetch\(/);
 });
 
-test("review redraws preserve an unsubmitted answer for the same task", () => {
+test("review redraws preserve local input and restore server-saved group drafts", () => {
   const app = read("app.js");
   assert.match(app, /let reviewAnswerResetRequested = true/);
   assert.match(app, /dataset\.reviewTaskKey/);
   assert.match(app, /const previousReviewUi = answerInput \? \{/);
   assert.match(app, /const preserveReviewUi = !resetAnswer && previousReviewUi && previousReviewUi\.taskKey === taskKey/);
-  assert.match(app, /answerInput\.value = previousReviewUi\.value/);
+  assert.match(app, /answerInput\.value = preserveReviewUi \? previousReviewUi\.value : \(draftQuestion \? draftQuestion\.answer : ""\)/);
+  assert.match(app, /reviewBatchRequest\("\/draft"/);
+  assert.match(app, /body: \{\s*batchId: batch\.id,\s*questionId: question\.id/s);
   assert.match(app, /function advance\(retry = false\) \{\s*reviewAnswerResetRequested = true/);
   assert.match(app, /function replaceReviewSession\(taskIds, mode = "all"\) \{\s*reviewAnswerResetRequested = true/);
 });
@@ -448,12 +503,17 @@ test("review redraws preserve an unsubmitted answer for the same task", () => {
 test("partial answers have distinct feedback and preserve mastery", () => {
   const app = read("app.js");
   const css = read("styles.css");
+  const server = read("server.js");
+  const formalPractice = read("server/formal-practice.js");
   assert.match(app, /gradingStatus === "partial"/);
   assert.match(app, /基本理解正确/);
   assert.match(app, /state\.level = Math\.max\(1, Number\(state\.level\) \|\| 0\)/);
+  assert.match(server, /next\.level = Math\.max\(1, Number\(previous\.level\) \|\| 0\)/);
   assert.match(app, /function aiQuestionScore\(question\)/);
-  assert.match(app, /得分 \$\{formatQuestionScore\(earned\)\}/);
-  assert.match(app, /score: Number\.isFinite\(Number\(grading\.score\)\)/);
+  assert.match(app, /\$\{batch\.questions\.length\} 题 · \$\{correctCount\} 题完全正确 · \$\{formatQuestionScore\(earned\)\} \/ \$\{batch\.questions\.length\} 分/);
+  assert.match(app, /部分正确" : result\.correct \? "正确" : "错误"/);
+  assert.match(formalPractice, /const score = Number\.isFinite\(scoreValue\) \? Math\.max\(0, Math\.min\(1, scoreValue\)\)/);
+  assert.match(server, /result\.gradingStatus === "partial"[\s\S]*?next\.nextDue = addStudyDays\(studyDate, 1\)/);
   assert.match(css, /\.feedback\.is-partial/);
 });
 
@@ -472,7 +532,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 59", () => {
+test("PWA client assets consistently use the displayed cache version 60", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -483,8 +543,8 @@ test("PWA client assets consistently use the displayed cache version 59", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "59");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v59"/);
+  assert.equal(displayedVersion[1], "60");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v60"/);
 });
 
 test("complete self-study exposes one-step teaching, recovery, questions, and explicit continuation controls", () => {
@@ -537,6 +597,6 @@ test("daily study plan offers six free-choice projects and records sixty minutes
   assert.doesNotMatch(app, /String\(stage\.index \+ 1\)/);
   assert.doesNotMatch(app, /按顺序完成/);
   assert.doesNotMatch(html, /按顺序学习/);
-  assert.match(html, /study-time\.js\?v=59/);
-  assert.match(serviceWorker, /study-time\.js\?v=59/);
+  assert.match(html, /study-time\.js\?v=60/);
+  assert.match(serviceWorker, /study-time\.js\?v=60/);
 });

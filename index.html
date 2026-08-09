@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=59">
+  <link rel="stylesheet" href="styles.css?v=60">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v59">v59</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v60">v60</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -220,6 +220,13 @@
                   <span>显示中文</span>
                 </label>
               </div>
+              <div class="review-pool-stats-controls">
+                <label><span>开始日期</span><input id="reviewVariantStatsFrom" type="date" aria-label="句子统计开始日期"></label>
+                <label><span>结束日期</span><input id="reviewVariantStatsTo" type="date" aria-label="句子统计结束日期"></label>
+                <label><span>排序</span><select id="reviewVariantStatsSort" aria-label="句子统计排序方式"><option value="index">原始序号</option><option value="attempts">做题次数</option><option value="correct">答对</option><option value="wrong">答错</option><option value="accuracy">正确率</option><option value="recent">最近练习</option></select></label>
+                <button class="secondary-button compact-button" type="button" id="reviewVariantStatsOrder" data-order="asc"><i data-lucide="arrow-up" aria-hidden="true"></i><span>升序</span></button>
+                <button class="secondary-button compact-button" type="button" id="reviewVariantStatsClear"><i data-lucide="calendar-x" aria-hidden="true"></i><span>全部日期</span></button>
+              </div>
               <p class="review-pool-list-meta" id="reviewVariantPoolListMeta"></p>
               <ol class="review-pool-list" id="reviewVariantPoolList"></ol>
               <div class="review-pool-pagination">
@@ -253,6 +260,10 @@
                 <input id="answerInput" class="answer-input" type="text" autocomplete="off" spellcheck="false" placeholder="输入答案">
                 <button class="primary-button" id="submitAnswer" type="submit"><i data-lucide="arrow-right" aria-hidden="true"></i>提交答案</button>
               </form>
+              <div class="batch-answer-navigation" id="reviewAnswerNavigation">
+                <button class="secondary-button" type="button" id="previousReviewQuestion"><i data-lucide="arrow-left" aria-hidden="true"></i>上一题</button>
+                <span id="reviewDraftStatus" aria-live="polite">答案会自动保存</span>
+              </div>
               <div class="feedback" id="feedback" aria-live="polite" hidden></div>
               <div class="feedback-actions" id="feedbackActions" hidden>
                 <button class="secondary-button" type="button" id="retryButton"><i data-lucide="refresh-cw" aria-hidden="true"></i>再练一次</button>
@@ -260,6 +271,26 @@
               </div>
             </div>
           </article>
+
+          <section class="batch-review-panel" id="reviewBatchReview" aria-labelledby="reviewBatchReviewTitle" hidden>
+            <div class="batch-panel-heading">
+              <div><p class="eyebrow">CHECK ANSWERS</p><h2 id="reviewBatchReviewTitle">核对本组答案</h2></div>
+              <span id="reviewBatchReviewCount"></span>
+            </div>
+            <p class="batch-panel-note">这里只显示题目和你的答案。确认前不会显示参考答案或判定。</p>
+            <ol class="batch-review-list" id="reviewBatchReviewList"></ol>
+            <div class="batch-panel-actions">
+              <button class="secondary-button" type="button" id="editReviewBatch"><i data-lucide="arrow-left" aria-hidden="true"></i>返回修改</button>
+              <button class="primary-button" type="button" id="gradeReviewBatch">确认并批改<i data-lucide="check" aria-hidden="true"></i></button>
+            </div>
+            <p class="batch-grade-status" id="reviewBatchGradeStatus" aria-live="polite"></p>
+          </section>
+
+          <section class="batch-results-panel" id="reviewBatchResults" aria-labelledby="reviewBatchResultsTitle" hidden>
+            <div class="batch-panel-heading"><div><p class="eyebrow">GROUP RESULTS</p><h2 id="reviewBatchResultsTitle">本组批改结果</h2></div><strong id="reviewBatchScore"></strong></div>
+            <ol class="batch-result-list" id="reviewBatchResultList"></ol>
+            <div class="batch-panel-actions"><button class="secondary-button" type="button" id="finishReviewBatch">完成并返回<i data-lucide="arrow-right" aria-hidden="true"></i></button></div>
+          </section>
 
           <div class="review-complete" id="reviewComplete" hidden>
             <div class="complete-icon" aria-hidden="true"><i data-lucide="check"></i></div>
@@ -383,6 +414,11 @@
             </button>
           </div>
 
+          <section class="ai-queue-panel" id="aiQueuePanel" aria-labelledby="aiQueueTitle" hidden>
+            <div class="ai-queue-heading"><div><p class="eyebrow">GROUP QUEUE</p><h2 id="aiQueueTitle">等待题组</h2></div><strong id="aiQueueCount">0 组</strong></div>
+            <div class="ai-queue-list" id="aiQueueList"></div>
+          </section>
+
           <div class="ai-state" id="aiEmptyState">
             <i data-lucide="wand-sparkles" aria-hidden="true"></i>
             <strong id="aiEmptyTitle">准备生成题目</strong>
@@ -404,12 +440,33 @@
                 <input id="aiAnswerInput" class="answer-input" type="text" autocomplete="off" spellcheck="false" placeholder="输入答案">
                 <button class="primary-button" id="submitAiAnswer" type="submit"><i data-lucide="arrow-right" aria-hidden="true"></i>提交答案</button>
               </form>
+              <div class="batch-answer-navigation" id="aiAnswerNavigation">
+                <button class="secondary-button" type="button" id="previousAiQuestion"><i data-lucide="arrow-left" aria-hidden="true"></i>上一题</button>
+                <span id="aiDraftStatus" aria-live="polite">答案会自动保存</span>
+              </div>
               <div class="feedback" id="aiFeedback" aria-live="polite" hidden></div>
               <div class="feedback-actions" id="aiFeedbackActions" hidden>
                 <button class="primary-button" type="button" id="nextAiQuestion">下一题<i data-lucide="arrow-right" aria-hidden="true"></i></button>
               </div>
             </div>
           </article>
+
+          <section class="batch-review-panel" id="aiBatchReview" aria-labelledby="aiBatchReviewTitle" hidden>
+            <div class="batch-panel-heading"><div><p class="eyebrow">CHECK ANSWERS</p><h2 id="aiBatchReviewTitle">核对本组答案</h2></div><span id="aiBatchReviewCount"></span></div>
+            <p class="batch-panel-note">这里只显示题目和你的答案。确认前不会显示参考答案或判定。</p>
+            <ol class="batch-review-list" id="aiBatchReviewList"></ol>
+            <div class="batch-panel-actions">
+              <button class="secondary-button" type="button" id="editAiBatch"><i data-lucide="arrow-left" aria-hidden="true"></i>返回修改</button>
+              <button class="primary-button" type="button" id="gradeAiBatch">确认并批改<i data-lucide="check" aria-hidden="true"></i></button>
+            </div>
+            <p class="batch-grade-status" id="aiBatchGradeStatus" aria-live="polite"></p>
+          </section>
+
+          <section class="batch-results-panel" id="aiBatchResults" aria-labelledby="aiBatchResultsTitle" hidden>
+            <div class="batch-panel-heading"><div><p class="eyebrow">GROUP RESULTS</p><h2 id="aiBatchResultsTitle">本组批改结果</h2></div><strong id="aiBatchScore"></strong></div>
+            <ol class="batch-result-list" id="aiBatchResultList"></ol>
+            <div class="batch-panel-actions"><button class="primary-button" type="button" id="startNextAiBatch">开始下一组<i data-lucide="arrow-right" aria-hidden="true"></i></button></div>
+          </section>
 
           <div class="review-complete" id="aiPracticeComplete" hidden>
             <div class="complete-icon" aria-hidden="true"><i data-lucide="check"></i></div>
@@ -1140,12 +1197,12 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=59"></script>
-  <script src="data.js?v=59"></script>
-  <script src="pronunciation-data.js?v=59"></script>
-  <script src="review-variants.js?v=59"></script>
-  <script src="answer-utils.js?v=59"></script>
-  <script src="study-time.js?v=59"></script>
+  <script src="vendor/lucide.min.js?v=60"></script>
+  <script src="data.js?v=60"></script>
+  <script src="pronunciation-data.js?v=60"></script>
+  <script src="review-variants.js?v=60"></script>
+  <script src="answer-utils.js?v=60"></script>
+  <script src="study-time.js?v=60"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1161,7 +1218,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=59";
+      appScript.src = "app.js?v=60";
       document.body.appendChild(appScript);
     })();
   </script>

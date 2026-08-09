@@ -85,16 +85,19 @@
   let pronunciationFilter = "learned";
   let notesDay = Math.max(1, Number(DATA.currentDay) || 1, ...learnedItems.map(item => Number(item.day) || 0));
   let currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
+  let accountRequestEpoch = 0;
   let appEventsBound = false;
   let authEventsBound = false;
   let model = loadModel();
   let toastTimer;
   let gradingInProgress = false;
+  let reviewBatchRequestInProgress = false;
   // renderHome() is also called by background sync/prefetch polling. Keep the
   // answer controls tied to the current task so those redraws cannot erase a
   // draft (or hide feedback) while the learner is working.
   let reviewAnswerResetRequested = true;
   let aiRequestInProgress = false;
+  let aiGenerationInProgress = false;
   let aiTutorRequestInProgress = false;
   let reviewVariantPreparation = null;
   let reviewVariantRetryTimer = null;
@@ -107,6 +110,16 @@
   let reviewVariantPoolSearch = "";
   let reviewVariantPoolPage = 1;
   let reviewVariantPoolPageSize = REVIEW_VARIANT_POOL_PAGE_SIZES[0];
+  let reviewVariantStats = new Map();
+  let reviewVariantStatsOrderIds = [];
+  let reviewVariantStatsSyncKey = "";
+  let reviewVariantStatsLoading = false;
+  let reviewVariantStatsReloadPending = false;
+  let reviewVariantStatsRequestSerial = 0;
+  let reviewVariantStatsFrom = "";
+  let reviewVariantStatsTo = "";
+  let reviewVariantStatsSort = "index";
+  let reviewVariantStatsOrder = "asc";
   let studyClockTimer = null;
   let studyClockRunning = false;
   let studyClockLastTickAt = 0;
@@ -284,10 +297,53 @@
       },
       currentSet: source.currentSet && Array.isArray(source.currentSet.questions) ? source.currentSet : null,
       queuedSets: (Array.isArray(source.queuedSets) ? source.queuedSets : []).filter(set => set && Array.isArray(set.questions) && set.questions.length).slice(0, 4),
+      generationQueue: (Array.isArray(source.generationQueue) ? source.generationQueue : []).map(item => ({
+        id: String(item && item.id || ""),
+        requestId: String(item && item.requestId || ""),
+        status: ["pending", "ready", "failed"].includes(item && item.status) ? item.status : "pending",
+        createdAt: String(item && item.createdAt || ""),
+        updatedAt: String(item && item.updatedAt || ""),
+        providerName: String(item && item.providerName || ""),
+        model: String(item && item.model || ""),
+        reasoningEffort: AI_EFFORTS.includes(item && item.reasoningEffort) ? item.reasoningEffort : "medium",
+        count: [5, 10].includes(Number(item && item.count)) ? Number(item.count) : 5,
+        groupCount: [1, 2, 3, 5].includes(Number(item && item.groupCount)) ? Number(item.groupCount) : 1,
+        readyGroups: Math.max(0, Number(item && item.readyGroups) || 0),
+        groups: (Array.isArray(item && item.groups) ? item.groups : []).map(group => ({
+          id: String(group && group.id || ""),
+          groupNumber: Math.max(1, Number(group && group.groupNumber) || 1),
+          questionCount: [5, 10].includes(Number(group && group.questionCount)) ? Number(group.questionCount) : 5,
+          model: String(group && group.model || item && item.model || ""),
+          reasoningEffort: AI_EFFORTS.includes(group && group.reasoningEffort) ? group.reasoningEffort : (AI_EFFORTS.includes(item && item.reasoningEffort) ? item.reasoningEffort : "medium"),
+          createdAt: String(group && group.createdAt || item && item.createdAt || ""),
+          questionVersion: Math.max(1, Number(group && group.questionVersion) || 1),
+          status: ["pending", "ready", "failed"].includes(group && group.status) ? group.status : "pending"
+        })).filter(group => group.id).slice(0, 5),
+        error: String(item && item.error || "")
+      })).filter(item => item.requestId).slice(0, 30),
       tutor: normalizeClientTutor(source.tutor),
       tutorHistory: (Array.isArray(source.tutorHistory) ? source.tutorHistory : []).map(normalizeClientTutorExchange).filter(Boolean).slice(-MAX_CLIENT_TUTOR_HISTORY),
       tutorResets: (Array.isArray(source.tutorResets) ? source.tutorResets : []).map(normalizeClientTutorReset).filter(Boolean).slice(-MAX_CLIENT_TUTOR_RESETS),
       history: Array.isArray(source.history) ? source.history.slice(-1000) : [],
+      updatedAt: String(source.updatedAt || "")
+    };
+  }
+
+  function normalizeClientFormalPractice(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const review = source.review && typeof source.review === "object" ? source.review : {};
+    const normalizeBatch = batch => batch && Array.isArray(batch.questions) ? {
+      ...batch,
+      id: String(batch.id || ""),
+      phase: ["answering", "review", "grading", "completed"].includes(batch.phase) ? batch.phase : "answering",
+      index: Math.max(0, Number(batch.index) || 0),
+      questions: batch.questions.map(question => ({ ...question, answer: String(question && question.answer || "") }))
+    } : null;
+    return {
+      review: {
+        current: normalizeBatch(review.current),
+        history: (Array.isArray(review.history) ? review.history : []).map(normalizeBatch).filter(Boolean).slice(-40)
+      },
       updatedAt: String(source.updatedAt || "")
     };
   }
@@ -334,6 +390,7 @@
       index: Math.max(0, Number(source.index) || 0),
       doneTaskIds: Array.isArray(source.doneTaskIds) ? source.doneTaskIds.map(item => String(item || "").slice(0, 180)).filter(Boolean).slice(0, 100) : [],
       currentTaskId: String(source.currentTaskId || "").slice(0, 180),
+      batchId: String(source.batchId || "").slice(0, 180),
       batchComplete: Boolean(source.batchComplete),
       updatedAt: String(source.updatedAt || "").slice(0, 40),
       variants
@@ -1341,6 +1398,7 @@
     next.previewPractice = normalizeClientPreviewPractice(next.previewPractice);
     next.previewPracticeHistory = normalizeClientPreviewPracticeHistory(next.previewPracticeHistory);
     next.aiPractice = normalizeClientAiPractice(next.aiPractice);
+    next.formalPractice = normalizeClientFormalPractice(next.formalPractice);
     next.schema = 1;
     allItems.forEach(item => (item.directions || ["en-zh"]).forEach(direction => {
       const taskId = `${item.id}:${direction}`;
@@ -1396,7 +1454,8 @@
       mistakes: [...(local.mistakes || [])],
       previewPractice: normalizeClientPreviewPractice(local.previewPractice),
       previewPracticeHistory: normalizeClientPreviewPracticeHistory(local.previewPracticeHistory),
-      aiPractice: String(remote && remote.aiPractice && remote.aiPractice.updatedAt || "") >= String(local.aiPractice && local.aiPractice.updatedAt || "") ? normalizeClientAiPractice(remote.aiPractice) : normalizeClientAiPractice(local.aiPractice)
+      aiPractice: remote && remote.aiPractice ? normalizeClientAiPractice(remote.aiPractice) : normalizeClientAiPractice(local.aiPractice),
+      formalPractice: remote && remote.formalPractice ? normalizeClientFormalPractice(remote.formalPractice) : normalizeClientFormalPractice(local.formalPractice)
     };
     const remotePreviewPractice = normalizeClientPreviewPractice(remote && remote.previewPractice);
     if (remotePreviewPractice.updatedAt >= merged.previewPractice.updatedAt || (!merged.previewPractice.key && remotePreviewPractice.key)) merged.previewPractice = remotePreviewPractice;
@@ -1456,6 +1515,16 @@
     reviewVariantPoolSearch = "";
     reviewVariantPoolPage = 1;
     reviewVariantPoolPageSize = REVIEW_VARIANT_POOL_PAGE_SIZES[0];
+    reviewVariantStats = new Map();
+    reviewVariantStatsOrderIds = [];
+    reviewVariantStatsSyncKey = "";
+    reviewVariantStatsLoading = false;
+    reviewVariantStatsReloadPending = false;
+    reviewVariantStatsRequestSerial += 1;
+    reviewVariantStatsFrom = "";
+    reviewVariantStatsTo = "";
+    reviewVariantStatsSort = "index";
+    reviewVariantStatsOrder = "asc";
   }
 
   function reviewVariantPoolStatusKey(value) {
@@ -1563,6 +1632,34 @@
     refreshIcons();
   }
 
+  function setAccountContext(user) {
+    accountRequestEpoch += 1;
+    currentUser = user;
+    reviewBatchRequestInProgress = false;
+    aiRequestInProgress = false;
+    aiGenerationInProgress = false;
+    [$("#generateAiQuestions"), $("#startNextAiBatch"), $("#generateAnotherAiSet")].filter(Boolean).forEach(button => setBusyButton(button, false, ""));
+  }
+
+  function captureAccountRequestContext() {
+    return { epoch: accountRequestEpoch, userId: String(currentUser && currentUser.id || "") };
+  }
+
+  function accountRequestContextIsCurrent(context) {
+    return Boolean(context && context.epoch === accountRequestEpoch && context.userId === String(currentUser && currentUser.id || ""));
+  }
+
+  function staleAccountRequestError() {
+    const error = new Error("账号已经切换，已忽略上一账号的响应");
+    error.silent = true;
+    return error;
+  }
+
+  function showRequestError(error) {
+    if (!error || error.silent) return;
+    showToast(error.message);
+  }
+
   function showAppView() {
     document.body.classList.remove("auth-mode");
     $("#authScreen").hidden = true;
@@ -1589,7 +1686,7 @@
       if (!response.ok) return false;
       const data = await response.json();
       if (!data.authenticated || !data.user) return false;
-      currentUser = data.user;
+      setAccountContext(data.user);
       return true;
     } catch (_) { return false; }
   }
@@ -1609,7 +1706,7 @@
       clearReviewVariantPoolStatusPolling();
       reviewVariantPoolStatus = null;
       resetReviewVariantPoolViewer();
-      currentUser = data.user;
+      setAccountContext(data.user);
       model = loadModel();
       previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
       selectedPreviewName = "";
@@ -1635,8 +1732,9 @@
     clearReviewVariantPoolStatusPolling();
     reviewVariantPoolStatus = null;
     resetReviewVariantPoolViewer();
+    setAccountContext(API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" });
+    if (API_ENABLED) showAuthView();
     if (API_ENABLED) { try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch (_) {} }
-    currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
     previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
     selectedPreviewName = "";
     previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
@@ -1644,7 +1742,6 @@
     selfStudyLoaded = false;
     selfStudyLastPromotion = null;
     remoteReady = !API_ENABLED;
-    if (API_ENABLED) showAuthView();
   }
 
   function bindAuthEvents() {
@@ -1740,16 +1837,16 @@
     if (settings.model) select.value = settings.model;
     select.disabled = !aiOptions.configured || !aiOptions.models.length;
     $("#aiQuestionCount").value = String(settings.count);
-    $("#aiQuestionCount").disabled = !aiOptions.configured || aiRequestInProgress;
+    $("#aiQuestionCount").disabled = !aiOptions.configured || aiGenerationInProgress;
     $("#aiGroupCount").value = String(settings.groupCount);
-    $("#aiGroupCount").disabled = !aiOptions.configured || aiRequestInProgress;
+    $("#aiGroupCount").disabled = !aiOptions.configured || aiGenerationInProgress;
     $$('[data-ai-effort]').forEach(button => {
       const active = button.dataset.aiEffort === settings.reasoningEffort;
       button.classList.toggle("is-selected", active);
       button.setAttribute("aria-pressed", String(active));
       button.disabled = !aiOptions.configured;
     });
-    $("#generateAiQuestions").disabled = !aiOptions.configured || aiRequestInProgress;
+    $("#generateAiQuestions").disabled = !aiOptions.configured || aiGenerationInProgress;
   }
 
   async function prefetchReviewVariantPool(force = false) {
@@ -2432,17 +2529,61 @@
     requestAnimationFrame(() => $("#nextAiQuestion").focus({ preventScroll: true }));
   }
 
+  function aiQueueGroupCount(practice = model.aiPractice) {
+    return (practice && Array.isArray(practice.generationQueue) ? practice.generationQueue : []).reduce((sum, item) => sum + (item.status === "ready" ? item.readyGroups : item.groupCount), 0);
+  }
+
+  function renderAiQueue(practice) {
+    const queue = Array.isArray(practice.generationQueue) ? practice.generationQueue : [];
+    const panel = $("#aiQueuePanel");
+    panel.hidden = queue.length === 0;
+    if (!queue.length) return;
+    const groups = aiQueueGroupCount(practice);
+    $("#aiQueueCount").textContent = `${groups} 组`;
+    let position = 0;
+    $("#aiQueueList").innerHTML = queue.flatMap(item => {
+      const fallbackCount = item.status === "ready" ? item.readyGroups : item.groupCount;
+      const groups = item.groups.length ? item.groups : Array.from({ length: fallbackCount }, (_, index) => ({
+        id: `${item.requestId}-${index + 1}`,
+        groupNumber: index + 1,
+        questionCount: item.count,
+        model: item.model,
+        reasoningEffort: item.reasoningEffort,
+        createdAt: item.createdAt,
+        questionVersion: 1,
+        status: item.status
+      }));
+      return groups.map((group, groupIndex) => {
+        position += 1;
+        const status = group.status === "ready" ? "已就绪" : group.status === "failed" ? "生成失败" : "生成中";
+        const effort = AI_EFFORT_LABELS[group.reasoningEffort] || group.reasoningEffort;
+        const createdAt = group.createdAt ? formatAiHistoryTime(group.createdAt, group.createdAt) : "时间待记录";
+        return `<div class="ai-queue-item" data-queue-status="${group.status}" data-queue-group-id="${escapeHtml(group.id)}">
+          <span class="ai-queue-position">${position}</span>
+          <div class="ai-queue-copy"><strong>${escapeHtml(group.model || "默认模型")} · ${escapeHtml(effort)}</strong><span>${group.questionCount} 题 · ${createdAt} · ${status}</span>${item.error && groupIndex === 0 ? `<small>${escapeHtml(item.error)}</small>` : ""}</div>
+          ${item.status === "failed" && groupIndex === 0 ? `<button class="secondary-button compact-button" type="button" data-retry-ai-generation="${escapeHtml(item.requestId)}">原位重试</button>` : `<span class="ai-queue-status">${status}</span>`}
+        </div>`;
+      });
+    }).join("");
+  }
+
   function renderAiView() {
+    const answerInput = $("#aiAnswerInput");
+    const previousAnswerUi = answerInput ? { key: String(answerInput.dataset.aiQuestionKey || ""), value: answerInput.value } : null;
     model.aiPractice = normalizeClientAiPractice(model.aiPractice);
     const practice = model.aiPractice;
-    const queuedCount = practice.queuedSets.length;
+    const queuedCount = aiQueueGroupCount(practice);
     populateAiModelSelect();
     renderAiHistory();
+    renderAiQueue(practice);
     $("#openAiConfigButton").hidden = !currentUser || currentUser.role !== "admin";
     $("#aiStatus").textContent = aiStatusMessage || (aiOptions.configured ? (queuedCount ? `后续 ${queuedCount} 组已经准备好` : "AI 已配置") : "AI 尚未配置");
     const empty = $("#aiEmptyState");
     const panel = $("#aiPracticePanel");
     const complete = $("#aiPracticeComplete");
+    const set = practice.currentSet;
+    renderBatchReviewPanel("ai", set);
+    renderBatchResultsPanel("ai", set);
     if (!aiOptions.configured) {
       empty.hidden = false; panel.hidden = true; complete.hidden = true;
       $("#aiEmptyTitle").textContent = currentUser && currentUser.role === "admin" ? "请先完成 AI 连接设置" : "AI 尚未配置";
@@ -2450,25 +2591,25 @@
       return;
     }
 
-    const set = practice.currentSet;
     if (!set) {
       empty.hidden = false; panel.hidden = true; complete.hidden = true;
       $("#aiEmptyTitle").textContent = "准备生成题目";
       renderAiTutorWindow();
       return;
     }
-    if (set.completed || Number(set.index) >= set.questions.length) {
-      set.completed = true;
-      empty.hidden = true; panel.hidden = true; complete.hidden = false;
-      const earned = set.questions.reduce((sum, question) => sum + aiQuestionScore(question), 0);
-      const groupProgress = Number(set.groupCount) > 1 ? `第 ${Number(set.groupNumber) || 1} / ${Number(set.groupCount) || 1} 组 · ` : "";
-      $("#aiCompleteNote").textContent = `${groupProgress}得分 ${formatQuestionScore(earned)} / ${set.questions.length}${queuedCount ? ` · 后续 ${queuedCount} 组已准备好` : ""}`;
-      const continueButton = $("#generateAnotherAiSet");
-      continueButton.disabled = aiRequestInProgress;
-      continueButton.innerHTML = queuedCount
-        ? `继续下一组（还剩 ${queuedCount} 组）<i data-lucide="arrow-right" aria-hidden="true"></i>`
-        : '生成下一组<i data-lucide="sparkles" aria-hidden="true"></i>';
+    if (["review", "grading", "completed"].includes(set.phase)) {
+      empty.hidden = true; panel.hidden = true; complete.hidden = true;
       renderAiTutorWindow();
+      const startNext = $("#startNextAiBatch");
+      if (startNext) {
+        startNext.hidden = set.phase !== "completed" || queuedCount === 0;
+        startNext.disabled = aiRequestInProgress || !practice.generationQueue.length || practice.generationQueue[0].status !== "ready";
+        startNext.innerHTML = practice.generationQueue[0] && practice.generationQueue[0].status === "failed"
+          ? '请先原位重试队首题组<i data-lucide="refresh-cw" aria-hidden="true"></i>'
+          : practice.generationQueue[0] && practice.generationQueue[0].status === "pending"
+            ? '队首题组生成中<i data-lucide="loader-circle" aria-hidden="true"></i>'
+            : `开始下一组（等待 ${queuedCount} 组）<i data-lucide="arrow-right" aria-hidden="true"></i>`;
+      }
       refreshIcons();
       return;
     }
@@ -2485,16 +2626,23 @@
       ? `第 ${Number(set.groupNumber) || 1}/${Number(set.groupCount) || 1} 组 · ${Number(set.index) + 1}/${set.questions.length}`
       : `${Number(set.index) + 1} / ${set.questions.length}`;
     $("#aiDirectionLabel").textContent = formatDirection(question.direction);
-    $("#aiPromptText").textContent = question.direction === "en-zh" ? question.english : question.chinese;
-    $("#aiPromptSpeech").innerHTML = question.direction === "en-zh" ? speechButtonHtml(question.english, "播放题目发音") : "";
-    $("#aiAnswerInput").value = question.userAnswer || "";
-    $("#aiAnswerInput").placeholder = question.direction === "en-zh" ? "输入中文答案" : "输入英文答案";
-    const answered = typeof question.correct === "boolean";
-    $("#aiAnswerInput").disabled = answered || aiRequestInProgress;
-    $("#submitAiAnswer").disabled = answered || aiRequestInProgress;
-    renderAiFeedback(question);
+    $("#aiPromptText").textContent = question.prompt || (question.direction === "en-zh" ? question.english : question.chinese);
+    $("#aiPromptSpeech").innerHTML = question.direction === "en-zh" ? speechButtonHtml(question.prompt || question.english, "播放题目发音") : "";
+    const questionKey = `${set.id}:${question.id}`;
+    const preserveAnswerUi = previousAnswerUi && previousAnswerUi.key === questionKey;
+    answerInput.dataset.aiQuestionKey = questionKey;
+    answerInput.value = preserveAnswerUi ? previousAnswerUi.value : question.userAnswer || "";
+    answerInput.placeholder = question.direction === "en-zh" ? "输入中文答案" : "输入英文答案";
+    answerInput.disabled = aiRequestInProgress;
+    $("#submitAiAnswer").disabled = aiRequestInProgress;
+    const last = Number(set.index) >= set.questions.length - 1;
+    $("#submitAiAnswer").innerHTML = last ? '提交<i data-lucide="check" aria-hidden="true"></i>' : '下一题<i data-lucide="arrow-right" aria-hidden="true"></i>';
+    $("#previousAiQuestion").disabled = aiRequestInProgress || Number(set.index) <= 0;
+    $("#aiDraftStatus").textContent = aiRequestInProgress ? "正在保存…" : "答案会保存到当前账号";
+    $("#aiFeedback").hidden = true;
+    $("#aiFeedbackActions").hidden = true;
     renderAiTutorWindow();
-    if (!answered) requestAnimationFrame(() => $("#aiAnswerInput").focus());
+    if (!aiRequestInProgress) requestAnimationFrame(() => $("#aiAnswerInput").focus());
     refreshIcons();
   }
 
@@ -2529,6 +2677,85 @@
       throw error;
     }
     if (!text || !data || typeof data !== "object") throw new Error("服务器返回格式异常，请刷新后重试");
+    return data;
+  }
+
+  function currentFormalReviewBatch() {
+    model.formalPractice = normalizeClientFormalPractice(model.formalPractice);
+    return model.formalPractice.review.current;
+  }
+
+  function applyReviewBatchResponse(data) {
+    if (data && data.state && typeof data.state === "object") model = mergeModels(model, data.state);
+    model.formalPractice = normalizeClientFormalPractice(model.formalPractice);
+    if (data && Object.hasOwn(data, "batch")) {
+      model.formalPractice.review.current = data.batch && Array.isArray(data.batch.questions) ? data.batch : null;
+      model.formalPractice.updatedAt = String(data.batch && data.batch.updatedAt || new Date().toISOString());
+    }
+    const batch = currentFormalReviewBatch();
+    if (batch) {
+      const session = getSession();
+      session.batchId = batch.id;
+      session.mode = batch.mode;
+      session.taskIds = batch.questions.map(question => question.taskId);
+      session.index = Math.min(Math.max(Number(batch.index) || 0, 0), Math.max(0, session.taskIds.length - 1));
+      session.currentTaskId = session.taskIds[session.index] || null;
+      session.batchComplete = batch.phase === "completed";
+      touchReviewSession(session);
+    }
+    saveModel();
+    return batch;
+  }
+
+  async function reviewBatchRequest(path, { method = "POST", body } = {}) {
+    const accountContext = captureAccountRequestContext();
+    const response = await fetch(`/api/review/batches${path}`, {
+      method,
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    const text = await response.text().catch(() => "");
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
+    if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
+    applyReviewBatchResponse(data);
+    if (!response.ok) {
+      const error = new Error(String(data.error || "题组请求失败，请稍后重试"));
+      error.statusCode = response.status;
+      error.data = data;
+      throw error;
+    }
+    return data;
+  }
+
+  function applyAiPracticeResponse(data) {
+    if (data && data.practice) model.aiPractice = normalizeClientAiPractice(data.practice);
+    saveModel();
+    return model.aiPractice;
+  }
+
+  async function aiBatchRequest(path, { method = "POST", body } = {}) {
+    const accountContext = captureAccountRequestContext();
+    const response = await fetch(`/api/ai/questions/batch${path}`, {
+      method,
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    const text = await response.text().catch(() => "");
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch (_) { data = {}; }
+    if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
+    applyAiPracticeResponse(data);
+    if (!response.ok) {
+      const error = new Error(String(data.error || "题组请求失败，请稍后重试"));
+      error.statusCode = response.status;
+      error.data = data;
+      throw error;
+    }
     return data;
   }
 
@@ -3148,21 +3375,19 @@
     renderPreviewPractice();
   }
 
-  async function generateAiQuestions() {
-    if (aiRequestInProgress || !aiOptions.configured) return;
-    const existingPractice = normalizeClientAiPractice(model.aiPractice);
-    const currentSet = existingPractice.currentSet;
-    const currentUnfinished = currentSet && !currentSet.completed && Number(currentSet.index) < currentSet.questions.length;
-    if ((currentUnfinished || existingPractice.queuedSets.length) && !window.confirm(`重新生成会替换当前${currentUnfinished ? "未完成题组" : "题组"}${existingPractice.queuedSets.length ? `和 ${existingPractice.queuedSets.length} 个待开始题组` : ""}，确定继续吗？`)) return;
+  async function generateAiQuestions(retryRequestId = "", retrySettings = null) {
+    if (aiGenerationInProgress || !aiOptions.configured) return;
+    const accountContext = captureAccountRequestContext();
     const button = $("#generateAiQuestions");
-    const settings = {
+    const settings = retrySettings || {
       model: $("#aiModelSelect").value,
       reasoningEffort: $$('[data-ai-effort]').find(item => item.classList.contains("is-selected"))?.dataset.aiEffort || "medium",
       count: Number($("#aiQuestionCount").value) || 5,
       groupCount: Number($("#aiGroupCount").value) || 1
     };
+    const requestId = retryRequestId || (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function" ? `aigen-${globalThis.crypto.randomUUID()}` : `aigen-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
     updateAiPreferences(settings);
-    aiRequestInProgress = true;
+    aiGenerationInProgress = true;
     setBusyButton(button, true, settings.groupCount > 1 ? `正在生成 ${settings.groupCount} 组…` : "正在生成…");
     aiStatusMessage = settings.groupCount > 1 ? `正在预生成 ${settings.groupCount} 个独立题组…` : "正在分析学习进度…";
     $("#aiStatus").textContent = aiStatusMessage;
@@ -3171,34 +3396,36 @@
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settings)
+        body: JSON.stringify({ ...settings, requestId })
       });
       const data = await responseJson(response);
-      const practice = normalizeClientAiPractice(model.aiPractice);
-      practice.settings = data.settings;
-      practice.currentSet = data.set;
-      practice.queuedSets = Array.isArray(data.queuedSets) ? data.queuedSets : [];
-      practice.tutor = null;
-      aiTutorTarget = null;
-      practice.updatedAt = new Date().toISOString();
-      model.aiPractice = practice;
-      saveModel();
-      aiStatusMessage = settings.groupCount > 1 ? `${settings.groupCount} 组题目已全部生成，可以连续练习` : "题目已生成";
+      if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
+      applyAiPracticeResponse(data);
+      aiStatusMessage = data.pending
+        ? "同一生成请求仍在后台处理中，当前题组可以继续作答"
+        : data.started
+        ? "题目已生成，可以开始作答"
+        : data.reused
+          ? "这次生成请求已经处理，不会重复加入队列"
+          : `${settings.groupCount} 组题目已追加到队列末尾`;
     } catch (error) {
-      aiStatusMessage = error.message;
-      showToast(error.message);
+      if (accountRequestContextIsCurrent(accountContext) && !error.silent) aiStatusMessage = error.message;
+      showRequestError(error);
     } finally {
-      aiRequestInProgress = false;
-      setBusyButton(button, false, "");
-      renderAiView();
+      aiGenerationInProgress = false;
+      if (accountRequestContextIsCurrent(accountContext)) {
+        setBusyButton(button, false, "");
+        renderAiView();
+      }
     }
   }
 
   async function continuePreparedAiSet() {
     if (aiRequestInProgress) return;
+    const accountContext = captureAccountRequestContext();
     const practice = normalizeClientAiPractice(model.aiPractice);
-    if (!practice.queuedSets.length) return generateAiQuestions();
-    const button = $("#generateAnotherAiSet");
+    if (!practice.generationQueue.length) return generateAiQuestions();
+    const button = $("#startNextAiBatch") || $("#generateAnotherAiSet");
     aiRequestInProgress = true;
     setBusyButton(button, true, "正在进入…");
     try {
@@ -3209,66 +3436,97 @@
         body: "{}"
       });
       const data = await responseJson(response);
+      if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
       model.aiPractice = normalizeClientAiPractice(data.practice);
       aiTutorTarget = null;
       saveModel();
       const nextSet = model.aiPractice.currentSet;
       aiStatusMessage = `已进入第 ${Number(nextSet && nextSet.groupNumber) || 1} 组${data.remainingGroups ? `，后续还有 ${data.remainingGroups} 组` : ""}`;
     } catch (error) {
-      aiStatusMessage = error.message;
-      showToast(error.message);
+      if (accountRequestContextIsCurrent(accountContext) && !error.silent) aiStatusMessage = error.message;
+      showRequestError(error);
     } finally {
       aiRequestInProgress = false;
-      setBusyButton(button, false, "");
-      renderAiView();
+      if (accountRequestContextIsCurrent(accountContext)) {
+        setBusyButton(button, false, "");
+        renderAiView();
+      }
     }
+  }
+
+  function retryQueuedAiGeneration(requestId) {
+    const item = normalizeClientAiPractice(model.aiPractice).generationQueue.find(candidate => candidate.requestId === requestId && candidate.status === "failed");
+    if (!item) return;
+    return generateAiQuestions(item.requestId, { model: item.model, reasoningEffort: item.reasoningEffort, count: item.count, groupCount: item.groupCount });
   }
 
   async function submitAiAnswer(event) {
     event.preventDefault();
     if (aiRequestInProgress) return;
+    const accountContext = captureAccountRequestContext();
     const set = model.aiPractice && model.aiPractice.currentSet;
     const question = currentAiQuestion();
     const answer = $("#aiAnswerInput").value.trim();
-    if (!set || !question || !answer) return;
+    if (!set || set.phase !== "answering" || !question) return;
+    const last = Number(set.index) >= set.questions.length - 1;
     aiRequestInProgress = true;
-    setBusyButton($("#submitAiAnswer"), true, "AI 正在判断…");
-    $("#aiAnswerInput").disabled = true;
+    renderAiView();
     try {
-      const response = await fetch("/api/ai/questions/grade", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ setId: set.id, questionId: question.id, answer })
+      await aiBatchRequest("/draft", {
+        method: "PUT",
+        body: { setId: set.id, questionId: question.id, index: Number(set.index) || 0, nextIndex: last ? Number(set.index) || 0 : (Number(set.index) || 0) + 1, answer }
       });
-      const data = await responseJson(response);
-      model.aiPractice = normalizeClientAiPractice(data.practice);
-      saveModel();
-      invalidateAbilities();
+      if (last) await aiBatchRequest("/review", { body: { setId: set.id } });
     } catch (error) {
-      showToast(error.message);
-      $("#aiAnswerInput").disabled = false;
+      showRequestError(error);
     } finally {
-      aiRequestInProgress = false;
-      setBusyButton($("#submitAiAnswer"), false, "");
-      renderAiView();
+      if (accountRequestContextIsCurrent(accountContext)) {
+        aiRequestInProgress = false;
+        renderAiView();
+      }
     }
   }
 
-  function advanceAiQuestion() {
-    const practice = normalizeClientAiPractice(model.aiPractice);
-    const set = practice.currentSet;
-    if (!set) return;
-    const question = set.questions[Number(set.index) || 0];
-    if (!question || typeof question.correct !== "boolean") return;
-    set.index = (Number(set.index) || 0) + 1;
-    set.completed = set.index >= set.questions.length;
-    practice.tutor = null;
-    aiTutorTarget = null;
-    practice.updatedAt = new Date().toISOString();
-    model.aiPractice = practice;
-    saveModel();
+  async function moveAiQuestion(delta) {
+    if (aiRequestInProgress) return;
+    const accountContext = captureAccountRequestContext();
+    const set = model.aiPractice && model.aiPractice.currentSet;
+    const question = currentAiQuestion();
+    if (!set || set.phase !== "answering" || !question) return;
+    const nextIndex = Math.max(0, Math.min(set.questions.length - 1, (Number(set.index) || 0) + delta));
+    if (nextIndex === Number(set.index)) return;
+    const answer = $("#aiAnswerInput").value.trim();
+    aiRequestInProgress = true;
     renderAiView();
+    try {
+      await aiBatchRequest("/draft", { method: "PUT", body: { setId: set.id, questionId: question.id, index: Number(set.index) || 0, nextIndex, answer } });
+    } catch (error) { showRequestError(error); }
+    finally { if (accountRequestContextIsCurrent(accountContext)) { aiRequestInProgress = false; renderAiView(); } }
+  }
+
+  async function editAiBatch() {
+    const set = model.aiPractice && model.aiPractice.currentSet;
+    if (!set || aiRequestInProgress) return;
+    const accountContext = captureAccountRequestContext();
+    aiRequestInProgress = true;
+    try { await aiBatchRequest("/edit", { body: { setId: set.id, index: Math.max(0, set.questions.length - 1) } }); }
+    catch (error) { showRequestError(error); }
+    finally { if (accountRequestContextIsCurrent(accountContext)) { aiRequestInProgress = false; renderAiView(); } }
+  }
+
+  async function gradeAiBatch() {
+    const set = model.aiPractice && model.aiPractice.currentSet;
+    if (!set || aiRequestInProgress) return;
+    const accountContext = captureAccountRequestContext();
+    aiRequestInProgress = true;
+    renderAiView();
+    try {
+      await aiBatchRequest("/grade", { body: { setId: set.id, gradeRequestId: set.gradeRequestId } });
+      invalidateReviewVariantStats();
+      invalidateAbilities();
+      await loadAbilities(true);
+    } catch (error) { showRequestError(error); }
+    finally { if (accountRequestContextIsCurrent(accountContext)) { aiRequestInProgress = false; renderAiView(); } }
   }
 
   function selectedExamSettings() {
@@ -4633,7 +4891,7 @@
     const today = localDate();
     const existing = model.sessions[today];
     if (!existing || existing.mode !== reviewMode) {
-      const next = { date: today, mode: reviewMode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
+      const next = { date: today, mode: reviewMode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchId: "", batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
       model.sessions[today] = next;
       saveModel();
       return next;
@@ -4780,6 +5038,7 @@
       index: 0,
       doneTaskIds: [],
       currentTaskId: normalizedTaskIds[0] || null,
+      batchId: newReviewBatchId(),
       batchComplete: normalizedTaskIds.length === 0,
       updatedAt: new Date().toISOString(),
       variants: {}
@@ -4843,6 +5102,11 @@
   function newReviewAttemptId() {
     if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") return `review-${globalThis.crypto.randomUUID()}`;
     return `review-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  function newReviewBatchId() {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") return `reviewbatch-${globalThis.crypto.randomUUID()}`;
+    return `reviewbatch-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   }
 
   function reviewVariantRetryUi(session, visible) {
@@ -5027,8 +5291,10 @@
         if (error && error.statusCode !== 401) showToast(reviewVariantStatusMessage);
       } finally {
         reviewVariantPreparation = null;
-        const current = currentBaseTask();
-        if (activeView === "home" && current && current.item.type === "sentence") renderHome();
+        // A batch can start with a word while containing sentence questions
+        // later in the group. Always re-render after every sentence snapshot
+        // finishes so that word-first batches are connected to the server too.
+        if (activeView === "home") renderHome();
       }
     })();
     reviewVariantPreparation = { key, promise };
@@ -5057,6 +5323,7 @@
       session.taskIds = buildBatch();
       session.index = 0;
       session.currentTaskId = session.taskIds[0] || null;
+      session.batchId = session.taskIds.length ? newReviewBatchId() : "";
       touchReviewSession(session);
       if (!session.taskIds.length) session.batchComplete = true;
       changed = true;
@@ -5065,6 +5332,48 @@
     const sessionTasks = sentenceTasksMissingVariants(session);
     if (sessionTasks.length) prepareReviewSentenceVariants(session);
     return session;
+  }
+
+  function reviewSessionCanStartBatch(session) {
+    return Boolean(session && session.taskIds.length && session.taskIds.every(taskId => {
+      const task = taskById.get(taskId);
+      return task && (task.item.type !== "sentence" || normalizeClientReviewVariant(session.variants && session.variants[taskId]));
+    }));
+  }
+
+  async function ensureServerReviewBatch(session) {
+    if (!API_ENABLED || !currentUser || reviewBatchRequestInProgress || !reviewSessionCanStartBatch(session)) return currentFormalReviewBatch();
+    const accountContext = captureAccountRequestContext();
+    const existing = currentFormalReviewBatch();
+    if (existing && existing.id === session.batchId) return existing;
+    if (!session.batchId) {
+      session.batchId = newReviewBatchId();
+      touchReviewSession(session);
+      saveModel();
+    }
+    reviewBatchRequestInProgress = true;
+    try {
+      const settings = selectedAiSettings();
+      await reviewBatchRequest("/start", {
+        body: {
+          batchId: session.batchId,
+          date: session.date || localDate(),
+          mode: session.mode,
+          taskIds: session.taskIds,
+          variantIds: Object.fromEntries(Object.entries(session.variants || {}).map(([taskId, variant]) => [taskId, variant && variant.id || ""])),
+          model: settings.model,
+          reasoningEffort: settings.reasoningEffort
+        }
+      });
+    } catch (error) {
+      if ((!error.data || !error.data.batch) && !error.silent) showToast(error.message);
+    } finally {
+      if (accountRequestContextIsCurrent(accountContext)) {
+        reviewBatchRequestInProgress = false;
+        renderHome();
+      }
+    }
+    return currentFormalReviewBatch();
   }
 
   function normalizeClientSelfStudy(value) {
@@ -5478,7 +5787,7 @@
     reviewAnswerResetRequested = true;
     reviewMode = mode;
     const today = localDate();
-    model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
+    model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchId: "", batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
     saveModel();
     $$("[data-mode]").forEach(button => {
       const active = button.dataset.mode === mode;
@@ -5488,6 +5797,47 @@
     renderHome();
   }
 
+  async function loadReviewVariantStats() {
+    if (!API_ENABLED || !currentUser) return;
+    if (reviewVariantStatsFrom && reviewVariantStatsTo && reviewVariantStatsFrom > reviewVariantStatsTo) {
+      showToast("开始日期不能晚于结束日期");
+      return;
+    }
+    if (reviewVariantStatsLoading) {
+      reviewVariantStatsReloadPending = true;
+      return;
+    }
+    const requestSerial = ++reviewVariantStatsRequestSerial;
+    const accountId = String(currentUser.id || "");
+    reviewVariantStatsLoading = true;
+    try {
+      const query = new URLSearchParams({ sort: reviewVariantStatsSort, order: reviewVariantStatsOrder });
+      if (reviewVariantStatsFrom) query.set("from", reviewVariantStatsFrom);
+      if (reviewVariantStatsTo) query.set("to", reviewVariantStatsTo);
+      const data = await responseJson(await fetch(`/api/review/sentence-stats?${query}`, { credentials: "same-origin", cache: "no-store" }));
+      if (requestSerial !== reviewVariantStatsRequestSerial || String(currentUser && currentUser.id || "") !== accountId) return;
+      const rows = Array.isArray(data.stats) ? data.stats : [];
+      reviewVariantStats = new Map(rows.map(item => [String(item.id || ""), item]));
+      reviewVariantStatsOrderIds = rows.map(item => String(item.id || "")).filter(Boolean);
+      reviewVariantStatsSyncKey = String(data.syncKey || "");
+    } catch (error) {
+      if (requestSerial === reviewVariantStatsRequestSerial) showToast(error.message);
+    } finally {
+      if (requestSerial !== reviewVariantStatsRequestSerial) return;
+      reviewVariantStatsLoading = false;
+      renderCurrentReviewVariantPoolBrowser();
+      if (reviewVariantStatsReloadPending) {
+        reviewVariantStatsReloadPending = false;
+        void loadReviewVariantStats();
+      }
+    }
+  }
+
+  function invalidateReviewVariantStats() {
+    reviewVariantStatsSyncKey = "";
+    if (reviewVariantPoolExpanded) void loadReviewVariantStats();
+  }
+
   function renderReviewVariantPoolBrowser(session, baseTask, poolValue = reviewVariantPoolStatus) {
     const browser = $("#reviewVariantPoolBrowser");
     const toggle = $("#reviewVariantPoolToggle");
@@ -5495,6 +5845,10 @@
     const search = $("#reviewVariantPoolSearch");
     const pageSizeSelect = $("#reviewVariantPoolPageSize");
     const showChinese = $("#reviewVariantPoolShowChinese");
+    const statsFrom = $("#reviewVariantStatsFrom");
+    const statsTo = $("#reviewVariantStatsTo");
+    const statsSort = $("#reviewVariantStatsSort");
+    const statsOrder = $("#reviewVariantStatsOrder");
     const meta = $("#reviewVariantPoolListMeta");
     const list = $("#reviewVariantPoolList");
     const pageInfo = $("#reviewVariantPoolPageInfo");
@@ -5516,10 +5870,18 @@
     search.value = reviewVariantPoolSearch;
     pageSizeSelect.value = String(reviewVariantPoolPageSize);
     showChinese.checked = reviewVariantPoolShowChinese;
+    statsFrom.value = reviewVariantStatsFrom;
+    statsTo.value = reviewVariantStatsTo;
+    statsSort.value = reviewVariantStatsSort;
+    statsOrder.dataset.order = reviewVariantStatsOrder;
+    statsOrder.innerHTML = `<i data-lucide="arrow-${reviewVariantStatsOrder === "asc" ? "up" : "down"}" aria-hidden="true"></i><span>${reviewVariantStatsOrder === "asc" ? "升序" : "降序"}</span>`;
+    if (pool.syncKey && reviewVariantStatsSyncKey !== pool.syncKey && !reviewVariantStatsLoading) void loadReviewVariantStats();
     const query = reviewVariantPoolSearch.trim();
     const englishQuery = normalizeEnglish(query);
     const chineseQuery = normalizeChinese(query);
-    const filtered = sentences.filter(item => {
+    const orderMap = new Map(reviewVariantStatsOrderIds.map((id, index) => [id, index]));
+    const orderedSentences = [...sentences].sort((left, right) => (orderMap.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (orderMap.get(right.id) ?? Number.MAX_SAFE_INTEGER) || left.index - right.index);
+    const filtered = orderedSentences.filter(item => {
       if (!query) return true;
       return Boolean(
         (englishQuery && normalizeEnglish(item.english).includes(englishQuery))
@@ -5538,11 +5900,13 @@
       : `没有找到“${query}”`;
     list.innerHTML = pageItems.length ? pageItems.map(item => {
       const current = currentVariantId ? item.id === currentVariantId : Boolean(currentTaskId && item.assignedTaskIds.includes(currentTaskId));
+      const stats = reviewVariantStats.get(item.id) || { attempts: 0, correct: 0, wrong: 0, accuracy: null, lastPracticedAt: "" };
       return `<li class="review-pool-item${current ? " is-current" : ""}" data-pool-sentence-id="${escapeHtml(item.id)}"${current ? ' aria-current="true"' : ""}>
         <span class="review-pool-sequence">${item.index}</span>
         <div class="review-pool-copy">
           <p class="review-pool-english" lang="en">${escapeHtml(item.english)}</p>
           ${reviewVariantPoolShowChinese ? `<p class="review-pool-chinese">${escapeHtml(item.chinese)}</p>` : ""}
+          <p class="review-pool-stats"><span>做 ${stats.attempts}</span><span>对 ${stats.correct}</span><span>错 ${stats.wrong}</span><span>正确率 ${stats.accuracy === null ? "—" : `${stats.accuracy}%`}</span><span>最近 ${stats.lastPracticedAt ? escapeHtml(formatAiHistoryTime(stats.lastPracticedAt, stats.lastPracticedAt)) : "未练习"}</span></p>
         </div>
         ${current ? '<span class="review-pool-current">当前复习</span>' : ""}
       </li>`;
@@ -5606,6 +5970,49 @@
     renderReviewVariantPoolBrowser(session, baseTask, pool);
   }
 
+  function renderBatchReviewPanel(prefix, batch) {
+    const panel = $(`#${prefix}BatchReview`);
+    if (!panel) return;
+    const visible = Boolean(batch && ["review", "grading"].includes(batch.phase));
+    panel.hidden = !visible;
+    if (!visible) return;
+    $(`#${prefix}BatchReviewCount`).textContent = `${batch.questions.length} 题`;
+    $(`#${prefix}BatchReviewList`).innerHTML = batch.questions.map((question, index) => `<li>
+      <span class="batch-question-number">${index + 1}</span>
+      <div><p class="batch-question-prompt">${escapeHtml(question.prompt || "")}</p><p class="batch-user-answer"><span>你的答案</span>${escapeHtml(question.answer || question.userAnswer || "（未填写）")}</p></div>
+    </li>`).join("");
+    const grading = batch.phase === "grading";
+    const gradeButton = $(`#grade${prefix[0].toUpperCase()}${prefix.slice(1)}Batch`);
+    const editButton = $(`#edit${prefix[0].toUpperCase()}${prefix.slice(1)}Batch`);
+    if (gradeButton) gradeButton.disabled = grading;
+    if (editButton) editButton.disabled = grading;
+    const status = $(`#${prefix}BatchGradeStatus`);
+    if (status) status.textContent = grading ? "正在统一批改整组答案，请勿重复提交…" : (batch.lastError || "");
+  }
+
+  function renderBatchResultsPanel(prefix, batch) {
+    const panel = $(`#${prefix}BatchResults`);
+    if (!panel) return;
+    const visible = Boolean(batch && batch.phase === "completed");
+    panel.hidden = !visible;
+    if (!visible) return;
+    const resultFor = question => question.result || (typeof question.correct === "boolean" ? question : {});
+    const earned = batch.questions.reduce((sum, question) => sum + (Number(resultFor(question).score) || 0), 0);
+    const correctCount = batch.questions.filter(question => resultFor(question).correct === true && resultFor(question).gradingStatus !== "partial").length;
+    $(`#${prefix}BatchScore`).textContent = `${batch.questions.length} 题 · ${correctCount} 题完全正确 · ${formatQuestionScore(earned)} / ${batch.questions.length} 分`;
+    $(`#${prefix}BatchResultList`).innerHTML = batch.questions.map((question, index) => {
+      const result = resultFor(question);
+      const partial = result.gradingStatus === "partial";
+      const status = partial ? "部分正确" : result.correct ? "正确" : "错误";
+      const statusClass = partial ? "is-partial" : result.correct ? "is-correct" : "is-wrong";
+      return `<li class="${statusClass}">
+        <div class="batch-result-heading"><span class="batch-question-number">${index + 1}</span><strong>${status} · ${formatQuestionScore(result.score || 0)} 分</strong></div>
+        <p class="batch-question-prompt">${escapeHtml(question.prompt || (question.direction === "en-zh" ? question.english : question.chinese) || "")}</p>
+        <dl><div><dt>你的答案</dt><dd>${escapeHtml(question.answer || question.userAnswer || "（未填写）")}</dd></div><div><dt>参考答案</dt><dd>${escapeHtml(question.referenceAnswer || "（未记录）")}</dd></div><div><dt>${result.correct && !partial ? "判定说明" : "错误原因"}</dt><dd>${escapeHtml(result.detailedExplanation || result.explanation || "请对照参考答案检查。")}</dd></div></dl>
+      </li>`;
+    }).join("");
+  }
+
   function renderHome() {
     renderSelfStudyModeCard();
     const answerInput = $("#answerInput");
@@ -5622,6 +6029,20 @@
     } : null;
     const resetAnswer = reviewAnswerResetRequested;
     const session = ensureBatch();
+    let formalBatch = currentFormalReviewBatch();
+    if (formalBatch && formalBatch.date === session.date && formalBatch.id !== session.batchId && formalBatch.phase !== "completed") {
+      session.batchId = formalBatch.id;
+      session.mode = formalBatch.mode;
+      session.taskIds = formalBatch.questions.map(question => question.taskId);
+      session.index = Math.min(Math.max(Number(formalBatch.index) || 0, 0), Math.max(0, session.taskIds.length - 1));
+      session.currentTaskId = session.taskIds[session.index] || null;
+      touchReviewSession(session);
+    }
+    const batchMatchesSession = Boolean(formalBatch && formalBatch.id === session.batchId && formalBatch.date === session.date);
+    if (batchMatchesSession && formalBatch.phase !== "completed") {
+      session.index = Math.min(Math.max(Number(formalBatch.index) || 0, 0), Math.max(0, session.taskIds.length - 1));
+      session.currentTaskId = session.taskIds[session.index] || null;
+    }
     const stats = todayStats();
     const due = taskCandidates(reviewMode, new Set()).length;
     const done = session.doneTaskIds.length;
@@ -5637,6 +6058,14 @@
     const task = currentTask();
     renderAiTutorWindow();
     const panel = $("#reviewPanel"); const complete = $("#reviewComplete");
+    renderBatchReviewPanel("review", batchMatchesSession ? formalBatch : null);
+    renderBatchResultsPanel("review", batchMatchesSession ? formalBatch : null);
+    if (batchMatchesSession && ["review", "grading", "completed"].includes(formalBatch.phase)) {
+      panel.hidden = true;
+      complete.hidden = true;
+      reviewVariantRetryUi(session, false);
+      return;
+    }
     if (!task) {
       reviewAnswerResetRequested = true;
       if (answerInput) {
@@ -5658,6 +6087,27 @@
       return;
     }
     panel.hidden = false; complete.hidden = true;
+    if (API_ENABLED && currentUser && !batchMatchesSession) {
+      const canStartServerBatch = reviewSessionCanStartBatch(session);
+      const missingSentenceCount = sentenceTasksMissingVariants(session).length;
+      reviewVariantRetryUi(session, Boolean(baseTask.item.type === "sentence" && !session.variants[baseTask.taskId]));
+      $("#promptType").textContent = "整组复习";
+      $("#promptDay").textContent = canStartServerBatch ? "正在保存题目快照" : "正在准备句子快照";
+      $("#questionCount").textContent = `1 / ${session.taskIds.length}`;
+      $("#directionLabel").textContent = canStartServerBatch ? "准备本组草稿" : `还有 ${missingSentenceCount} 道句子题待固定`;
+      $("#promptText").textContent = canStartServerBatch ? "正在准备可恢复的整组作答…" : "正在从本轮句子池固定整组题目…";
+      $("#promptSpeech").innerHTML = "";
+      $("#phoneticLine").textContent = canStartServerBatch ? "题目快照保存完成后即可作答。" : "准备完成前不会开放输入，避免草稿与最终题目错位。";
+      $("#exampleLine").textContent = "";
+      answerInput.value = "";
+      answerInput.disabled = true;
+      submitButton.disabled = true;
+      $("#previousReviewQuestion").disabled = true;
+      feedback.hidden = true;
+      feedbackActions.hidden = true;
+      if (canStartServerBatch) void ensureServerReviewBatch(session);
+      return;
+    }
     if (baseTask.item.type === "sentence" && !session.variants[baseTask.taskId]) {
       const pendingTaskKey = `${baseTask.taskId}|pending`;
       const preservePendingUi = !resetAnswer && previousReviewUi && previousReviewUi.taskKey === pendingTaskKey;
@@ -5686,6 +6136,8 @@
       return;
     }
     reviewVariantRetryUi(session, false);
+    formalBatch = currentFormalReviewBatch();
+    const draftQuestion = batchMatchesSession ? formalBatch.questions[formalBatch.index] : null;
     const taskKey = `${task.taskId}|${task.reviewVariant?.id || "base"}`;
     const preserveReviewUi = !resetAnswer && previousReviewUi && previousReviewUi.taskKey === taskKey;
     $("#promptType").textContent = task.item.type === "word" ? "单词" : "句子变式";
@@ -5700,24 +6152,18 @@
     if (answerInput) {
       answerInput.dataset.reviewTaskKey = taskKey;
       answerInput.placeholder = task.direction === "en-zh" ? "输入中文答案" : "输入英文答案";
-      if (preserveReviewUi) {
-        // Preserve the exact control state during sync/polling redraws. This
-        // covers both an unsubmitted draft and feedback after grading.
-        answerInput.value = previousReviewUi.value;
-        answerInput.disabled = previousReviewUi.disabled;
-      } else {
-        answerInput.value = "";
-        answerInput.disabled = false;
-      }
+      answerInput.value = preserveReviewUi ? previousReviewUi.value : (draftQuestion ? draftQuestion.answer : "");
+      answerInput.disabled = reviewBatchRequestInProgress;
     }
-    if (submitButton) submitButton.disabled = preserveReviewUi ? previousReviewUi.submitDisabled : false;
-    if (preserveReviewUi) {
-      if (feedback) feedback.hidden = previousReviewUi.feedbackHidden;
-      if (feedbackActions) feedbackActions.hidden = previousReviewUi.actionsHidden;
-    } else {
-      if (feedback) feedback.hidden = true;
-      if (feedbackActions) feedbackActions.hidden = true;
+    if (submitButton) {
+      submitButton.disabled = reviewBatchRequestInProgress;
+      const last = formalBatch && formalBatch.index >= formalBatch.questions.length - 1;
+      submitButton.innerHTML = last ? '提交<i data-lucide="check" aria-hidden="true"></i>' : '下一题<i data-lucide="arrow-right" aria-hidden="true"></i>';
     }
+    $("#previousReviewQuestion").disabled = reviewBatchRequestInProgress || !formalBatch || formalBatch.index <= 0;
+    $("#reviewDraftStatus").textContent = reviewBatchRequestInProgress ? "正在保存…" : "答案会保存到当前账号";
+    if (feedback) feedback.hidden = true;
+    if (feedbackActions) feedbackActions.hidden = true;
     reviewAnswerResetRequested = false;
     if (!preserveReviewUi && answerInput && !answerInput.disabled) requestAnimationFrame(() => answerInput.focus());
   }
@@ -5801,77 +6247,90 @@
 
   async function submitAnswer(event) {
     event.preventDefault();
-    if (gradingInProgress) return;
-    const task = immutableReviewTask(currentTask());
-    if (!task) return;
+    if (reviewBatchRequestInProgress) return;
+    const accountContext = captureAccountRequestContext();
+    const batch = currentFormalReviewBatch();
+    if (!batch || batch.phase !== "answering") return;
+    const question = batch.questions[batch.index];
+    if (!question) return;
     const answer = $("#answerInput").value.trim();
-    let correct = answerMatches(task, answer);
-    let grading = { source: "local", explanation: "", score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", problemWords: [], wordResults: [] };
-    if (correct && answer && task.direction === "en-zh" && !chineseAnswerMatches(answer, [task.item.chinese], task.item.english)) {
-      grading.explanation = "你的翻译使用了课程词库允许的同义表达，意思正确。";
-    }
-    if (correct && answer && task.direction === "en-zh" && chineseNaturalPersonMeasureMatches(answer, task.item.acceptedChinese || [task.item.chinese], task.item.english)) {
-      grading.explanation = NATURAL_PERSON_MEASURE_EXPLANATION;
-    }
-    if (correct && answer && task.direction === "en-zh" && chineseOptionalMeasureOmissionMatches(answer, task.item.acceptedChinese || [task.item.chinese])) {
-      grading.explanation = OPTIONAL_MEASURE_OMISSION_EXPLANATION;
-    }
-    if (correct && answer && task.direction === "en-zh" && chineseNaturalDeepMatches(answer, task.item.acceptedChinese || [task.item.chinese], task.item.english)) {
-      grading.explanation = NATURAL_DEEP_EXPLANATION;
-    }
-    if (!correct && answer && task.direction === "en-zh") {
-      const quality = chineseAnswerQuality(answer, task.item.acceptedChinese || [task.item.chinese], task.item.english);
-      if (quality.gradingStatus === "partial") {
-        correct = true;
-        grading = { ...grading, ...quality, explanation: "英语意思理解正确；中文量词不够自然，本题按部分正确记录。" };
+    const last = batch.index >= batch.questions.length - 1;
+    reviewBatchRequestInProgress = true;
+    renderHome();
+    try {
+      const saved = await reviewBatchRequest("/draft", {
+        method: "PUT",
+        body: {
+          batchId: batch.id,
+          questionId: question.id,
+          index: batch.index,
+          nextIndex: last ? batch.index : batch.index + 1,
+          answer
+        }
+      });
+      if (last) await reviewBatchRequest("/review", { body: { batchId: saved.batch.id } });
+    } catch (error) {
+      showRequestError(error);
+      if (error.data && Number.isInteger(error.data.missingIndex)) requestAnimationFrame(() => $("#answerInput").focus());
+    } finally {
+      if (accountRequestContextIsCurrent(accountContext)) {
+        reviewBatchRequestInProgress = false;
+        reviewAnswerResetRequested = true;
+        renderHome();
       }
     }
-    if (!correct && answer && API_ENABLED && task.item.type === "sentence") {
-      setGradingState(true);
-      try {
-        grading = await requestAiGrade(task, answer);
-        correct = grading.correct;
-      } catch (_) {
-        grading = { source: "local-fallback", explanation: "AI \u5224\u9898\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u5df2\u6309\u672c\u5730\u7b54\u6848\u5224\u5b9a\u3002" };
-      } finally {
-        setGradingState(false);
-      }
-    }
-      grading = {
-      ...grading,
-      score: Number.isFinite(Number(grading.score)) ? Math.max(0, Math.min(1, Number(grading.score))) : (correct ? 1 : 0),
-      gradingStatus: ["correct", "partial", "incorrect"].includes(grading.gradingStatus) ? grading.gradingStatus : (correct ? "correct" : "incorrect"),
-      problemWords: Array.isArray(grading.problemWords) ? grading.problemWords : [],
-      wordResults: Array.isArray(grading.wordResults) ? grading.wordResults : [],
-      detailedExplanation: String(grading.detailedExplanation || "").trim() || buildTranslationExplanation({
-        direction: task.direction,
-        referenceAnswer: correctAnswer(task),
-        answer,
-        correct,
-        gradingStatus: grading.gradingStatus,
-        explanation: grading.explanation,
-        problemWords: grading.problemWords
-      })
-    };
-    updateSchedule(task, correct, grading.gradingStatus, grading.score);
-    const today = localDate();
-    model.history[today] = model.history[today] || { reviewed: 0, correct: 0 };
-    model.history[today].reviewed += 1;
-    model.history[today].correct = Math.round((model.history[today].correct + grading.score) * 100) / 100;
-    const reviewVariant = task.reviewVariant ? { ...task.reviewVariant } : null;
-    const attemptId = newReviewAttemptId();
-    const submittedAt = new Date().toISOString();
-    const prompt = task.direction === "en-zh" ? task.item.english : task.item.chinese;
-    model.attempts.push({ id: attemptId, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, submittedAt, direction: task.direction, prompt, english: task.item.english, chinese: task.item.chinese, answer, correct, score: grading.score, gradingStatus: grading.gradingStatus, expected: correctAnswer(task), gradingSource: grading.source, explanation: grading.explanation, detailedExplanation: grading.detailedExplanation, problemWords: grading.problemWords, wordResults: grading.wordResults });
-    if (!correct) model.mistakes = [...(model.mistakes || []), { id: `mistake-${attemptId}`, attemptId, taskId: task.taskId, variantId: reviewVariant?.id || "", reviewVariant, date: today, direction: task.direction, day: task.item.day, prompt, userAnswer: answer || "（未填写）", correctAnswer: correctAnswer(task), note: grading.detailedExplanation || grading.explanation || "本次复习未答对。" }].slice(-80);
-    else model.mistakes = (model.mistakes || []).filter(mistake => !mistakeIsResolved(model.attempts, mistake && mistake.taskId));
-    const session = getSession();
-    session.currentTaskId = task.taskId;
-    session.doneTaskIds = Array.from(new Set([...(session.doneTaskIds || []), task.taskId]));
-    touchReviewSession(session);
-    saveModel();
-    abilityReport = null;
-    showFeedback(task, correct, answer, grading);
+  }
+
+  async function moveReviewBatchQuestion(delta) {
+    if (reviewBatchRequestInProgress) return;
+    const accountContext = captureAccountRequestContext();
+    const batch = currentFormalReviewBatch();
+    if (!batch || batch.phase !== "answering") return;
+    const nextIndex = Math.max(0, Math.min(batch.questions.length - 1, batch.index + delta));
+    if (nextIndex === batch.index) return;
+    const question = batch.questions[batch.index];
+    const answer = $("#answerInput").value.trim();
+    reviewBatchRequestInProgress = true;
+    renderHome();
+    try {
+      await reviewBatchRequest("/draft", { method: "PUT", body: { batchId: batch.id, questionId: question.id, index: batch.index, nextIndex, answer } });
+    } catch (error) { showRequestError(error); }
+    finally { if (accountRequestContextIsCurrent(accountContext)) { reviewBatchRequestInProgress = false; reviewAnswerResetRequested = true; renderHome(); } }
+  }
+
+  async function editReviewBatch() {
+    const batch = currentFormalReviewBatch();
+    if (!batch || reviewBatchRequestInProgress) return;
+    const accountContext = captureAccountRequestContext();
+    reviewBatchRequestInProgress = true;
+    try { await reviewBatchRequest("/edit", { body: { batchId: batch.id, index: Math.max(0, batch.questions.length - 1) } }); }
+    catch (error) { showRequestError(error); }
+    finally { if (accountRequestContextIsCurrent(accountContext)) { reviewBatchRequestInProgress = false; renderHome(); } }
+  }
+
+  async function gradeReviewBatch() {
+    const batch = currentFormalReviewBatch();
+    if (!batch || reviewBatchRequestInProgress) return;
+    const accountContext = captureAccountRequestContext();
+    reviewBatchRequestInProgress = true;
+    renderHome();
+    try {
+      await reviewBatchRequest("/grade", { body: { batchId: batch.id, gradeRequestId: batch.gradeRequestId } });
+      invalidateReviewVariantStats();
+      abilityReport = null;
+      await loadAbilities(true);
+    } catch (error) { showRequestError(error); }
+    finally { if (accountRequestContextIsCurrent(accountContext)) { reviewBatchRequestInProgress = false; renderHome(); } }
+  }
+
+  async function finishReviewBatch() {
+    const batch = currentFormalReviewBatch();
+    if (!batch || batch.phase !== "completed" || reviewBatchRequestInProgress) return;
+    const accountContext = captureAccountRequestContext();
+    reviewBatchRequestInProgress = true;
+    try { await reviewBatchRequest("/archive", { body: { batchId: batch.id } }); }
+    catch (error) { showRequestError(error); }
+    finally { if (accountRequestContextIsCurrent(accountContext)) { reviewBatchRequestInProgress = false; renderHome(); } }
   }
 
   function showFeedback(task, correct, answer, grading = {}) {
@@ -5930,7 +6389,7 @@
     const today = localDate();
     reviewAnswerResetRequested = true;
     reviewMode = task.item.type;
-    model.sessions[today] = { date: today, mode: reviewMode, taskIds: [taskId], index: 0, doneTaskIds: [], currentTaskId: taskId, batchComplete: false, updatedAt: new Date().toISOString() };
+    model.sessions[today] = { date: today, mode: reviewMode, taskIds: [taskId], index: 0, doneTaskIds: [], currentTaskId: taskId, batchId: newReviewBatchId(), batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
     saveModel();
     $$("[data-mode]").forEach(button => { const active = button.dataset.mode === reviewMode; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
     setView("home");
@@ -5945,7 +6404,7 @@
     const today = localDate();
     reviewAnswerResetRequested = true;
     reviewMode = "all";
-    model.sessions[today] = { date: today, mode: reviewMode, taskIds, index: 0, doneTaskIds: [], currentTaskId: taskIds[0], batchComplete: false, updatedAt: new Date().toISOString() };
+    model.sessions[today] = { date: today, mode: reviewMode, taskIds, index: 0, doneTaskIds: [], currentTaskId: taskIds[0], batchId: newReviewBatchId(), batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
     saveModel();
     $$("[data-mode]").forEach(button => { const active = button.dataset.mode === reviewMode; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
     setView("home");
@@ -6355,6 +6814,7 @@
       if (!reviewVariantPoolStatus || !reviewVariantPoolStatus.sentences.length) return;
       reviewVariantPoolExpanded = !reviewVariantPoolExpanded;
       renderCurrentReviewVariantPoolBrowser();
+      if (reviewVariantPoolExpanded) void loadReviewVariantStats();
     });
     $("#reviewVariantPoolSearch").addEventListener("input", event => {
       reviewVariantPoolSearch = event.target.value;
@@ -6370,6 +6830,32 @@
     $("#reviewVariantPoolShowChinese").addEventListener("change", event => {
       reviewVariantPoolShowChinese = event.target.checked;
       renderCurrentReviewVariantPoolBrowser();
+    });
+    $("#reviewVariantStatsFrom").addEventListener("change", event => {
+      reviewVariantStatsFrom = event.target.value;
+      reviewVariantPoolPage = 1;
+      void loadReviewVariantStats();
+    });
+    $("#reviewVariantStatsTo").addEventListener("change", event => {
+      reviewVariantStatsTo = event.target.value;
+      reviewVariantPoolPage = 1;
+      void loadReviewVariantStats();
+    });
+    $("#reviewVariantStatsSort").addEventListener("change", event => {
+      reviewVariantStatsSort = event.target.value;
+      reviewVariantPoolPage = 1;
+      void loadReviewVariantStats();
+    });
+    $("#reviewVariantStatsOrder").addEventListener("click", () => {
+      reviewVariantStatsOrder = reviewVariantStatsOrder === "asc" ? "desc" : "asc";
+      reviewVariantPoolPage = 1;
+      void loadReviewVariantStats();
+    });
+    $("#reviewVariantStatsClear").addEventListener("click", () => {
+      reviewVariantStatsFrom = "";
+      reviewVariantStatsTo = "";
+      reviewVariantPoolPage = 1;
+      void loadReviewVariantStats();
     });
     $("#reviewVariantPoolPrevPage").addEventListener("click", () => {
       reviewVariantPoolPage = Math.max(1, reviewVariantPoolPage - 1);
@@ -6426,8 +6912,13 @@
       updateAiPreferences({ groupCount: Number(event.target.value) });
       renderAiView();
     });
-    $("#generateAiQuestions").addEventListener("click", generateAiQuestions);
+    $("#generateAiQuestions").addEventListener("click", () => generateAiQuestions());
     $("#generateAnotherAiSet").addEventListener("click", continuePreparedAiSet);
+    $("#startNextAiBatch").addEventListener("click", continuePreparedAiSet);
+    $("#aiQueueList").addEventListener("click", event => {
+      const retry = event.target.closest("[data-retry-ai-generation]");
+      if (retry) void retryQueuedAiGeneration(retry.dataset.retryAiGeneration);
+    });
     $("#aiAnswerForm").addEventListener("submit", submitAiAnswer);
     const aiTutorLaunchButton = $("#openAiTutorButton");
     aiTutorLaunchButton.addEventListener("click", event => {
@@ -6480,11 +6971,11 @@
     $("#aiTutorDragHandle").addEventListener("pointermove", moveAiTutorWindow);
     $("#aiTutorDragHandle").addEventListener("pointerup", endAiTutorDrag);
     $("#aiTutorDragHandle").addEventListener("pointercancel", endAiTutorDrag);
-    $("#nextAiQuestion").addEventListener("click", advanceAiQuestion);
+    $("#nextAiQuestion").addEventListener("click", () => moveAiQuestion(1));
     $("#nextAiQuestion").addEventListener("keydown", event => {
       if (event.key !== "Enter") return;
       event.preventDefault();
-      advanceAiQuestion();
+      void moveAiQuestion(1);
     });
     $("#examModelSelect").addEventListener("change", event => updateExamPreferences({ model: event.target.value }));
     $$('[data-exam-effort]').forEach(button => button.addEventListener("click", () => updateExamPreferences({ reasoningEffort: button.dataset.examEffort })));
@@ -6575,6 +7066,13 @@
     });
     $("#testAiConfigButton").addEventListener("click", testAiConfiguration);
     $("#answerForm").addEventListener("submit", submitAnswer);
+    $("#previousReviewQuestion").addEventListener("click", () => moveReviewBatchQuestion(-1));
+    $("#editReviewBatch").addEventListener("click", editReviewBatch);
+    $("#gradeReviewBatch").addEventListener("click", gradeReviewBatch);
+    $("#finishReviewBatch").addEventListener("click", finishReviewBatch);
+    $("#previousAiQuestion").addEventListener("click", () => moveAiQuestion(-1));
+    $("#editAiBatch").addEventListener("click", editAiBatch);
+    $("#gradeAiBatch").addEventListener("click", gradeAiBatch);
     $("#reviewVariantRetryButton").addEventListener("click", retryReviewSentenceVariants);
     $("#nextButton").addEventListener("click", () => advance(false));
     $("#retryButton").addEventListener("click", () => advance(true));
@@ -6592,7 +7090,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=59", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=60", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

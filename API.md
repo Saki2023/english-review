@@ -66,6 +66,21 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
 | POST | `/api/review/sentence-variants` | 创建或恢复今日复习的后台 AI 句子变式任务，需要登录；返回 `202` 时按 `jobId` 查询 |
 | GET | `/api/review/sentence-variants?jobId=...` | 查询当前账号的后台句子变式任务；单次上游等待最多 10 分钟，网络/上游失败后每 5 分钟重试，内容连续 3 轮不合格后停止自动重试 |
+| GET | `/api/review/sentence-stats` | 只读获取当前账号、当前句子池的正式练习聚合统计；支持 `from`、`to`、`sort`、`order` |
+| GET | `/api/review/batches` | 获取“今日复习”当前整组批次；核对前不返回参考答案或判定 |
+| POST | `/api/review/batches/start` | 用稳定批次 ID 和题目/句子变式 ID 创建不可变题目快照 |
+| PUT | `/api/review/batches/draft` | 保存一题草稿、当前位置和下一位置，不产生正式证据 |
+| POST | `/api/review/batches/edit` | 从核对页返回作答阶段修改答案 |
+| POST | `/api/review/batches/review` | 所有题有答案后进入无泄露核对页 |
+| POST | `/api/review/batches/grade` | 使用稳定批改 ID 统一判题并原子写入整组正式证据 |
+| POST | `/api/review/batches/archive` | 完成结果查看后归档当前正式复习题组 |
+| GET | `/api/ai/questions/batch` | 获取 AI 出题当前组和安全队列元数据；未开始题组不返回题目 |
+| PUT | `/api/ai/questions/batch/draft` | 保存当前 AI 题组一题草稿和位置，不产生正式证据 |
+| POST | `/api/ai/questions/batch/edit` | 从 AI 核对页返回作答阶段 |
+| POST | `/api/ai/questions/batch/review` | 所有题有答案后进入无泄露核对页 |
+| POST | `/api/ai/questions/batch/grade` | 使用稳定批改 ID 统一判题并原子写入整组正式证据 |
+| POST | `/api/ai/questions/generate` | 使用稳定 `requestId` 生成 1/2/3/5 组并追加到账号 FIFO 队列 |
+| POST | `/api/ai/questions/next` | 当前结果页确认后才取 FIFO 队首作为下一组 |
 | GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
 | POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录及当前试卷接口版本头，返回 `202` |
 | PUT | `/api/ai/exams/current` | 保存当前试卷草稿答案，需要登录 |
@@ -84,6 +99,12 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | POST | `/api/ai/focused/submit` | 完成专项后统一分析，需要登录 |
 
 登录和复习状态使用 HTTP-only Cookie。网页不提供注册接口，账号只能在服务器终端创建。普通内容新增、修改、删除只允许管理员账号，或使用服务器配置的 `API_TOKEN`。本地学习档案使用由 `API_TOKEN` 派生的只读令牌；独立的教学写入令牌只能上传教学档案、通过 `PUT /api/content/batch` 幂等同步每日词句和结构化笔记，以及向指定账号上传完整自学课程包，不能调用其他管理接口。课程包格式和状态边界见 [自学课程格式.md](自学课程格式.md)。
+
+“今日复习”和“AI 出题”的整组批次在 `answering`、`review`、`grading`、`completed` 四种状态间转换。`answering` 只保存草稿，`review` 只公开题目和用户答案；只有整组批改成功后，`completed` 才公开参考答案、逐题判定和得分，并一次性写入 SRS、错题、能力和句子统计。重复提交同一批次/请求 ID 会复用原结果；AI 或网络失败会退回可重试的核对状态，不返回半组结果，也不写半组证据。
+
+`GET /api/review/sentence-stats` 的日期按 `Asia/Shanghai` 解释并包含起止日。`sort` 可用 `index`、`attempts`、`correct`、`wrong`、`accuracy`、`recent`，`order` 可用 `asc` 或 `desc`。接口仅返回当前账号当前句子池的序号、稳定句子 ID 和聚合次数，不返回用户答案或参考答案；读取、筛选和排序不会修改账号状态。
+
+AI 队列按账号保存。`generationQueue` 仅公开请求时间、模型、强度、题数、组序号和就绪/失败状态，不公开后续题目；后台生成不会替换当前组。失败请求保留原 FIFO 位置，可用同一 `requestId` 原位重试，后续请求不能越过它。
 
 ## 创建账号
 

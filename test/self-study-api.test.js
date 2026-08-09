@@ -247,7 +247,7 @@ test("self-study API isolates accounts, resumes after restart, preserves correct
     assert.equal(fs.existsSync(path.join(dataDir, "self-study-transaction.json")), false);
 
     const synced = await (await fetch(`${baseUrl}/api/sync/profile?username=traveler`, { headers: { Authorization: `Bearer ${readToken}` } })).json();
-    assert.equal(synced.schemaVersion, 7);
+    assert.equal(synced.schemaVersion, 8);
     assert.equal(synced.summary.selfStudyCompletedLessons, 1);
     assert.equal(synced.summary.selfStudyFormalAttempts, 12);
     assert.equal(synced.summary.selfStudyCorrections, 1);
