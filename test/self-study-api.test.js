@@ -162,6 +162,68 @@ test("self-study API isolates accounts, resumes after restart, preserves correct
     assert.equal(travelerInitial.data.entryVisible, false);
     assert.equal(otherInitial.data.hasLessons, false);
 
+    const travelerPreviewWords = await request(baseUrl, travelerCookie, "/api/preview/words");
+    assert.equal(travelerPreviewWords.response.status, 200);
+    assert.equal(travelerPreviewWords.data.nextDay, 9);
+    assert.equal(travelerPreviewWords.data.sourceLessonId, "trip-day-9");
+    assert.equal(travelerPreviewWords.data.formalEvidence, false);
+    assert.deepEqual(travelerPreviewWords.data.words.map(item => item.id), ["travel-d9-dog"]);
+    assert.equal(travelerPreviewWords.data.words[0].preview, true);
+    assert.equal(travelerPreviewWords.data.words[0].status, "planned");
+    assert.equal(travelerPreviewWords.data.words[0].formalEvidence, false);
+    const otherPreviewWords = await request(baseUrl, otherCookie, "/api/preview/words");
+    assert.equal(otherPreviewWords.data.words.some(item => item.id === "travel-d9-dog"), false);
+
+    const travelerPreview = await request(baseUrl, travelerCookie, "/api/preview");
+    assert.match(travelerPreview.data.preview.name, /第 9 天出门自学预习/);
+    assert.match(travelerPreview.data.preview.content, /dog：狗/);
+    assert.match(travelerPreview.data.preview.content, /It is a dog\./);
+    const plannedSentences = await request(baseUrl, travelerCookie, "/api/preview/practice/sentences", "POST", { wordIds: ["travel-d9-dog"] });
+    assert.equal(plannedSentences.response.status, 200);
+    assert.equal(plannedSentences.data.source, "self-study");
+    assert.equal(plannedSentences.data.formalEvidence, false);
+    assert.equal(plannedSentences.data.sentences.length, 1);
+    assert.equal(plannedSentences.data.sentences[0].sourceContentId, "travel-d9-sentence");
+    assert.equal(plannedSentences.data.sentences[0].formalEvidence, false);
+    const previewGrade = await request(baseUrl, travelerCookie, "/api/preview/practice/grade", "POST", {
+      task: { ...plannedSentences.data.sentences[0], direction: "en-zh" },
+      answer: "它是一只狗"
+    });
+    assert.equal(previewGrade.response.status, 200);
+    assert.equal(previewGrade.data.correct, true);
+    const stateAfterPreviewGrade = await request(baseUrl, travelerCookie, "/api/state");
+    assert.deepEqual(stateAfterPreviewGrade.data.attempts, []);
+    assert.deepEqual(stateAfterPreviewGrade.data.mistakes, []);
+    const contentAfterPreviewReads = await (await fetch(`${baseUrl}/api/content`)).json();
+    assert.equal(contentAfterPreviewReads.words.some(item => item.id === "travel-d9-dog"), false);
+    assert.equal(contentAfterPreviewReads.sentences.some(item => item.id === "travel-d9-sentence"), false);
+
+    const userStateFile = path.join(dataDir, "user-states.json");
+    const stateBeforeOfflineRead = fs.readFileSync(userStateFile, "utf8");
+    const stateMtimeBeforeOfflineRead = fs.statSync(userStateFile).mtimeMs;
+    const offlinePack = await request(baseUrl, travelerCookie, "/api/offline/pack");
+    assert.equal(offlinePack.response.status, 200);
+    assert.equal(offlinePack.data.schemaVersion, 1);
+    assert.equal(offlinePack.data.account.username, "traveler");
+    assert.ok(offlinePack.data.byteSize <= 6 * 1024 * 1024);
+    assert.deepEqual(offlinePack.data.preview.words.map(item => item.id), ["travel-d9-dog"]);
+    assert.equal(offlinePack.data.preview.formalEvidence, false);
+    assert.equal(offlinePack.data.preview.practiceSentences[0].formalEvidence, false);
+    assert.deepEqual(offlinePack.data.selfStudy.lessons.map(item => item.lessonId), ["trip-day-9", "trip-day-10"]);
+    const offlineQuestion = offlinePack.data.selfStudy.lessons[0].stages[0].steps[0];
+    assert.equal(offlineQuestion.formalEvidence, false);
+    assert.equal(typeof offlineQuestion.answerSalt, "string");
+    assert.equal(offlineQuestion.answerDigests.length, 1);
+    const offlineText = JSON.stringify(offlinePack.data);
+    assert.doesNotMatch(offlineText, /"acceptedAnswers"|"referenceAnswer"|"password"|"apiKey"|Bearer\s/i);
+    assert.equal(fs.readFileSync(userStateFile, "utf8"), stateBeforeOfflineRead);
+    assert.equal(fs.statSync(userStateFile).mtimeMs, stateMtimeBeforeOfflineRead);
+    const otherOfflinePack = await request(baseUrl, otherCookie, "/api/offline/pack");
+    assert.equal(otherOfflinePack.response.status, 200);
+    assert.deepEqual(otherOfflinePack.data.preview.words, []);
+    assert.deepEqual(otherOfflinePack.data.selfStudy.lessons, []);
+    assert.doesNotMatch(JSON.stringify(otherOfflinePack.data), /travel-d9-dog|trip-day-9/);
+
     assert.equal((await request(baseUrl, travelerCookie, "/api/self-study/mode", "POST", { enabled: true })).response.status, 200);
     let result = await request(baseUrl, travelerCookie, "/api/self-study/start", "POST", {});
     assert.equal(result.response.status, 200);
@@ -192,6 +254,12 @@ test("self-study API isolates accounts, resumes after restart, preserves correct
     assert.equal(result.data.current.step.stepId, "teach-word");
     assert.equal(result.data.current.step.draft, "尚未提交的草稿");
     assert.equal(result.data.current.status, "paused");
+    const restoredPreviewWords = await request(baseUrl, travelerCookie, "/api/preview/words");
+    assert.deepEqual(restoredPreviewWords.data.words.map(item => item.id), ["travel-d9-dog"]);
+    const restoredOfflinePack = await request(baseUrl, travelerCookie, "/api/offline/pack");
+    assert.equal(restoredOfflinePack.data.selfStudyPublic.current.step.stepId, "teach-word");
+    assert.equal(restoredOfflinePack.data.selfStudyPublic.current.status, "paused");
+    assert.equal(restoredOfflinePack.data.selfStudy.progress["trip-day-9"].steps["teach-word"].draft, "尚未提交的草稿");
 
     const revised = courseLesson("trip-day-9", 9, "dog", "狗", "2");
     revised.title = "不应覆盖已开始快照的新标题";
@@ -235,6 +303,19 @@ test("self-study API isolates accounts, resumes after restart, preserves correct
     assert.equal(result.data.current, null);
     assert.equal(result.data.availableLesson.lessonId, "trip-day-10");
     assert.equal(result.data.completedLessons, 1);
+    const repeatedOfflineStart = await request(baseUrl, travelerCookie, "/api/self-study/start", "POST", { lessonId: "trip-day-9", startId: "offline-start-trip-day-9" });
+    assert.equal(repeatedOfflineStart.response.status, 200);
+    assert.equal(repeatedOfflineStart.data.duplicate, true);
+    assert.equal(repeatedOfflineStart.data.current, null);
+    assert.equal(repeatedOfflineStart.data.availableLesson.lessonId, "trip-day-10");
+
+    const nextPreviewWords = await request(baseUrl, travelerCookie, "/api/preview/words");
+    assert.equal(nextPreviewWords.data.nextDay, 10);
+    assert.equal(nextPreviewWords.data.sourceLessonId, "trip-day-10");
+    assert.deepEqual(nextPreviewWords.data.words.map(item => item.id), ["travel-d10-duck"]);
+    assert.equal(nextPreviewWords.data.words.some(item => item.id === "travel-d9-dog"), false);
+    const otherPreviewAfterCompletion = await request(baseUrl, otherCookie, "/api/preview/words");
+    assert.equal(otherPreviewAfterCompletion.data.words.some(item => ["travel-d9-dog", "travel-d10-duck"].includes(item.id)), false);
 
     const afterContent = await (await fetch(`${baseUrl}/api/content`)).json();
     const promotedWord = afterContent.words.find(item => item.id === "travel-d9-dog");

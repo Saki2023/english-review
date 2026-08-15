@@ -36,6 +36,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | POST | `/api/auth/login` | 登录并取得会话 |
 | GET | `/api/auth/me` | 获取当前账号 |
 | POST | `/api/auth/logout` | 退出当前会话 |
+| GET | `/api/offline/pack` | 获取当前账号主动下载的版本化离线包；最多 14 天课程、20 个已生成 AI 题组和 6 MiB，不包含密码、会话令牌或 AI Key |
 | GET | `/api/content` | 获取全部词汇、句子和错题种子 |
 | GET | `/api/content?day=2&type=word` | 按天数或类型筛选 |
 | GET | `/api/content/:id` | 获取一条内容 |
@@ -105,6 +106,20 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 `GET /api/review/sentence-stats` 的日期按 `Asia/Shanghai` 解释并包含起止日。`sort` 可用 `index`、`attempts`、`correct`、`wrong`、`accuracy`、`recent`，`order` 可用 `asc` 或 `desc`。接口仅返回当前账号当前句子池的序号、稳定句子 ID 和聚合次数，不返回用户答案或参考答案；读取、筛选和排序不会修改账号状态。
 
 AI 队列按账号保存。`generationQueue` 仅公开请求时间、模型、强度、题数、组序号和就绪/失败状态，不公开后续题目；后台生成不会替换当前组。失败请求保留原 FIFO 位置，可用同一 `requestId` 原位重试，后续请求不能越过它。
+
+## 出门离线包与恢复联网
+
+`GET /api/offline/pack` 只允许当前已登录账号读取。响应包含 `schemaVersion`、账号 ID、生成/过期时间、容量限制、最多 14 天自学课程、账号级下一课预习、预习练习状态、当前 AI 题组和最多 20 个已生成队列题组。包内不包含密码、Cookie、会话令牌、同步令牌或 AI Key。未作答自学题不会明文公开 `acceptedAnswers` 或 `referenceAnswer`；当前步骤正确提交后，客户端才使用包内受门控数据显示参考答案。
+
+离线包声明 `outbox.mode: client-fifo`，没有 `/api/offline/replay` 聚合接口。PWA 把每项操作保存为带账号 ID 和稳定操作 ID 的本机队列，联网后先调用 `/api/auth/status` 核对同一账号，再严格按创建顺序逐条调用原接口：
+
+- 自学课程使用 `/api/self-study/*`，复用稳定 `attemptId`、`continueId`、`questionId` 和课程 ID。
+- AI 草稿、核对和统一批改使用 `/api/ai/questions/batch/*`，复用稳定题组、题目和 `gradeRequestId`。
+- 进入已下载下一组使用 `/api/ai/questions/next`，请求带明确 `setId` 和稳定 `nextRequestId`；重复请求若服务器已进入该组会返回 `reused: true`，不会继续消费 FIFO 下一组。
+
+队首操作遇到网络、鉴权或上游错误时停止，保留该操作和所有后续操作；恢复后从原位重试。断网阶段只记录 `formalEvidence: false` 或待同步状态，不本地生成正式 SRS、错题、能力或句子统计证据。实时新 AI 生成不在离线包能力范围内，必须联网调用上游或在出门前预生成题组。
+
+Service Worker 只缓存应用壳和版本化静态脚本，明确跳过全部 `/api/*`，不会把 `/api/state` 或其他账号私有响应放入共享 Cache Storage。退出、账号切换或可达服务器明确返回未登录时，客户端清除当前离线启用标记；本机离线数据仍按账号隔离，待同步队列不因网络失败自动删除。
 
 ## 创建账号
 

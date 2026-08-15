@@ -158,7 +158,7 @@ function answerFor(question) {
   return question.direction === "en-zh" ? source.chinese : source.english;
 }
 
-async function fillAndReview(baseUrl, cookie, set, answers = null) {
+async function fillAndReview(baseUrl, cookie, set, answers = null, gradeRequestId = "") {
   for (let index = 0; index < set.questions.length; index += 1) {
     const question = set.questions[index];
     const saved = await request(baseUrl, cookie, "/api/ai/questions/batch/draft", {
@@ -167,7 +167,10 @@ async function fillAndReview(baseUrl, cookie, set, answers = null) {
     });
     assert.equal(saved.response.status, 200);
   }
-  const review = await request(baseUrl, cookie, "/api/ai/questions/batch/review", { method: "POST", body: { setId: set.id } });
+  const review = await request(baseUrl, cookie, "/api/ai/questions/batch/review", {
+    method: "POST",
+    body: { setId: set.id, ...(gradeRequestId ? { gradeRequestId } : {}) }
+  });
   assert.equal(review.response.status, 200);
   return review.body.practice.currentSet;
 }
@@ -193,6 +196,18 @@ test("AI batches grade atomically while generation requests append idempotently 
     app = await startApp(dataDir);
     let cookie = await login(app.baseUrl, "ai-owner", "ai-owner-password");
     const otherCookie = await login(app.baseUrl, "ai-other", "ai-other-password");
+    const unavailableOptions = await request(app.baseUrl, cookie, "/api/ai/options");
+    assert.equal(unavailableOptions.response.status, 200);
+    assert.equal(unavailableOptions.body.configured, false);
+    const unavailableGeneration = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "unconfigured-generation", model: "missing-model", reasoningEffort: "high", count: 5, groupCount: 1 }
+    });
+    assert.equal(unavailableGeneration.response.status, 503);
+    assert.equal(unavailableGeneration.body.reasonCode, "not_configured");
+    assert.match(unavailableGeneration.body.error, /AI 尚未配置/);
+    const queueBeforeConfiguration = await request(app.baseUrl, cookie, "/api/ai/questions/batch");
+    assert.deepEqual(queueBeforeConfiguration.body.practice.generationQueue, []);
     const configured = await request(app.baseUrl, cookie, "/api/admin/ai-config", {
       method: "PUT",
       body: { baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "ai-batch-test-key", models: ["test-model"], defaultModel: "test-model", timeoutMs: 10000, rateLimitPerMinute: 60 }
@@ -254,6 +269,20 @@ test("AI batches grade atomically while generation requests append idempotently 
     assert.equal(control.calls.filter(item => item.generation).length, generationCallsBeforeRepeat);
     assert.equal(repeatedGeneration.body.practice.generationQueue.reduce((sum, item) => sum + item.readyGroups, 0), 3);
 
+    const offlinePack = await request(app.baseUrl, cookie, "/api/offline/pack");
+    assert.equal(offlinePack.response.status, 200);
+    assert.equal(offlinePack.body.aiPractice.currentSet.id, firstSetId);
+    assert.equal(offlinePack.body.aiPractice.currentSet.questions[0].userAnswer, answerFor(firstQuestion));
+    assert.equal(offlinePack.body.aiPractice.preparedSets.length, 3);
+    assert.ok(offlinePack.body.aiPractice.preparedSets.every(set => set.questions.length === 5));
+    const offlineAiText = JSON.stringify(offlinePack.body.aiPractice);
+    assert.doesNotMatch(offlineAiText, /referenceAnswer|acceptedChinese|acceptedEnglish|"correct"\s*:/);
+    assert.doesNotMatch(JSON.stringify(offlinePack.body), /ai-batch-test-key|"apiKey"|Bearer\s/i);
+    const otherOfflinePack = await request(app.baseUrl, otherCookie, "/api/offline/pack");
+    assert.equal(otherOfflinePack.response.status, 200);
+    assert.equal(otherOfflinePack.body.aiPractice.currentSet, null);
+    assert.deepEqual(otherOfflinePack.body.aiPractice.preparedSets, []);
+
     const stale = (await request(app.baseUrl, cookie, "/api/state")).body;
     const staleSave = await request(app.baseUrl, cookie, "/api/state", { method: "PUT", body: { ...stale, aiPractice: {} } });
     assert.equal(staleSave.response.status, 200);
@@ -270,8 +299,20 @@ test("AI batches grade atomically while generation requests append idempotently 
 
     const answers = restored.body.practice.currentSet.questions.map(answerFor);
     answers[0] = "错误答案";
-    const reviewSet = await fillAndReview(app.baseUrl, cookie, restored.body.practice.currentSet, answers);
+    const reviewSet = await fillAndReview(app.baseUrl, cookie, restored.body.practice.currentSet, answers, "offline-stable-grade-request");
     assert.equal(reviewSet.phase, "review");
+    assert.equal(reviewSet.gradeRequestId, "offline-stable-grade-request");
+    const repeatedOfflineReview = await request(app.baseUrl, cookie, "/api/ai/questions/batch/review", {
+      method: "POST",
+      body: { setId: reviewSet.id, gradeRequestId: "offline-stable-grade-request" }
+    });
+    assert.equal(repeatedOfflineReview.response.status, 200);
+    assert.equal(repeatedOfflineReview.body.practice.currentSet.gradeRequestId, "offline-stable-grade-request");
+    const conflictingOfflineReview = await request(app.baseUrl, cookie, "/api/ai/questions/batch/review", {
+      method: "POST",
+      body: { setId: reviewSet.id, gradeRequestId: "different-grade-request" }
+    });
+    assert.equal(conflictingOfflineReview.response.status, 409);
     assert.ok(reviewSet.questions.every(question => Object.hasOwn(question, "focus") === false));
     assert.doesNotMatch(JSON.stringify(reviewSet), /referenceAnswer|acceptedChinese|acceptedEnglish|\"correct\"/);
     const beforeFailedGrade = (await request(app.baseUrl, cookie, "/api/state")).body;
@@ -301,11 +342,19 @@ test("AI batches grade atomically while generation requests append idempotently 
     assert.equal(repeatedGrade.body.practice.history.length, 5);
     assert.equal(repeatedGrade.body.practice.currentSet.id, firstSetId);
 
-    const next = await request(app.baseUrl, cookie, "/api/ai/questions/next", { method: "POST", body: {} });
+    const expectedNextSetId = successfulGrade.body.practice.generationQueue[0].groups[0].id;
+    const next = await request(app.baseUrl, cookie, "/api/ai/questions/next", { method: "POST", body: { setId: expectedNextSetId, nextRequestId: "next-response-loss" } });
     assert.equal(next.response.status, 200);
+    assert.equal(next.body.reused, false);
     assert.equal(next.body.set.batchId, firstBatchId);
     assert.equal(next.body.set.groupNumber, 2);
     assert.equal(next.body.practice.history.length, 5);
+    const remainingAfterNext = next.body.remainingGroups;
+    const repeatedNext = await request(app.baseUrl, cookie, "/api/ai/questions/next", { method: "POST", body: { setId: expectedNextSetId, nextRequestId: "next-response-loss" } });
+    assert.equal(repeatedNext.response.status, 200);
+    assert.equal(repeatedNext.body.reused, true);
+    assert.equal(repeatedNext.body.practice.currentSet.id, expectedNextSetId);
+    assert.equal(repeatedNext.body.remainingGroups, remainingAfterNext);
 
     const otherStillIsolated = await request(app.baseUrl, otherCookie, "/api/ai/questions/batch");
     assert.equal(otherStillIsolated.body.practice.currentSet, null);

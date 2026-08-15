@@ -171,6 +171,20 @@ test("formal review batches keep drafts private and write evidence once after wh
     assert.equal(completedState.attempts.slice(-2).every(item => item.formalEvidence === true && item.batchId === "review-batch-fixed"), true);
     assert.equal(completedState.history["2026-08-09"].reviewed, 2);
     assert.equal(completedState.history["2026-08-09"].correct, 2);
+    assert.deepEqual(completedState.sessions["2026-08-09"].doneTaskIds.sort(), ["d1-man:en-zh", "d1-mat:zh-en"].sort());
+
+    const staleCompletionPut = await jsonRequest(app.baseUrl, cookie, "/api/state", {
+      method: "PUT",
+      body: {
+        ...completedState,
+        sessions: {
+          ...completedState.sessions,
+          "2026-08-09": { ...completedState.sessions["2026-08-09"], doneTaskIds: [], updatedAt: "2099-01-01T00:00:00.000Z" }
+        }
+      }
+    });
+    assert.equal(staleCompletionPut.response.status, 200);
+    assert.deepEqual(staleCompletionPut.body.sessions["2026-08-09"].doneTaskIds.sort(), ["d1-man:en-zh", "d1-mat:zh-en"].sort());
 
     const repeated = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/grade", {
       method: "POST",

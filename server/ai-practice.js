@@ -320,6 +320,18 @@ function publicAiPractice(value) {
   };
 }
 
+function offlineAiPractice(value) {
+  const practice = sanitizeAiPractice(value);
+  const publicPractice = publicAiPractice(practice);
+  return {
+    settings: publicPractice.settings,
+    currentSet: publicPractice.currentSet,
+    preparedSets: practice.queuedSets.map(set => publicQuestionSet(set)).filter(Boolean).slice(0, 20),
+    generationQueue: publicPractice.generationQueue,
+    updatedAt: publicPractice.updatedAt
+  };
+}
+
 function sanitizeHistoryItem(value) {
   const source = value && typeof value === "object" ? value : {};
   const id = cleanText(source.id, 180) || `aihistory-${crypto.randomUUID()}`;
@@ -575,6 +587,7 @@ module.exports = {
   MAX_TUTOR_RESETS,
   buildLearningProfile,
   createQuestionSet,
+  offlineAiPractice,
   publicAiPractice,
   publicQuestionSet,
   sanitizeAiPractice,

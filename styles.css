@@ -69,6 +69,8 @@ h1, h2, p { margin-top: 0; }
 h1 { margin-bottom: 7px; font-size: 29px; line-height: 1.2; font-weight: 500; letter-spacing: 0; }
 h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .heading-note { margin: 0; color: var(--muted); font-size: 13px; }
+.ai-status-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.ai-status-actions .secondary-button { min-height: 38px; white-space: nowrap; }
 .goal-readout { min-width: 102px; padding-left: 20px; border-left: 1px solid var(--border); text-align: right; }
 .goal-label { display: block; margin-bottom: 5px; color: var(--muted); font-size: 12px; }
 .goal-readout strong { color: var(--primary-deep); font-size: 21px; font-weight: 500; }
@@ -232,10 +234,17 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .complete-icon svg { width: 20px; height: 20px; }
 .review-complete .secondary-button { margin-left: auto; }
 
-.self-study-mode-card { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: -12px 0 28px; padding: 18px 20px; border: 1px solid #b8d9ce; border-radius: var(--radius); background: linear-gradient(135deg, #f8fcfa, var(--primary-soft)); }
+.self-study-mode-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 20px; margin: -12px 0 28px; padding: 18px 20px; border: 1px solid #b8d9ce; border-radius: var(--radius); background: linear-gradient(135deg, #f8fcfa, var(--primary-soft)); }
 .self-study-mode-card h2 { margin: 5px 0 6px; }
 .self-study-mode-card p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .self-study-mode-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.offline-pack-status { flex: 1 0 100%; display: flex; align-items: flex-start; gap: 9px; padding-top: 12px; border-top: 1px solid rgba(22, 124, 102, .18); color: var(--muted); }
+.offline-pack-status > svg { width: 17px; height: 17px; flex: 0 0 auto; margin-top: 1px; color: var(--primary); }
+.offline-pack-status > span { display: grid; gap: 2px; min-width: 0; }
+.offline-pack-status strong { color: var(--ink); font-size: 12px; font-weight: 650; }
+.offline-pack-status small { font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.offline-pack-status.is-offline strong { color: var(--primary-deep); }
+.offline-pack-delete { width: 40px; min-width: 40px; height: 40px; }
 .self-study-overview { margin-bottom: 16px; padding: 18px 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
 .self-study-overview-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .self-study-overview-head h2 { margin-top: 7px; }
@@ -894,6 +903,8 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
   h1 { font-size: 25px; }
   .page-heading { gap: 13px; margin-bottom: 22px; }
   .heading-note { font-size: 12px; }
+  .ai-status-actions { width: 100%; justify-content: stretch; }
+  .ai-status-actions .secondary-button { width: 100%; }
   .goal-readout { min-width: 78px; padding-left: 12px; }
   .goal-readout strong { font-size: 18px; }
   .stats-grid { grid-template-columns: 1fr; }
@@ -904,7 +915,8 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
   .study-time-button { width: 100%; }
   .self-study-mode-card, .self-study-overview-head, .self-study-step-header { align-items: stretch; flex-direction: column; }
   .self-study-mode-actions { width: 100%; justify-content: stretch; }
-  .self-study-mode-actions button, .self-study-heading .secondary-button, .self-study-complete .primary-button { width: 100%; margin-left: 0; }
+  .self-study-mode-actions button:not(.offline-pack-delete), .self-study-heading .secondary-button, .self-study-complete .primary-button { width: 100%; margin-left: 0; }
+  .self-study-mode-actions .offline-pack-delete { width: 100%; }
   .self-study-stage-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .self-study-step-header .secondary-button { width: 100%; }
   .self-study-step-body { padding: 26px 14px 8px; }

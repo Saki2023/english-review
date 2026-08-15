@@ -1,17 +1,22 @@
-const CACHE_NAME = "daily-english-review-v60";
+const CACHE_NAME = "daily-english-review-v61";
 const APP_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=60",
-  "/data.js?v=60",
-  "/pronunciation-data.js?v=60",
-  "/review-variants.js?v=60",
-  "/answer-utils.js?v=60",
-  "/study-time.js?v=60",
-  "/app.js?v=60",
+  "/styles.css?v=61",
+  "/data.js?v=61",
+  "/pronunciation-data.js?v=61",
+  "/review-variants.js?v=61",
+  "/answer-utils.js?v=61",
+  "/study-time.js?v=61",
+  "/review-session.js?v=61",
+  "/offline-store.js?v=61",
+  "/offline-learning.js?v=61",
+  "/offline-ai.js?v=61",
+  "/offline-replay.js?v=61",
+  "/app.js?v=61",
   "/manifest.webmanifest",
   "/icon.svg",
-  "/vendor/lucide.min.js?v=60"
+  "/vendor/lucide.min.js?v=61"
 ];
 
 self.addEventListener("install", event => {

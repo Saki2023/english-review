@@ -472,6 +472,112 @@ function sanitizeSelfStudyState(value) {
   };
 }
 
+function offlineAnswerDigest(salt, answer) {
+  return crypto.createHash("sha256").update(`${salt}\0${answerKey(answer)}`, "utf8").digest("hex");
+}
+
+function offlineReferenceUnlock(answerSalt, answer, referenceAnswer) {
+  if (!referenceAnswer) return null;
+  const answerValue = answerKey(answer);
+  const key = crypto.createHash("sha256").update(`${answerSalt}\0reference\0${answerValue}`, "utf8").digest();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(referenceAnswer, "utf8"), cipher.final()]);
+  return {
+    digest: offlineAnswerDigest(answerSalt, answer),
+    iv: iv.toString("base64"),
+    ciphertext: encrypted.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64")
+  };
+}
+
+function offlineStep(step, lessonSalt) {
+  const answerSalt = crypto.createHash("sha256").update(`${lessonSalt}:${step.stepId}`, "utf8").digest("hex").slice(0, 32);
+  return {
+    stepId: step.stepId,
+    type: step.type,
+    category: step.category,
+    title: step.title,
+    instruction: step.instruction,
+    content: step.content,
+    prompt: step.prompt,
+    passage: step.passage,
+    english: step.direction === "zh-en" ? "" : step.english,
+    chinese: step.direction === "en-zh" ? "" : step.chinese,
+    phonetic: step.phonetic,
+    pronunciation: step.pronunciation,
+    choices: clone(step.choices),
+    direction: step.direction,
+    focus: step.focus,
+    contentId: step.contentId,
+    gradingMode: step.gradingMode,
+    formalEvidence: false,
+    required: step.required,
+    correctionHints: clone(step.correctionHints),
+    answerSalt,
+    answerDigests: step.acceptedAnswers.map(answer => offlineAnswerDigest(answerSalt, answer)),
+    referenceUnlocks: step.acceptedAnswers.map(answer => offlineReferenceUnlock(answerSalt, answer, step.referenceAnswer)).filter(Boolean)
+  };
+}
+
+function offlineLesson(lesson, nonce) {
+  const lessonSalt = crypto.createHash("sha256").update(`${nonce}:${lesson.lessonId}:${lesson.version}`, "utf8").digest("hex");
+  return {
+    lessonId: lesson.lessonId,
+    studyDay: lesson.studyDay,
+    formalDate: lesson.formalDate,
+    title: lesson.title,
+    version: lesson.version,
+    enabledFrom: lesson.enabledFrom,
+    expiresAt: lesson.expiresAt,
+    publishedAt: lesson.publishedAt,
+    stages: lesson.stages.map(stage => ({
+      stageId: stage.stageId,
+      type: stage.type,
+      title: stage.title,
+      steps: stage.steps.map(step => offlineStep(step, lessonSalt))
+    })),
+    plannedContent: clone(lesson.plannedContent),
+    nextPreview: lesson.nextPreview
+  };
+}
+
+function offlineSelfStudyPackage(value, options = {}) {
+  const state = sanitizeSelfStudyState(value);
+  const limit = Math.max(1, Math.min(MAX_LESSONS, Number(options.limit) || 14));
+  const nonce = cleanInline(options.nonce, 160) || crypto.randomBytes(18).toString("hex");
+  const activeIds = new Set(Object.values(state.progress).filter(progress => ["in-progress", "paused", "ready"].includes(progress.status)).map(progress => progress.lessonId));
+  const completedIds = new Set(Object.values(state.progress).filter(progress => ["completed", "cancelled", "expired"].includes(progress.status)).map(progress => progress.lessonId));
+  const selected = state.lessons.filter(lesson => activeIds.has(lesson.lessonId) || !completedIds.has(lesson.lessonId)).slice(0, limit);
+  Object.values(state.progress).forEach(progress => {
+    if (activeIds.has(progress.lessonId) && !selected.some(lesson => lesson.lessonId === progress.lessonId)) selected.unshift(progress.snapshot);
+  });
+  const lessons = selected.slice(0, limit).map(lesson => offlineLesson(lesson, nonce));
+  const lessonMap = new Map(lessons.map(lesson => [lesson.lessonId, lesson]));
+  const progress = {};
+  Object.values(state.progress).filter(item => activeIds.has(item.lessonId) && lessonMap.has(item.lessonId)).forEach(item => {
+    progress[item.lessonId] = {
+      ...clone(item),
+      snapshot: clone(lessonMap.get(item.lessonId)),
+      steps: Object.fromEntries(Object.entries(item.steps).map(([stepId, step]) => [stepId, {
+        ...clone(step),
+        attempts: (Array.isArray(step.attempts) ? step.attempts : []).map(attempt => {
+          const { referenceAnswer, ...safeAttempt } = clone(attempt);
+          return { ...safeAttempt, formalEvidence: false };
+        })
+      }]))
+    };
+  });
+  return {
+    schema: 1,
+    enabled: state.enabled,
+    lessons,
+    progress,
+    updatedAt: state.updatedAt,
+    answerDigest: "sha256-answer-key-v1"
+  };
+}
+
 function mergeSelfStudyLessons(value, packageValue, options = {}) {
   const state = sanitizeSelfStudyState(value);
   const source = packageValue && typeof packageValue === "object" ? packageValue : {};
@@ -542,6 +648,44 @@ function currentLessonCandidate(value, now = new Date()) {
     return { state, lesson, progress: null };
   }
   return { state, lesson: null, progress: null };
+}
+
+function selfStudyPreviewContent(value, now = new Date()) {
+  const candidate = currentLessonCandidate(value, now);
+  const lesson = candidate.progress ? candidate.progress.snapshot : (candidate.lesson || candidate.waitingLesson || null);
+  if (!lesson) return null;
+  const source = candidate.progress ? "active-self-study" : "planned-self-study";
+  return {
+    source,
+    lessonId: lesson.lessonId,
+    lessonVersion: lesson.version,
+    studyDay: lesson.studyDay,
+    title: lesson.title,
+    currentDay: Math.max(1, Number(lesson.studyDay) - 1),
+    nextDay: Number(lesson.studyDay),
+    updatedAt: candidate.progress?.updatedAt || candidate.state.updatedAt || lesson.publishedAt || "",
+    formalEvidence: false,
+    words: clone(lesson.plannedContent.words).map(item => ({
+      ...item,
+      status: "planned",
+      learned: "",
+      preview: true,
+      formalEvidence: false,
+      sourceLessonId: lesson.lessonId,
+      sourceLessonVersion: lesson.version
+    })),
+    sentences: clone(lesson.plannedContent.sentences).map(item => ({
+      ...item,
+      status: "planned",
+      learned: "",
+      preview: true,
+      formalEvidence: false,
+      sourceLessonId: lesson.lessonId,
+      sourceLessonVersion: lesson.version
+    })),
+    note: clone(lesson.plannedContent.note),
+    nextPreview: lesson.nextPreview
+  };
 }
 
 function initializeProgress(lesson, now = new Date()) {
@@ -1148,6 +1292,7 @@ module.exports = {
   localStepGrade,
   markLessonCompleted,
   mergeSelfStudyLessons,
+  offlineSelfStudyPackage,
   pauseSelfStudy,
   publicSelfStudyState,
   referenceLeaked,
@@ -1156,6 +1301,7 @@ module.exports = {
   sanitizeSelfStudyLesson,
   sanitizeSelfStudyState,
   saveSelfStudyDraft,
+  selfStudyPreviewContent,
   selfStudyHistory,
   startSelfStudyLesson,
   submitSelfStudyStep,

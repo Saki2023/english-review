@@ -7,7 +7,7 @@ const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
 const { NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults, mistakeIsResolved } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
-const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, publicAiPractice, publicQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
+const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, offlineAiPractice, publicAiPractice, publicQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { createReviewBatch, publicFormalPractice, publicReviewBatch, sanitizeFormalPractice, sanitizeReviewBatch } = require("./server/formal-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
 const { buildLearningSyncProfile } = require("./server/learning-sync");
@@ -37,6 +37,7 @@ const {
   localStepGrade,
   markLessonCompleted,
   mergeSelfStudyLessons,
+  offlineSelfStudyPackage,
   pauseSelfStudy,
   publicSelfStudyState,
   referenceLeaked,
@@ -44,6 +45,7 @@ const {
   resumeSelfStudy,
   sanitizeSelfStudyState,
   saveSelfStudyDraft,
+  selfStudyPreviewContent,
   selfStudyHistory,
   startSelfStudyLesson,
   submitSelfStudyStep
@@ -115,6 +117,9 @@ const REVIEW_VARIANT_JOB_POLL_MS = 2000;
 const REVIEW_VARIANT_JOB_CACHE_MS = 10 * 60 * 1000;
 const REVIEW_VARIANT_UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000;
 const REVIEW_VARIANT_POOL_AUTOFILL = process.env.REVIEW_VARIANT_POOL_AUTOFILL !== "false";
+const OFFLINE_PACK_SCHEMA_VERSION = 1;
+const OFFLINE_PACK_DAYS = 14;
+const OFFLINE_PACK_MAX_BYTES = 6 * 1024 * 1024;
 
 ensureDataDir();
 recoverSelfStudyTransaction();
@@ -279,6 +284,35 @@ function appendSentencePracticeEvents(state, values) {
   const unique = new Map(sanitizeSentencePracticeEvents(state.sentencePracticeEvents).map(event => [event.id, event]));
   (Array.isArray(values) ? values : []).map(sanitizeSentencePracticeEvent).filter(Boolean).forEach(event => unique.set(event.id, event));
   state.sentencePracticeEvents = Array.from(unique.values()).slice(-MAX_SENTENCE_PRACTICE_EVENTS);
+}
+
+function reviewSessionDoneTaskIds(value) {
+  return Array.from(new Set((Array.isArray(value) ? value : [])
+    .map(item => String(item || "").trim().slice(0, 180))
+    .filter(Boolean))).slice(0, 1000);
+}
+
+function mergeReviewSessionState(existingValue, incomingValue) {
+  const existing = existingValue && typeof existingValue === "object" ? existingValue : {};
+  const incoming = incomingValue && typeof incomingValue === "object" ? incomingValue : {};
+  const preferred = String(incoming.updatedAt || "") >= String(existing.updatedAt || "") ? incoming : existing;
+  const existingDoneTaskIds = Array.isArray(existing.doneTaskIds) ? existing.doneTaskIds : [];
+  const incomingDoneTaskIds = Array.isArray(incoming.doneTaskIds) ? incoming.doneTaskIds : [];
+  return {
+    ...preferred,
+    doneTaskIds: reviewSessionDoneTaskIds([...existingDoneTaskIds, ...incomingDoneTaskIds]),
+    variants: {
+      ...(existing.variants && typeof existing.variants === "object" ? existing.variants : {}),
+      ...(incoming.variants && typeof incoming.variants === "object" ? incoming.variants : {})
+    }
+  };
+}
+
+function mergeReviewSessionStates(existingValue, incomingValue) {
+  const existing = existingValue && typeof existingValue === "object" ? existingValue : {};
+  const incoming = incomingValue && typeof incomingValue === "object" ? incomingValue : {};
+  const dates = new Set([...Object.keys(existing), ...Object.keys(incoming)]);
+  return Object.fromEntries(Array.from(dates).map(date => [date, mergeReviewSessionState(existing[date], incoming[date])]));
 }
 
 function sanitizeState(value) {
@@ -740,6 +774,7 @@ function handleState(req, res, user) {
     const existing = getUserState(user);
     userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({
       ...body,
+      sessions: mergeReviewSessionStates(existing.sessions, body.sessions),
       aiPractice: existing.aiPractice,
       formalPractice: existing.formalPractice,
       sentencePracticeEvents: existing.sentencePracticeEvents,
@@ -1023,7 +1058,15 @@ async function handleSelfStudy(req, res, url, user) {
         selfStudy.updatedAt = new Date().toISOString();
       } else if (url.pathname === "/api/self-study/start" && req.method === "POST") {
         if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
-        selfStudy = startSelfStudyLesson(selfStudy);
+        const body = await readBody(req);
+        const requestedLessonId = String(body.lessonId || "").trim().slice(0, 120);
+        if (requestedLessonId && selfStudy.progress[requestedLessonId]) {
+          return sendJson(res, 200, { ...publicSelfStudyState(selfStudy), duplicate: true });
+        }
+        const started = startSelfStudyLesson(selfStudy);
+        const active = Object.values(started.progress).find(progress => ["in-progress", "paused", "ready"].includes(progress.status));
+        if (requestedLessonId && (!active || active.lessonId !== requestedLessonId)) return sendError(res, 409, "requested self-study lesson is not currently available");
+        selfStudy = started;
       } else if (url.pathname === "/api/self-study/draft" && (req.method === "PUT" || req.method === "PATCH")) {
         if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
         selfStudy = saveSelfStudyDraft(selfStudy, await readBody(req));
@@ -1105,26 +1148,177 @@ async function handleSelfStudy(req, res, url, user) {
 function handlePreview(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "GET") return sendError(res, 404, "preview endpoint not found");
-  const profile = publicTeachingProfile(getUserState(user).teachingProfile);
+  refreshContent();
+  const state = getUserState(user);
+  const profile = publicTeachingProfile(state.teachingProfile);
+  const previewData = accountPreviewData(user, state);
+  const accountDocument = previewData.sourceLessonId ? selfStudyPreviewDocument(previewData) : null;
+  const documents = new Map((profile.previews || []).map(document => [document.name, document]));
+  if (profile.preview) documents.set(profile.preview.name, profile.preview);
+  if (accountDocument) documents.set(accountDocument.name, accountDocument);
+  const previews = Array.from(documents.values()).slice(-30);
   return sendJson(res, 200, {
-    updatedAt: profile.updatedAt,
-    preview: profile.preview,
-    previews: profile.previews
+    updatedAt: [profile.updatedAt, previewData.updatedAt].filter(Boolean).sort().at(-1) || "",
+    preview: accountDocument || profile.preview,
+    previews
   });
+}
+
+function selfStudyPreviewDocument(previewData) {
+  const wordLines = previewData.words.map(item => `- ${item.english}：${item.chinese}${item.phonetic ? `（${item.phonetic}）` : ""}`);
+  const sentenceLines = previewData.sentences.map(item => `- ${item.english}：${item.chinese}`);
+  const note = previewData.note && typeof previewData.note === "object" ? previewData.note : {};
+  const sections = [
+    `第 ${previewData.nextDay} 天出门自学预习`,
+    note.summary ? `\n学习重点\n${note.summary}` : "",
+    wordLines.length ? `\n预习单词\n${wordLines.join("\n")}` : "",
+    sentenceLines.length ? `\n预习句子\n${sentenceLines.join("\n")}` : "",
+    previewData.nextPreview ? `\n下一步\n${previewData.nextPreview}` : ""
+  ].filter(Boolean);
+  return { name: `第 ${previewData.nextDay} 天出门自学预习`, content: sections.join("\n").trim() };
+}
+
+function accountPreviewData(user, stateValue = null) {
+  const state = stateValue || getUserState(user);
+  const selfStudy = selfStudyPreviewContent(state.selfStudy);
+  const selectedNextDay = selfStudy ? selfStudy.nextDay : (Number(content.currentDay) || 1) + 1;
+  const currentDay = selfStudy ? selfStudy.currentDay : Number(content.currentDay) || 1;
+  const formallyLearnedIds = new Set([
+    ...content.words.filter(item => item.preview !== true).map(item => String(item.id || "")),
+    ...content.sentences.filter(item => item.preview !== true).map(item => String(item.id || ""))
+  ]);
+  const learnedEnglish = new Set(content.words.filter(item => item.preview !== true).map(item => String(item.english || "").toLocaleLowerCase()).filter(Boolean));
+  const globalWords = content.words.filter(item => item.preview === true
+    && Number(item.day) === selectedNextDay
+    && !String(item.learned || "").trim()
+    && !learnedEnglish.has(String(item.english || "").toLocaleLowerCase()));
+  const plannedWords = selfStudy ? selfStudy.words.filter(item => !formallyLearnedIds.has(item.id) && !learnedEnglish.has(String(item.english || "").toLocaleLowerCase())) : [];
+  const wordsByEnglish = new Map();
+  [...globalWords, ...plannedWords].forEach(item => {
+    const key = String(item.english || "").trim().toLocaleLowerCase();
+    if (!key) return;
+    const existing = wordsByEnglish.get(key);
+    wordsByEnglish.set(key, {
+      ...(existing || {}),
+      ...item,
+      day: selectedNextDay,
+      status: "planned",
+      learned: "",
+      preview: true,
+      formalEvidence: false,
+      acceptedChinese: Array.from(new Set([...(existing?.acceptedChinese || []), ...(item.acceptedChinese || []), item.chinese].map(value => String(value || "").trim()).filter(Boolean))).slice(0, 20)
+    });
+  });
+  const globalSentences = content.sentences.filter(item => item.preview === true && Number(item.day) === selectedNextDay && !String(item.learned || "").trim());
+  const plannedSentences = selfStudy ? selfStudy.sentences.filter(item => !formallyLearnedIds.has(item.id)) : [];
+  const sentencesById = new Map();
+  [...globalSentences, ...plannedSentences].forEach(item => {
+    const key = String(item.id || "").trim() || normalizePreviewEnglish(item.english);
+    if (!key || sentencesById.has(key)) return;
+    sentencesById.set(key, { ...item, day: selectedNextDay, status: "planned", learned: "", preview: true, formalEvidence: false });
+  });
+  return {
+    currentDay,
+    nextDay: selectedNextDay,
+    updatedAt: selfStudy?.updatedAt || content.updatedAt,
+    sourceLessonId: selfStudy?.lessonId || "",
+    sourceLessonVersion: selfStudy?.lessonVersion || "",
+    title: selfStudy?.title || "",
+    words: Array.from(wordsByEnglish.values()),
+    sentences: Array.from(sentencesById.values()),
+    note: selfStudy?.note || null,
+    nextPreview: selfStudy?.nextPreview || ""
+  };
+}
+
+function previewContentForAccount(previewData) {
+  return {
+    ...content,
+    words: [...content.words, ...previewData.words],
+    sentences: [...content.sentences, ...previewData.sentences]
+  };
+}
+
+function offlinePreviewPracticeSentences(state, previewData) {
+  const accountContent = previewContentForAccount(previewData);
+  const learnedWords = buildLearningProfile(content, state, today()).allowedWords;
+  const allowedWords = Array.from(new Set([...learnedWords, ...previewData.words.flatMap(item => previewEnglishTokens(item.english))]));
+  const storedTasks = sanitizePreviewPractice(state.previewPractice, accountContent).tasks.filter(task => task.kind === "sentence");
+  return previewData.words.map(target => {
+    const stored = storedTasks.find(task => task.wordId === target.id && Array.isArray(task.requiredPreviewWordIds) && task.requiredPreviewWordIds.includes(target.id));
+    if (stored) return { ...stored, formalEvidence: false, source: "saved-preview" };
+    const targetTokens = previewEnglishTokens(target.english);
+    const planned = previewData.sentences.find(sentence => targetTokens.every(token => previewEnglishTokens(sentence.english).includes(token)));
+    return planned ? sanitizePreviewSentence(accountContent, target, { ...planned, source: "self-study", sourceContentId: planned.id }, allowedWords) : null;
+  }).filter(Boolean);
+}
+
+function buildOfflinePack(user) {
+  refreshContent();
+  const state = getUserState(user);
+  const previewData = accountPreviewData(user, state);
+  const generatedAt = new Date();
+  const previewDocument = previewData.sourceLessonId ? selfStudyPreviewDocument(previewData) : null;
+  const pack = {
+    schemaVersion: OFFLINE_PACK_SCHEMA_VERSION,
+    packId: `offline-${user.id}-${generatedAt.getTime()}`,
+    account: { id: user.id, username: user.username },
+    generatedAt: generatedAt.toISOString(),
+    expiresAt: new Date(generatedAt.getTime() + OFFLINE_PACK_DAYS * 24 * 60 * 60 * 1000).toISOString(),
+    revision: [content.updatedAt, state.selfStudy && state.selfStudy.updatedAt, state.aiPractice && state.aiPractice.updatedAt].filter(Boolean).join(":"),
+    limits: { courseDays: OFFLINE_PACK_DAYS, aiGroups: 20, maxBytes: OFFLINE_PACK_MAX_BYTES },
+    content: { currentDay: content.currentDay, updatedAt: content.updatedAt },
+    selfStudy: offlineSelfStudyPackage(state.selfStudy, { limit: OFFLINE_PACK_DAYS, nonce: `${user.id}:${generatedAt.getTime()}:${crypto.randomBytes(12).toString("hex")}` }),
+    selfStudyPublic: publicSelfStudyState(state.selfStudy),
+    preview: {
+      currentDay: previewData.currentDay,
+      nextDay: previewData.nextDay,
+      updatedAt: previewData.updatedAt,
+      sourceLessonId: previewData.sourceLessonId,
+      formalEvidence: false,
+      document: previewDocument,
+      words: previewData.words.map(item => ({ ...item, formalEvidence: false })),
+      sentences: previewData.sentences.map(item => ({ ...item, formalEvidence: false })),
+      practiceSentences: offlinePreviewPracticeSentences(state, previewData),
+      practice: sanitizePreviewPractice(state.previewPractice, previewContentForAccount(previewData))
+    },
+    aiPractice: offlineAiPractice(state.aiPractice),
+    outbox: { mode: "client-fifo", formalEvidencePending: true }
+  };
+  let bytes = Buffer.byteLength(JSON.stringify(pack), "utf8");
+  if (bytes > OFFLINE_PACK_MAX_BYTES) {
+    pack.aiPractice.preparedSets = pack.aiPractice.preparedSets.slice(0, 5);
+    pack.selfStudy.lessons = pack.selfStudy.lessons.slice(0, 7);
+    bytes = Buffer.byteLength(JSON.stringify(pack), "utf8");
+  }
+  if (bytes > OFFLINE_PACK_MAX_BYTES) throw Object.assign(new Error("离线包超过容量上限，请减少预装课程后重试"), { statusCode: 413 });
+  pack.byteSize = bytes;
+  return pack;
+}
+
+function handleOfflinePack(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "GET") return sendError(res, 404, "offline pack endpoint not found");
+  try {
+    return sendJson(res, 200, buildOfflinePack(user));
+  } catch (error) {
+    return sendError(res, error.statusCode || 500, error.message);
+  }
 }
 
 function handlePreviewWords(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "GET") return sendError(res, 404, "preview words endpoint not found");
   refreshContent();
-  const currentDay = Number(content.currentDay) || 1;
-  const nextDay = currentDay + 1;
-  const learnedEnglish = new Set(content.words.filter(item => !item.preview).map(item => String(item.english || "").toLocaleLowerCase()).filter(Boolean));
-  const words = content.words.filter(item => item.preview === true
-    && Number(item.day) === nextDay
-    && !String(item.learned || "").trim()
-    && !learnedEnglish.has(String(item.english || "").toLocaleLowerCase()));
-  return sendJson(res, 200, { currentDay, nextDay, updatedAt: content.updatedAt, words });
+  const previewData = accountPreviewData(user);
+  return sendJson(res, 200, {
+    currentDay: previewData.currentDay,
+    nextDay: previewData.nextDay,
+    updatedAt: previewData.updatedAt,
+    sourceLessonId: previewData.sourceLessonId,
+    formalEvidence: false,
+    words: previewData.words
+  });
 }
 
 function previewEnglishTokens(value) {
@@ -1164,7 +1358,9 @@ function sanitizePreviewSentence(contentValue, target, value, allowedWords) {
     chinese,
     acceptedEnglish: school.acceptedEnglish,
     acceptedChinese,
-    source: "ai"
+    source: source.source === "self-study" ? "self-study" : "ai",
+    sourceContentId: String(source.sourceContentId || source.id || "").trim().slice(0, 120),
+    formalEvidence: false
   };
 }
 
@@ -1174,45 +1370,73 @@ async function handlePreviewPracticeSentences(req, res, user) {
   const unavailable = (message = "AI 预习句子暂不可用，将每 5 分钟自动重试") => sendJson(res, 503, { error: message, retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
   try {
     refreshContent();
-    const currentDay = Number(content.currentDay) || 1;
-    const nextDay = currentDay + 1;
-    const learnedEnglish = new Set(content.words.filter(item => !item.preview).map(item => String(item.english || "").toLocaleLowerCase()).filter(Boolean));
-    const previewWords = content.words.filter(item => item.preview === true
-      && Number(item.day) === nextDay
-      && !String(item.learned || "").trim()
-      && !learnedEnglish.has(String(item.english || "").toLocaleLowerCase()));
+    const previewData = accountPreviewData(user);
+    const { currentDay, nextDay, words: previewWords } = previewData;
     if (!previewWords.length) return sendJson(res, 200, { currentDay, nextDay, sentences: [], source: "none" });
     const body = await readBody(req);
     const requestedIds = Array.from(new Set((Array.isArray(body.wordIds) ? body.wordIds : []).map(value => String(value || "").trim()).filter(Boolean))).slice(0, 20);
     const targets = (requestedIds.length ? requestedIds.map(id => previewWords.find(item => item.id === id)).filter(Boolean) : previewWords).slice(0, 20);
     if (!targets.length) return sendError(res, 400, "preview word targets are required");
-    if (!aiConfigured()) return unavailable("AI 尚未配置，预习句子将每 5 分钟自动重试");
-    const rate = takeAiRequest(user.id);
-    if (!rate.allowed) return unavailable("AI 请求受限，预习句子将每 5 分钟自动重试");
     const state = getUserState(user);
     const practice = sanitizeAiPractice(state.aiPractice);
-    const availableModels = getAvailableModels(aiSettings);
-    const requestedModel = [body.model, practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
-    const requestedEffort = AI_EFFORTS.includes(body.reasoningEffort) ? body.reasoningEffort : practice.settings.reasoningEffort;
-    const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: requestedEffort });
     const profile = buildLearningProfile(content, state, today());
     const learnedWords = [...profile.allowedWords];
     const previewWordTokens = previewWords.map(item => ({ wordId: item.id, english: item.english }));
     const allowedWords = Array.from(new Set([...learnedWords, ...previewWords.flatMap(item => previewEnglishTokens(item.english))]));
-    const generated = await runAiRoute(route, config => createAiPreviewSentenceGenerator(config).generate({
-      allowedWords,
-      learnedWords,
-      previewWords: previewWordTokens,
-      targets: targets.map(item => ({ wordId: item.id, english: item.english, chinese: item.chinese }))
-    }));
+    const accountContent = previewContentForAccount(previewData);
+    const plannedByWord = new Map();
+    targets.forEach(target => {
+      const targetTokens = previewEnglishTokens(target.english);
+      const planned = previewData.sentences.find(sentence => targetTokens.every(token => previewEnglishTokens(sentence.english).includes(token)));
+      const sanitized = planned ? sanitizePreviewSentence(accountContent, target, { ...planned, source: "self-study", sourceContentId: planned.id }, allowedWords) : null;
+      if (sanitized) plannedByWord.set(target.id, sanitized);
+    });
+    const missingTargets = targets.filter(target => !plannedByWord.has(target.id));
+    let generated = null;
+    let route = null;
+    if (missingTargets.length) {
+      if (!aiConfigured()) return unavailable("AI 尚未配置，预习句子将每 5 分钟自动重试");
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) return unavailable("AI 请求受限，预习句子将每 5 分钟自动重试");
+      const availableModels = getAvailableModels(aiSettings);
+      const requestedModel = [body.model, practice.settings.model, aiSettings.defaultModel].map(value => String(value || "").trim()).find(value => availableModels.includes(value)) || aiSettings.defaultModel;
+      const requestedEffort = AI_EFFORTS.includes(body.reasoningEffort) ? body.reasoningEffort : practice.settings.reasoningEffort;
+      route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: requestedEffort });
+      generated = await runAiRoute(route, config => createAiPreviewSentenceGenerator(config).generate({
+        allowedWords,
+        learnedWords,
+        previewWords: previewWordTokens,
+        targets: missingTargets.map(item => ({ wordId: item.id, english: item.english, chinese: item.chinese }))
+      }));
+    }
     const targetById = new Map(targets.map(item => [item.id, item]));
-    const sentences = generated.value.map(item => {
+    const generatedSentences = (generated?.value || []).map(item => {
       const target = targetById.get(item.wordId);
-      return target ? sanitizePreviewSentence(content, target, item, allowedWords) : null;
+      return target ? sanitizePreviewSentence(accountContent, target, item, allowedWords) : null;
     }).filter(Boolean);
+    const generatedByWord = new Map(generatedSentences.map(item => [item.wordId, item]));
+    const sentences = targets.map(target => plannedByWord.get(target.id) || generatedByWord.get(target.id)).filter(Boolean);
     if (sentences.length !== targets.length || new Set(sentences.map(item => item.wordId)).size !== targets.length) throw new Error("AI 返回的预习句子不完整或重复");
     const generatedAt = new Date().toISOString();
-    return sendJson(res, 200, { currentDay, nextDay, sentences: sentences.map(item => ({ ...item, generatedAt, providerId: generated.config.providerId, providerName: generated.config.providerName, model: generated.config.model, reasoningEffort: route.reasoningEffort })), source: "ai", provider: { id: generated.config.providerId, name: generated.config.providerName }, model: generated.config.model, reasoningEffort: route.reasoningEffort });
+    const source = missingTargets.length ? (plannedByWord.size ? "mixed" : "ai") : "self-study";
+    return sendJson(res, 200, {
+      currentDay,
+      nextDay,
+      sentences: sentences.map(item => ({
+        ...item,
+        generatedAt,
+        providerId: item.source === "ai" ? generated?.config.providerId || "" : "",
+        providerName: item.source === "ai" ? generated?.config.providerName || "" : "",
+        model: item.source === "ai" ? generated?.config.model || "" : "",
+        reasoningEffort: item.source === "ai" ? route?.reasoningEffort || "" : "",
+        formalEvidence: false
+      })),
+      source,
+      provider: generated ? { id: generated.config.providerId, name: generated.config.providerName } : null,
+      model: generated?.config.model || "",
+      reasoningEffort: route?.reasoningEffort || "",
+      formalEvidence: false
+    });
   } catch (error) {
     console.warn(`AI preview sentence generation failed; retry will be scheduled: ${error && error.message ? error.message : "unknown error"}`);
     const failure = publicAiSentenceVariantFailure(error);
@@ -1225,15 +1449,8 @@ async function handlePreviewPracticeSentences(req, res, user) {
   }
 }
 
-function previewWordsForPracticeGrade() {
-  const currentDay = Number(content.currentDay) || 1;
-  const nextDay = currentDay + 1;
-  const learnedEnglish = new Set(content.words.filter(item => !item.preview).map(item => String(item.english || "").toLocaleLowerCase()).filter(Boolean));
-  const words = content.words.filter(item => item.preview === true
-    && Number(item.day) === nextDay
-    && !String(item.learned || "").trim()
-    && !learnedEnglish.has(String(item.english || "").toLocaleLowerCase()));
-  return { currentDay, nextDay, words };
+function previewWordsForPracticeGrade(user) {
+  return accountPreviewData(user);
 }
 
 function previewPracticeGradeTask(rawTask, previewData) {
@@ -1277,7 +1494,7 @@ function previewPracticeGradeTask(rawTask, previewData) {
     english,
     chinese,
     acceptedEnglish: school.acceptedEnglish,
-    acceptedChinese: expandPreviewAcceptedChinese(content, english, [school.chinese], chinese, 16),
+    acceptedChinese: expandPreviewAcceptedChinese(previewContentForAccount(previewData), english, [school.chinese, ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])], chinese, 16),
     schoolMeaningAmbiguous: school.ambiguousSchool
   };
 }
@@ -1288,7 +1505,7 @@ async function handlePreviewPracticeGrade(req, res, user) {
   const unavailable = (message = "AI 预习判题暂不可用，答案已保存，请稍后重试") => sendJson(res, 503, { error: message, retryAfterMs: AI_SENTENCE_RETRY_MS }, { "Retry-After": String(AI_SENTENCE_RETRY_SECONDS) });
   try {
     refreshContent();
-    const previewData = previewWordsForPracticeGrade();
+    const previewData = previewWordsForPracticeGrade(user);
     const body = await readBody(req);
     const task = previewPracticeGradeTask(body.task, previewData);
     if (!task) return sendError(res, 400, "预习题目已失效或不属于当前下一天预习内容");
@@ -2688,14 +2905,24 @@ function applyCompletedReviewBatch(user, expectedBatch, results) {
   const newMistakeIds = new Set(newMistakes.map(item => item.id));
   next.mistakes = [...next.mistakes.filter(item => !newMistakeIds.has(item.id)), ...newMistakes]
     .filter(item => !mistakeIsResolved(next.attempts, item && item.taskId)).slice(-80);
-  const session = next.sessions[studyDate];
-  if (session && Array.isArray(session.taskIds)) {
-    session.doneTaskIds = Array.from(new Set([...(session.doneTaskIds || []), ...batch.questions.map(question => question.taskId)]));
-    session.index = session.taskIds.length;
-    session.currentTaskId = null;
-    session.batchComplete = true;
-    session.updatedAt = completedAt;
-  }
+  const completedTaskIds = batch.questions.map(question => question.taskId);
+  const existingSession = next.sessions[studyDate] && typeof next.sessions[studyDate] === "object" ? next.sessions[studyDate] : {};
+  const existingTaskIds = Array.isArray(existingSession.taskIds) ? existingSession.taskIds : [];
+  const existingDoneTaskIds = Array.isArray(existingSession.doneTaskIds) ? existingSession.doneTaskIds : [];
+  const sessionTaskIds = reviewSessionDoneTaskIds([...existingTaskIds, ...completedTaskIds]);
+  next.sessions[studyDate] = {
+    ...existingSession,
+    date: studyDate,
+    mode: ["all", "word", "sentence"].includes(existingSession.mode) ? existingSession.mode : (batch.mode || "all"),
+    taskIds: sessionTaskIds,
+    doneTaskIds: reviewSessionDoneTaskIds([...existingDoneTaskIds, ...completedTaskIds]),
+    index: sessionTaskIds.length,
+    currentTaskId: null,
+    batchId: batch.id,
+    batchComplete: true,
+    updatedAt: completedAt,
+    variants: existingSession.variants && typeof existingSession.variants === "object" ? existingSession.variants : {}
+  };
   batch.phase = "completed";
   batch.index = Math.max(0, batch.questions.length - 1);
   batch.completedAt = completedAt;
@@ -3035,6 +3262,10 @@ function handleAiQuestionBatch(req, res, url, user) {
     }
     if (suffix === "/review" && req.method === "POST") {
       if (set.phase === "completed") return sendJson(res, 200, { practice: publicAiPractice(practice), reused: true });
+      const requestedGradeRequestId = String(body.gradeRequestId || "").trim().slice(0, 180);
+      if (requestedGradeRequestId && set.gradeRequestId && set.gradeRequestId !== requestedGradeRequestId) {
+        return sendJson(res, 409, { error: "批改请求标识不一致", practice: publicAiPractice(practice) });
+      }
       const missingIndex = set.questions.findIndex(question => !question.userAnswer.trim());
       if (missingIndex >= 0) {
         set.phase = "answering";
@@ -3048,7 +3279,7 @@ function handleAiQuestionBatch(req, res, url, user) {
       }
       set.phase = "review";
       set.reviewOpenedAt = set.reviewOpenedAt || now;
-      set.gradeRequestId = set.gradeRequestId || `aigrade-${crypto.randomUUID()}`;
+      set.gradeRequestId = set.gradeRequestId || requestedGradeRequestId || `aigrade-${crypto.randomUUID()}`;
       set.updatedAt = now;
       set.lastError = "";
       practice.updatedAt = now;
@@ -3134,7 +3365,7 @@ async function handleAiGrade(req, res, user) {
 async function handleAiGenerate(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI generation endpoint not found");
-  if (!aiConfigured()) return sendError(res, 503, "AI is not configured");
+  if (!aiConfigured()) return sendJson(res, 503, { error: "AI 尚未配置，请先保存可用的供应商和模型", reasonCode: "not_configured" });
   try {
     const body = await readBody(req);
     const requestId = String(body.requestId || "").trim().slice(0, 180) || `aigen-${crypto.randomUUID()}`;
@@ -3293,30 +3524,56 @@ async function handleAiGenerate(req, res, user) {
   }
 }
 
-function handleAiNextSet(req, res, user) {
+async function handleAiNextSet(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI question endpoint not found");
-  const state = getUserState(user);
-  const practice = sanitizeAiPractice(state.aiPractice);
-  const current = practice.currentSet;
-  if (!current || current.phase !== "completed" || !current.questions.every(question => typeof question.correct === "boolean")) return sendError(res, 409, "current AI question set is not complete");
-  const queueItem = practice.generationQueue.find(item => item.status !== "consumed");
-  if (!queueItem) return sendError(res, 409, "no prepared AI question set is available");
-  if (queueItem.status === "pending") return sendJson(res, 409, { error: "队首题组仍在生成，请稍后再试", practice: publicAiPractice(practice) });
-  if (queueItem.status === "failed") return sendJson(res, 409, { error: queueItem.error || "队首题组生成失败，请原位重试", requestId: queueItem.requestId, practice: publicAiPractice(practice) });
-  const nextSetId = queueItem.setIds[0];
-  const nextSet = practice.queuedSets.find(set => set.id === nextSetId);
-  if (!nextSet) return sendJson(res, 409, { error: "队首题组快照暂不可用，请重试原生成请求", requestId: queueItem.requestId, practice: publicAiPractice(practice) });
-  practice.currentSet = nextSet;
-  practice.queuedSets = practice.queuedSets.filter(set => set.id !== nextSetId);
-  queueItem.setIds = queueItem.setIds.slice(1);
-  queueItem.status = queueItem.setIds.length ? "ready" : "consumed";
-  queueItem.updatedAt = new Date().toISOString();
-  practice.tutor = null;
-  practice.updatedAt = new Date().toISOString();
-  state.aiPractice = practice;
-  persistUserStates();
-  return sendJson(res, 200, { set: publicQuestionSet(practice.currentSet), remainingGroups: practice.generationQueue.filter(item => item.status !== "consumed").reduce((sum, item) => sum + (item.status === "ready" ? item.setIds.length : item.groupCount), 0), practice: publicAiPractice(practice) });
+  try {
+    const body = await readBody(req);
+    const expectedSetId = String(body.setId || "").trim().slice(0, 80);
+    const nextRequestId = String(body.nextRequestId || "").trim().slice(0, 180);
+    return await withFormalPracticeLock(user.id, async () => {
+      const state = getUserState(user);
+      const practice = sanitizeAiPractice(state.aiPractice);
+      const current = practice.currentSet;
+      if (expectedSetId && current && current.id === expectedSetId) {
+        return sendJson(res, 200, {
+          set: publicQuestionSet(current),
+          remainingGroups: practice.generationQueue.filter(item => item.status !== "consumed").reduce((sum, item) => sum + (item.status === "ready" ? item.setIds.length : item.groupCount), 0),
+          practice: publicAiPractice(practice),
+          nextRequestId,
+          reused: true
+        });
+      }
+      if (!current || current.phase !== "completed" || !current.questions.every(question => typeof question.correct === "boolean")) return sendError(res, 409, "current AI question set is not complete");
+      const queueItem = practice.generationQueue.find(item => item.status !== "consumed");
+      if (!queueItem) return sendError(res, 409, "no prepared AI question set is available");
+      if (queueItem.status === "pending") return sendJson(res, 409, { error: "队首题组仍在生成，请稍后再试", practice: publicAiPractice(practice) });
+      if (queueItem.status === "failed") return sendJson(res, 409, { error: queueItem.error || "队首题组生成失败，请原位重试", requestId: queueItem.requestId, practice: publicAiPractice(practice) });
+      const nextSetId = queueItem.setIds[0];
+      if (expectedSetId && nextSetId !== expectedSetId) return sendJson(res, 409, { error: "待进入题组与队首快照不一致，请刷新后重试", expectedSetId: nextSetId, practice: publicAiPractice(practice) });
+      const nextSet = practice.queuedSets.find(set => set.id === nextSetId);
+      if (!nextSet) return sendJson(res, 409, { error: "队首题组快照暂不可用，请重试原生成请求", requestId: queueItem.requestId, practice: publicAiPractice(practice) });
+      practice.currentSet = nextSet;
+      practice.queuedSets = practice.queuedSets.filter(set => set.id !== nextSetId);
+      queueItem.setIds = queueItem.setIds.slice(1);
+      queueItem.status = queueItem.setIds.length ? "ready" : "consumed";
+      queueItem.updatedAt = new Date().toISOString();
+      practice.tutor = null;
+      practice.updatedAt = new Date().toISOString();
+      state.aiPractice = practice;
+      userStates.users[user.id] = sanitizeState(state);
+      persistUserStates();
+      return sendJson(res, 200, {
+        set: publicQuestionSet(practice.currentSet),
+        remainingGroups: practice.generationQueue.filter(item => item.status !== "consumed").reduce((sum, item) => sum + (item.status === "ready" ? item.setIds.length : item.groupCount), 0),
+        practice: publicAiPractice(practice),
+        nextRequestId,
+        reused: false
+      });
+    });
+  } catch (error) {
+    return sendError(res, error.statusCode || 400, error.message);
+  }
 }
 
 async function handleAiTutorAsk(req, res, user) {
@@ -3991,7 +4248,7 @@ function serveStatic(req, res, url) {
   let relative = decodeURIComponent(url.pathname); if (relative === "/") relative = "/index.html";
   if (relative.includes("\0") || relative.includes("..") || relative.startsWith("/server/")) return sendError(res, 404, "not found");
   const filePath = path.resolve(ROOT, `.${relative}`); if (!filePath.startsWith(ROOT + path.sep)) return sendError(res, 404, "not found");
-  fs.stat(filePath, (error, stats) => { if (error || !stats.isFile()) return sendError(res, 404, "not found"); setCommonHeaders(res, mimeType(filePath)); res.setHeader("Cache-Control", ["index.html", "styles.css", "data.js", "pronunciation-data.js", "review-variants.js", "answer-utils.js", "app.js", "sw.js"].some(name => filePath.endsWith(name)) ? "no-cache" : "public, max-age=3600"); res.writeHead(200); fs.createReadStream(filePath).pipe(res); });
+  fs.stat(filePath, (error, stats) => { if (error || !stats.isFile()) return sendError(res, 404, "not found"); setCommonHeaders(res, mimeType(filePath)); res.setHeader("Cache-Control", ["index.html", "styles.css", "data.js", "pronunciation-data.js", "review-variants.js", "answer-utils.js", "study-time.js", "review-session.js", "offline-store.js", "offline-learning.js", "offline-ai.js", "offline-replay.js", "app.js", "sw.js"].some(name => filePath.endsWith(name)) ? "no-cache" : "public, max-age=3600"); res.writeHead(200); fs.createReadStream(filePath).pipe(res); });
 }
 
 const server = http.createServer((req, res) => {
@@ -4008,6 +4265,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/preview/practice/sentences") return handlePreviewPracticeSentences(req, res, user);
   if (url.pathname === "/api/preview/practice/grade") return handlePreviewPracticeGrade(req, res, user);
   if (url.pathname === "/api/preview") return handlePreview(req, res, user);
+  if (url.pathname === "/api/offline/pack") return handleOfflinePack(req, res, user);
   if (url.pathname === "/api/abilities") return handleAbilities(req, res, user);
   if (url.pathname === "/api/review/sentence-stats") return handleReviewSentenceStats(req, res, url, user);
   if (url.pathname === "/api/review/sentence-variants") return handleReviewSentenceVariants(req, res, user);

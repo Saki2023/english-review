@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=60">
+  <link rel="stylesheet" href="styles.css?v=61">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v60">v60</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v61">v61</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -138,6 +138,12 @@
             <div class="self-study-mode-actions">
               <button class="secondary-button" type="button" id="selfStudyModeToggle">开启出门自学</button>
               <button class="primary-button" type="button" id="openSelfStudyButton" hidden>进入当前课程<i data-lucide="arrow-right" aria-hidden="true"></i></button>
+              <button class="secondary-button" type="button" id="prepareOfflinePack"><i data-lucide="download" aria-hidden="true"></i>准备离线使用</button>
+              <button class="icon-button offline-pack-delete" type="button" id="deleteOfflinePack" data-tooltip="删除当前账号离线包" aria-label="删除当前账号离线包" hidden><i data-lucide="trash-2" aria-hidden="true"></i></button>
+            </div>
+            <div class="offline-pack-status" id="offlinePackStatus" role="status" aria-live="polite">
+              <i data-lucide="wifi-off" aria-hidden="true"></i>
+              <span><strong>尚未准备离线包</strong><small>联网时点击“准备离线使用”，出门断网后才能进入同一账号。</small></span>
             </div>
           </section>
 
@@ -376,6 +382,9 @@
               <h1 id="aiTitle">AI 出题</h1>
               <p class="heading-note" id="aiStatus">正在读取 AI 配置…</p>
             </div>
+            <div class="ai-status-actions">
+              <button class="secondary-button" type="button" id="retryAiConnection"><i data-lucide="refresh-cw" aria-hidden="true"></i>重试 AI 连接</button>
+            </div>
           </div>
 
           <div class="ai-controls" id="aiControls">
@@ -458,6 +467,7 @@
             <div class="batch-panel-actions">
               <button class="secondary-button" type="button" id="editAiBatch"><i data-lucide="arrow-left" aria-hidden="true"></i>返回修改</button>
               <button class="primary-button" type="button" id="gradeAiBatch">确认并批改<i data-lucide="check" aria-hidden="true"></i></button>
+              <button class="primary-button" type="button" id="startNextOfflineAiBatch" hidden>开始下一组<i data-lucide="arrow-right" aria-hidden="true"></i></button>
             </div>
             <p class="batch-grade-status" id="aiBatchGradeStatus" aria-live="polite"></p>
           </section>
@@ -1197,12 +1207,17 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=60"></script>
-  <script src="data.js?v=60"></script>
-  <script src="pronunciation-data.js?v=60"></script>
-  <script src="review-variants.js?v=60"></script>
-  <script src="answer-utils.js?v=60"></script>
-  <script src="study-time.js?v=60"></script>
+  <script src="vendor/lucide.min.js?v=61"></script>
+  <script src="data.js?v=61"></script>
+  <script src="pronunciation-data.js?v=61"></script>
+  <script src="review-variants.js?v=61"></script>
+  <script src="answer-utils.js?v=61"></script>
+  <script src="study-time.js?v=61"></script>
+  <script src="review-session.js?v=61"></script>
+  <script src="offline-store.js?v=61"></script>
+  <script src="offline-learning.js?v=61"></script>
+  <script src="offline-ai.js?v=61"></script>
+  <script src="offline-replay.js?v=61"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1218,7 +1233,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=60";
+      appScript.src = "app.js?v=61";
       document.body.appendChild(appScript);
     })();
   </script>

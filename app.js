@@ -5,6 +5,11 @@
   const PRONUNCIATION = window.ENGLISH_PRONUNCIATION_DATA || { concepts: [], phonemes: [] };
   const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, expandRegisteredChineseAnswers: (_content, _english, answers) => answers, naturalizePlainDeepChinese: (_english, value) => value, sanitizeGeneratedSentenceVariant: () => null };
   const STUDY_TIME = window.ENGLISH_REVIEW_STUDY_TIME || {};
+  const REVIEW_SESSION = window.ENGLISH_REVIEW_SESSION || {};
+  const OFFLINE_STORAGE = window.ENGLISH_REVIEW_OFFLINE || {};
+  const OFFLINE_LEARNING = window.ENGLISH_REVIEW_OFFLINE_LEARNING || {};
+  const OFFLINE_AI = window.ENGLISH_REVIEW_OFFLINE_AI || {};
+  const OFFLINE_REPLAY = window.ENGLISH_REVIEW_OFFLINE_REPLAY || {};
   const { MISTAKE_AUTO_RESOLVE_STREAK, NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildMistakePracticeQueue, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, isReviewEligibleItem, mistakeCorrectStreak, mistakeIsResolved, normalizeChinese, normalizeEnglish, repairReviewEvidence, shouldSubmitOnEnter } = window.ENGLISH_REVIEW_ANSWER_UTILS;
   const FALLBACK_DAILY_STUDY_PLAN = [
     { id: "review", label: "旧知识复习", minutes: 10, view: "home", actionLabel: "直接开始做题" },
@@ -62,6 +67,7 @@
   const REVIEW_VARIANT_WAIT_TIMEOUT_MS = 12 * 60 * 1000;
   const REVIEW_VARIANT_POLL_REQUEST_TIMEOUT_MS = 15000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
+  const offlineStore = API_ENABLED && typeof OFFLINE_STORAGE.createOfflineStore === "function" ? OFFLINE_STORAGE.createOfflineStore(window) : null;
   let remoteReady = !API_ENABLED;
   let remoteSaveTimer;
   const allItems = [
@@ -85,6 +91,11 @@
   let pronunciationFilter = "learned";
   let notesDay = Math.max(1, Number(DATA.currentDay) || 1, ...learnedItems.map(item => Number(item.day) || 0));
   let currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
+  let offlineSession = false;
+  let offlinePack = null;
+  let offlinePackLoading = false;
+  let offlineOutboxCount = 0;
+  let offlineReplayInProgress = false;
   let accountRequestEpoch = 0;
   let appEventsBound = false;
   let authEventsBound = false;
@@ -134,6 +145,8 @@
   let aiStatusMessage = "";
   let aiOptions = { configured: false, models: [], providers: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
   let aiOptionsLoaded = false;
+  let aiOptionsLoading = false;
+  let aiOptionsError = "";
   let aiConfigDraft = null;
   let activeAiProviderId = "";
   let examState = normalizeClientAiExam(null);
@@ -203,6 +216,301 @@
   }
 
   function storageKey() { return currentUser && currentUser.id ? `${STORAGE_KEY}-${currentUser.id}` : STORAGE_KEY; }
+
+  function cloneJson(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+
+  function offlinePackSummary(pack = offlinePack) {
+    const source = pack && typeof pack === "object" ? pack : null;
+    if (!source) return null;
+    const preview = source.preview && typeof source.preview === "object" ? source.preview : {};
+    const aiPractice = source.aiPractice && typeof source.aiPractice === "object" ? source.aiPractice : {};
+    return {
+      generatedAt: String(source.generatedAt || ""),
+      expiresAt: String(source.expiresAt || ""),
+      lessons: Array.isArray(source.selfStudy && source.selfStudy.lessons) ? source.selfStudy.lessons.length : 0,
+      words: Array.isArray(preview.words) ? preview.words.length : 0,
+      sentences: Array.isArray(preview.sentences) ? preview.sentences.length : 0,
+      aiGroups: (aiPractice.currentSet ? 1 : 0) + (Array.isArray(aiPractice.preparedSets) ? aiPractice.preparedSets.length : 0)
+    };
+  }
+
+  async function refreshOfflineOutboxCount(accountId = currentUser && currentUser.id) {
+    if (!offlineStore || !accountId) { offlineOutboxCount = 0; return 0; }
+    try { offlineOutboxCount = (await offlineStore.listOutbox(accountId)).length; }
+    catch (_) { offlineOutboxCount = 0; }
+    renderOfflinePackStatus();
+    return offlineOutboxCount;
+  }
+
+  function renderOfflinePackStatus() {
+    const status = $("#offlinePackStatus");
+    const prepare = $("#prepareOfflinePack");
+    const remove = $("#deleteOfflinePack");
+    if (!status || !prepare || !remove) return;
+    const summary = offlinePackSummary();
+    prepare.disabled = offlinePackLoading || offlineSession || !currentUser || currentUser.role === "offline";
+    prepare.innerHTML = offlinePackLoading
+      ? '<i data-lucide="loader-circle" aria-hidden="true"></i>正在准备…'
+      : `<i data-lucide="download" aria-hidden="true"></i>${summary ? "重新准备离线包" : "准备离线使用"}`;
+    remove.hidden = !summary || offlineSession;
+    status.classList.toggle("is-offline", offlineSession);
+    if (!summary) {
+      status.innerHTML = '<i data-lucide="wifi-off" aria-hidden="true"></i><span><strong>尚未准备离线包</strong><small>联网时点击“准备离线使用”，出门断网后才能进入同一账号。</small></span>';
+    } else {
+      const generated = summary.generatedAt ? new Date(summary.generatedAt).toLocaleString("zh-CN") : "未知时间";
+      const expires = summary.expiresAt ? new Date(summary.expiresAt).toLocaleDateString("zh-CN") : "未知日期";
+      const pending = offlineOutboxCount ? `；${offlineOutboxCount} 项待联网同步` : "";
+      status.innerHTML = `<i data-lucide="${offlineSession ? "cloud-off" : "circle-check"}" aria-hidden="true"></i><span><strong>${offlineSession ? "正在使用当前账号的离线包" : "离线包已准备"}</strong><small>${generated} 生成 · ${summary.lessons} 天课程 · ${summary.words} 个预习词 · ${summary.sentences} 个预习句 · ${summary.aiGroups} 个已生成 AI 题组 · ${expires} 前有效${pending}</small></span>`;
+    }
+    refreshIcons();
+  }
+
+  function installOfflinePreviewSentences(pack) {
+    const sentences = Array.isArray(pack && pack.preview && pack.preview.practiceSentences) ? pack.preview.practiceSentences : [];
+    if (!sentences.length) return;
+    const state = ensurePreviewPracticeState();
+    const existingIds = new Set(state.tasks.map(task => task.id));
+    sentences.forEach((sentence, index) => {
+      const wordId = String(sentence.wordId || sentence.requiredPreviewWordIds && sentence.requiredPreviewWordIds[0] || previewPracticeWords()[index]?.id || "");
+      if (!wordId || !String(sentence.english || "").trim() || !String(sentence.chinese || "").trim()) return;
+      const baseId = `preview-sentence-${wordId}`;
+      const base = {
+        id: baseId,
+        kind: "sentence",
+        wordId,
+        requiredPreviewWordIds: Array.from(new Set([wordId, ...(Array.isArray(sentence.requiredPreviewWordIds) ? sentence.requiredPreviewWordIds : [])])),
+        direction: "en-zh",
+        english: String(sentence.english).trim(),
+        chinese: REVIEW_VARIANTS.naturalizePlainDeepChinese(sentence.english, sentence.chinese),
+        acceptedEnglish: Array.from(new Set([sentence.english, ...(Array.isArray(sentence.acceptedEnglish) ? sentence.acceptedEnglish : [])].map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8),
+        acceptedChinese: clientPreviewAcceptedChinese(sentence.english, sentence.chinese, sentence.acceptedChinese),
+        formalEvidence: false
+      };
+      if (!existingIds.has(base.id)) { state.tasks.push(base); existingIds.add(base.id); }
+      const reverse = { ...base, id: `${base.id}-zh-en`, direction: "zh-en" };
+      if (!existingIds.has(reverse.id)) { state.tasks.push(reverse); existingIds.add(reverse.id); }
+    });
+    state.generatedAt ||= String(pack.generatedAt || new Date().toISOString());
+    state.updatedAt ||= state.generatedAt;
+    model.previewPractice = normalizeClientPreviewPractice(state);
+  }
+
+  function hydrateOfflinePack(pack) {
+    if (!pack || !currentUser || String(pack.account && pack.account.id || "") !== String(currentUser.id || "")) throw new Error("离线包不属于当前账号");
+    offlinePack = pack;
+    const preview = pack.preview && typeof pack.preview === "object" ? pack.preview : {};
+    previewState = normalizePreviewResponse({
+      updatedAt: preview.updatedAt || pack.generatedAt,
+      preview: preview.document || null,
+      previews: preview.document ? [preview.document] : []
+    });
+    selectedPreviewName = previewState.preview?.name || "";
+    previewWordsState = normalizePreviewWordsResponse({
+      currentDay: preview.currentDay,
+      nextDay: preview.nextDay,
+      updatedAt: preview.updatedAt || pack.generatedAt,
+      words: preview.words || []
+    });
+    const packedPractice = normalizeClientPreviewPractice(preview.practice);
+    const localPractice = normalizeClientPreviewPractice(model.previewPractice);
+    model.previewPractice = localPractice.key === packedPractice.key && localPractice.updatedAt > packedPractice.updatedAt ? localPractice : packedPractice;
+    installOfflinePreviewSentences(pack);
+    if (pack.selfStudy && typeof OFFLINE_LEARNING.publicSelfStudyState === "function") {
+      selfStudyState = normalizeClientSelfStudy(OFFLINE_LEARNING.publicSelfStudyState(pack.selfStudy));
+      selfStudyLoaded = true;
+    } else if (pack.selfStudyPublic) {
+      selfStudyState = normalizeClientSelfStudy(pack.selfStudyPublic);
+      selfStudyLoaded = true;
+    }
+    const packedAi = pack.aiPractice && typeof pack.aiPractice === "object" ? pack.aiPractice : {};
+    const localAi = normalizeClientAiPractice(model.aiPractice);
+    const packedCurrent = packedAi.currentSet && Array.isArray(packedAi.currentSet.questions) ? packedAi.currentSet : null;
+    const localCurrent = localAi.currentSet && packedCurrent && localAi.currentSet.id === packedCurrent.id && String(localAi.currentSet.updatedAt || "") > String(packedCurrent.updatedAt || "") ? localAi.currentSet : packedCurrent;
+    model.aiPractice = normalizeClientAiPractice({
+      ...localAi,
+      settings: packedAi.settings || localAi.settings,
+      currentSet: localCurrent,
+      queuedSets: Array.isArray(packedAi.preparedSets) ? packedAi.preparedSets : [],
+      generationQueue: packedAi.generationQueue || [],
+      updatedAt: packedAi.updatedAt || pack.generatedAt
+    });
+    const packedModels = Array.from(new Set([
+      packedAi.settings && packedAi.settings.model,
+      packedCurrent && packedCurrent.model,
+      ...(Array.isArray(packedAi.preparedSets) ? packedAi.preparedSets.map(set => set && set.model) : [])
+    ].map(value => String(value || "").trim()).filter(Boolean)));
+    aiOptions = {
+      ...aiOptions,
+      configured: Boolean(packedCurrent || (Array.isArray(packedAi.preparedSets) && packedAi.preparedSets.length)),
+      models: packedModels,
+      defaultModel: packedModels[0] || "",
+      efforts: [...AI_EFFORTS],
+      admin: false
+    };
+    aiOptionsLoaded = true;
+    aiOptionsLoading = false;
+    aiOptionsError = "";
+    remoteReady = false;
+    if (offlineSession && $("#dataStatus")) $("#dataStatus").textContent = `词库同步至第 ${DATA.currentDay} 天 · 当前账号离线包`;
+    saveModel();
+    renderOfflinePackStatus();
+  }
+
+  function persistOfflinePackSnapshot() {
+    if (!offlineStore || !offlinePack || !currentUser || String(offlinePack.account && offlinePack.account.id || "") !== String(currentUser.id || "")) return;
+    const next = cloneJson(offlinePack);
+    next.preview ||= {};
+    next.preview.practice = cloneJson(model.previewPractice);
+    next.aiPractice ||= {};
+    next.aiPractice.currentSet = cloneJson(model.aiPractice && model.aiPractice.currentSet);
+    next.aiPractice.preparedSets = cloneJson(model.aiPractice && model.aiPractice.queuedSets || next.aiPractice.preparedSets || []);
+    next.localUpdatedAt = new Date().toISOString();
+    offlinePack = next;
+    const accountId = currentUser.id;
+    offlineStore.savePack(next, accountId).then(saved => {
+      if (currentUser && currentUser.id === accountId) offlinePack = saved;
+    }).catch(error => {
+      if (currentUser && currentUser.id === accountId) showToast(error.message || "离线数据保存失败");
+    });
+  }
+
+  async function prepareOfflinePack() {
+    if (!offlineStore || !currentUser || offlineSession || offlinePackLoading) return;
+    if (!browserIsOnline()) return showToast("当前设备已断网，无法重新准备离线包");
+    offlinePackLoading = true;
+    renderOfflinePackStatus();
+    try {
+      const response = await fetch("/api/offline/pack", { credentials: "same-origin", cache: "no-store" });
+      const pack = await responseJson(response);
+      if (String(pack.account && pack.account.id || "") !== String(currentUser.id || "")) throw new Error("服务器返回的离线包账号不一致");
+      const localPractice = normalizeClientPreviewPractice(model.previewPractice);
+      const packedPractice = normalizeClientPreviewPractice(pack.preview && pack.preview.practice);
+      if (localPractice.key === packedPractice.key && localPractice.updatedAt > packedPractice.updatedAt) pack.preview.practice = cloneJson(localPractice);
+      offlinePack = await offlineStore.savePack(pack, currentUser.id);
+      offlineStore.activate(currentUser.id);
+      await refreshOfflineOutboxCount(currentUser.id);
+      showToast("当前账号离线包已准备，可以在断网后继续学习");
+    } catch (error) {
+      showToast(error.message || "离线包准备失败");
+    } finally {
+      offlinePackLoading = false;
+      renderOfflinePackStatus();
+    }
+  }
+
+  async function deleteOfflinePack() {
+    if (!offlineStore || !currentUser || !offlinePack || offlineSession) return;
+    const pending = await offlineStore.listOutbox(currentUser.id).catch(() => []);
+    if (pending.length) return showToast(`还有 ${pending.length} 项离线学习待同步，暂不能删除`);
+    await offlineStore.removePack(currentUser.id);
+    if (offlineStore.activeAccountId() === currentUser.id) offlineStore.clearActive();
+    offlinePack = null;
+    offlineOutboxCount = 0;
+    renderOfflinePackStatus();
+    showToast("当前账号离线包已删除");
+  }
+
+  async function enterPreparedOfflineSession() {
+    if (offlineSession) return true;
+    if (!offlineStore || !currentUser) return false;
+    const accountId = String(currentUser.id || "");
+    if (!accountId || offlineStore.activeAccountId() !== accountId) {
+      aiStatusMessage = "当前账号没有已启用的离线包；请联网后先点击“准备离线使用”。";
+      if (activeView === "ai") renderAiView();
+      return false;
+    }
+    const pack = await offlineStore.loadPack(accountId).catch(() => null);
+    if (!pack || String(pack.account && pack.account.id || "") !== accountId) {
+      offlineStore.clearActive();
+      aiStatusMessage = "当前账号离线包已过期或不可用，请联网重新准备。";
+      if (activeView === "ai") renderAiView();
+      return false;
+    }
+    offlineSession = true;
+    remoteReady = false;
+    hydrateOfflinePack(pack);
+    await refreshOfflineOutboxCount(accountId);
+    showAppView();
+    renderHome();
+    renderPreview();
+    renderPreviewWords();
+    renderPreviewPractice();
+    renderSelfStudyModeCard();
+    renderSelfStudyView();
+    renderAiView();
+    $("#dataStatus").textContent = `词库同步至第 ${DATA.currentDay} 天 · 当前账号离线包`;
+    showToast("已进入当前账号的离线学习模式");
+    return true;
+  }
+
+  async function replayOfflineOutbox() {
+    if (offlineReplayInProgress || !offlineStore || !currentUser || !browserIsOnline() || typeof OFFLINE_REPLAY.replayOutbox !== "function") return null;
+    const accountId = String(currentUser.id || "");
+    const context = captureAccountRequestContext();
+    offlineReplayInProgress = true;
+    aiStatusMessage = "网络已恢复，正在按原顺序同步离线学习记录…";
+    renderOfflinePackStatus();
+    if (activeView === "ai") renderAiView();
+    try {
+      const result = await OFFLINE_REPLAY.replayOutbox({
+        store: offlineStore,
+        accountId,
+        fetch: window.fetch.bind(window),
+        onProgress: progress => {
+          if (!accountRequestContextIsCurrent(context) || progress.phase !== "replay") return;
+          aiStatusMessage = `正在同步离线记录 ${progress.index + 1} / ${progress.total}…`;
+          if (activeView === "ai") renderAiView();
+        }
+      });
+      if (!accountRequestContextIsCurrent(context)) throw staleAccountRequestError();
+      offlineSession = false;
+      setAccountContext({ ...result.user, role: result.user.role || "user" });
+      offlinePack = result.pack || await offlineStore.loadPack(accountId).catch(() => null);
+      offlineOutboxCount = result.remaining;
+      remoteReady = false;
+      selfStudyLoaded = false;
+      previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
+      previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
+      showAppView();
+      await syncRemoteState();
+      await Promise.all([loadPreview(), loadPreviewWords(), loadSelfStudy(true), loadAiOptions(), loadAiExams()]);
+      await retryAiConnection();
+      aiStatusMessage = result.packError
+        ? `离线记录已同步；${result.packError}，可手动重新准备离线包。`
+        : `离线记录已全部同步${result.replayed ? `（${result.replayed} 项）` : ""}，服务器结果已刷新。`;
+      renderHome();
+      renderAiView();
+      renderOfflinePackStatus();
+      showToast(aiStatusMessage);
+      return result;
+    } catch (error) {
+      if (accountRequestContextIsCurrent(context) && ["auth_required", "account_mismatch"].includes(error.code)) {
+        offlineStore.clearActive();
+        offlineSession = false;
+        offlinePack = null;
+        offlineOutboxCount = 0;
+        setAccountContext(null);
+        showAuthView();
+        setAuthFeedback(error.message);
+      } else if (accountRequestContextIsCurrent(context) && !error.silent) {
+        offlineSession = true;
+        remoteReady = false;
+        aiStatusMessage = `${error.message || "离线记录同步失败"}；队列已保留，可稍后重试。`;
+        showAppView();
+        $("#dataStatus").textContent = `词库同步至第 ${DATA.currentDay} 天 · 当前账号离线包`;
+        renderHome();
+        renderAiView();
+        renderOfflinePackStatus();
+        showToast(aiStatusMessage);
+      }
+      return null;
+    } finally {
+      offlineReplayInProgress = false;
+      if (currentUser) await refreshOfflineOutboxCount(currentUser.id);
+    }
+  }
 
   function normalizeClientTutor(value) {
     if (!value || typeof value !== "object") return null;
@@ -296,7 +604,7 @@
         reasoningEffort: AI_EFFORTS.includes(tutorSettings.reasoningEffort) ? tutorSettings.reasoningEffort : "medium"
       },
       currentSet: source.currentSet && Array.isArray(source.currentSet.questions) ? source.currentSet : null,
-      queuedSets: (Array.isArray(source.queuedSets) ? source.queuedSets : []).filter(set => set && Array.isArray(set.questions) && set.questions.length).slice(0, 4),
+      queuedSets: (Array.isArray(source.queuedSets) ? source.queuedSets : []).filter(set => set && Array.isArray(set.questions) && set.questions.length).slice(0, 20),
       generationQueue: (Array.isArray(source.generationQueue) ? source.generationQueue : []).map(item => ({
         id: String(item && item.id || ""),
         requestId: String(item && item.requestId || ""),
@@ -388,7 +696,9 @@
       mode: ["all", "word", "sentence"].includes(source.mode) ? source.mode : "all",
       taskIds: Array.isArray(source.taskIds) ? source.taskIds.map(item => String(item || "").slice(0, 180)).filter(Boolean).slice(0, 100) : [],
       index: Math.max(0, Number(source.index) || 0),
-      doneTaskIds: Array.isArray(source.doneTaskIds) ? source.doneTaskIds.map(item => String(item || "").slice(0, 180)).filter(Boolean).slice(0, 100) : [],
+      doneTaskIds: REVIEW_SESSION.uniqueTaskIds
+        ? REVIEW_SESSION.uniqueTaskIds(source.doneTaskIds)
+        : Array.from(new Set(Array.isArray(source.doneTaskIds) ? source.doneTaskIds.map(item => String(item || "").slice(0, 180)).filter(Boolean) : [])).slice(0, 1000),
       currentTaskId: String(source.currentTaskId || "").slice(0, 180),
       batchId: String(source.batchId || "").slice(0, 180),
       batchComplete: Boolean(source.batchComplete),
@@ -1415,7 +1725,8 @@
 
   function saveModel() {
     try { localStorage.setItem(storageKey(), JSON.stringify(model)); } catch (_) { showToast("浏览器没有保存本机记录的权限"); }
-    if (API_ENABLED && remoteReady) {
+    if (offlineSession) persistOfflinePackSnapshot();
+    if (API_ENABLED && remoteReady && !offlineSession) {
       clearTimeout(remoteSaveTimer);
       remoteSaveTimer = setTimeout(() => {
         fetch("/api/state", { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(model) }).catch(() => {});
@@ -1426,6 +1737,7 @@
   function mergeReviewSessions(localSession, remoteSession) {
     const local = normalizeClientReviewSession(localSession);
     const remote = normalizeClientReviewSession(remoteSession);
+    if (REVIEW_SESSION.mergeReviewSession) return normalizeClientReviewSession(REVIEW_SESSION.mergeReviewSession(local, remote));
     const localUpdated = String(local.updatedAt || "");
     const remoteUpdated = String(remote.updatedAt || "");
     const preferred = localUpdated || remoteUpdated
@@ -1434,6 +1746,7 @@
         || ((remote.doneTaskIds || []).length === (local.doneTaskIds || []).length && Number(remote.index || 0) >= Number(local.index || 0)) ? remote : local;
     return normalizeClientReviewSession({
       ...preferred,
+      doneTaskIds: Array.from(new Set([...(local.doneTaskIds || []), ...(remote.doneTaskIds || [])])),
       variants: {
         ...(remote.variants && typeof remote.variants === "object" ? remote.variants : {}),
         ...(local.variants && typeof local.variants === "object" ? local.variants : {})
@@ -1599,7 +1912,7 @@
   }
 
   async function syncRemoteState() {
-    if (!API_ENABLED) return;
+    if (!API_ENABLED || offlineSession) return;
     try {
       const response = await fetch("/api/state", { cache: "no-store", credentials: "same-origin" });
       if (response.status === 401) return showAuthView();
@@ -1612,7 +1925,7 @@
       $("#dataStatus").textContent = `词库同步至第 ${DATA.currentDay} 天 · 云端已连接`;
       setView(activeView);
     } catch (_) {
-      remoteReady = true;
+      remoteReady = false;
       $("#dataStatus").textContent = `词库同步至第 ${DATA.currentDay} 天 · 离线缓存`;
     }
   }
@@ -1638,7 +1951,7 @@
     reviewBatchRequestInProgress = false;
     aiRequestInProgress = false;
     aiGenerationInProgress = false;
-    [$("#generateAiQuestions"), $("#startNextAiBatch"), $("#generateAnotherAiSet")].filter(Boolean).forEach(button => setBusyButton(button, false, ""));
+    [$("#generateAiQuestions"), $("#startNextAiBatch"), $("#startNextOfflineAiBatch"), $("#generateAnotherAiSet")].filter(Boolean).forEach(button => setBusyButton(button, false, ""));
   }
 
   function captureAccountRequestContext() {
@@ -1666,7 +1979,7 @@
     $("#appBody").hidden = false;
     $("#accountArea").hidden = false;
     $("#resetButton").hidden = false;
-    $("#userBadge").textContent = currentUser ? currentUser.username : "本机模式";
+    $("#userBadge").textContent = currentUser ? `${currentUser.username}${offlineSession ? " · 离线" : ""}` : "本机模式";
     $("#logoutButton").hidden = !API_ENABLED;
     $("#openAiConfigButton").hidden = !currentUser || currentUser.role !== "admin";
     refreshIcons();
@@ -1683,12 +1996,34 @@
     if (!API_ENABLED) return true;
     try {
       const response = await fetch("/api/auth/status", { credentials: "same-origin", cache: "no-store" });
-      if (!response.ok) return false;
+      if (!response.ok) throw new Error("账号状态暂时不可用");
       const data = await response.json();
-      if (!data.authenticated || !data.user) return false;
+      if (!data.authenticated || !data.user) {
+        offlineStore?.clearActive();
+        return false;
+      }
+      const activeId = offlineStore?.activeAccountId() || "";
+      if (activeId && activeId !== String(data.user.id || "")) offlineStore.clearActive();
+      offlineSession = false;
       setAccountContext(data.user);
+      offlinePack = offlineStore ? await offlineStore.loadPack(data.user.id) : null;
+      await refreshOfflineOutboxCount(data.user.id);
       return true;
-    } catch (_) { return false; }
+    } catch (_) {
+      const accountId = offlineStore?.activeAccountId() || "";
+      if (!accountId) return false;
+      const pack = await offlineStore.loadPack(accountId);
+      if (!pack || String(pack.account && pack.account.id || "") !== accountId) {
+        offlineStore.clearActive();
+        return false;
+      }
+      offlineSession = true;
+      offlinePack = pack;
+      remoteReady = false;
+      setAccountContext({ id: accountId, username: pack.account.username || "离线账号", role: "offline" });
+      await refreshOfflineOutboxCount(accountId);
+      return true;
+    }
   }
 
   async function submitAuth(event) {
@@ -1706,6 +2041,9 @@
       clearReviewVariantPoolStatusPolling();
       reviewVariantPoolStatus = null;
       resetReviewVariantPoolViewer();
+      offlineStore?.clearActive();
+      offlineSession = false;
+      offlinePack = offlineStore ? await offlineStore.loadPack(data.user.id) : null;
       setAccountContext(data.user);
       model = loadModel();
       previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
@@ -1718,11 +2056,17 @@
       showAppView();
       bindAppEvents();
       renderHome();
-      loadPreviewWords();
-      loadSelfStudy();
-      loadAiOptions();
-      loadAiExams();
-      syncRemoteState();
+      const pending = await refreshOfflineOutboxCount(data.user.id);
+      if (pending) {
+        if (offlinePack) hydrateOfflinePack(offlinePack);
+        await replayOfflineOutbox();
+      } else {
+        loadPreviewWords();
+        loadSelfStudy();
+        loadAiOptions();
+        loadAiExams();
+        syncRemoteState();
+      }
     } catch (_) { setAuthFeedback("无法连接服务器，请检查网络"); }
     finally { submit.disabled = false; }
   }
@@ -1732,6 +2076,10 @@
     clearReviewVariantPoolStatusPolling();
     reviewVariantPoolStatus = null;
     resetReviewVariantPoolViewer();
+    offlineStore?.clearActive();
+    offlineSession = false;
+    offlinePack = null;
+    offlineOutboxCount = 0;
     setAccountContext(API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" });
     if (API_ENABLED) showAuthView();
     if (API_ENABLED) { try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch (_) {} }
@@ -1837,20 +2185,31 @@
     if (settings.model) select.value = settings.model;
     select.disabled = !aiOptions.configured || !aiOptions.models.length;
     $("#aiQuestionCount").value = String(settings.count);
-    $("#aiQuestionCount").disabled = !aiOptions.configured || aiGenerationInProgress;
+    $("#aiQuestionCount").disabled = !aiOptions.configured || aiGenerationInProgress || aiOptionsLoading;
     $("#aiGroupCount").value = String(settings.groupCount);
-    $("#aiGroupCount").disabled = !aiOptions.configured || aiGenerationInProgress;
+    $("#aiGroupCount").disabled = !aiOptions.configured || aiGenerationInProgress || aiOptionsLoading;
     $$('[data-ai-effort]').forEach(button => {
       const active = button.dataset.aiEffort === settings.reasoningEffort;
       button.classList.toggle("is-selected", active);
       button.setAttribute("aria-pressed", String(active));
-      button.disabled = !aiOptions.configured;
+      button.disabled = !aiOptions.configured || aiOptionsLoading;
     });
-    $("#generateAiQuestions").disabled = !aiOptions.configured || aiGenerationInProgress;
+    $("#generateAiQuestions").disabled = aiGenerationInProgress || aiOptionsLoading || offlineSession;
+    const retryButton = $("#retryAiConnection");
+    if (retryButton) {
+      retryButton.disabled = aiOptionsLoading || offlineReplayInProgress;
+      retryButton.innerHTML = offlineReplayInProgress
+        ? '<i data-lucide="loader-circle" aria-hidden="true"></i>正在同步'
+        : offlineSession
+          ? '<i data-lucide="refresh-cw" aria-hidden="true"></i>重试联网同步'
+          : aiOptionsLoading
+            ? '<i data-lucide="loader-circle" aria-hidden="true"></i>正在检查'
+            : '<i data-lucide="refresh-cw" aria-hidden="true"></i>重试 AI 连接';
+    }
   }
 
   async function prefetchReviewVariantPool(force = false) {
-    if (!API_ENABLED || !aiOptionsLoaded || !aiOptions.configured) return;
+    if (!API_ENABLED || offlineSession || !aiOptionsLoaded || !aiOptions.configured) return;
     try {
       const settings = selectedAiSettings();
       const response = await fetch("/api/review/sentence-variants", {
@@ -1866,18 +2225,34 @@
     }
   }
 
+  function browserIsOnline() {
+    return typeof navigator === "undefined" || navigator.onLine !== false;
+  }
+
+  function aiOptionsFailureMessage(error) {
+    if (!browserIsOnline()) return "当前设备已断网；可继续已下载或已预生成题组，实时 AI 生成需要联网。";
+    if (error && error.statusCode === 401) return "登录状态已失效，请重新登录后再读取 AI 配置。";
+    if (error && [502, 503, 504, 520, 521, 522, 523, 524].includes(error.statusCode)) return "网站或 AI 上游暂时不可用，请稍后手动重试。";
+    return String(error && error.message || "读取 AI 配置失败，请检查网络后重试。").slice(0, 180);
+  }
+
   async function loadAiOptions() {
-    aiStatusMessage = "";
+    if (aiOptionsLoading) return;
+    aiOptionsLoading = true;
+    aiStatusMessage = "正在读取 AI 配置…";
+    if (activeView === "ai") renderAiView();
     if (!API_ENABLED) {
       aiOptions = { configured: false, models: [], providers: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
+      aiOptionsError = "本机静态模式没有服务端 AI；请联网登录网站或使用已下载的离线内容。";
       aiOptionsLoaded = true;
+      aiOptionsLoading = false;
       renderAiView();
       return;
     }
+    const previousOptions = aiOptions;
     try {
       const response = await fetch("/api/ai/options", { credentials: "same-origin", cache: "no-store" });
-      if (!response.ok) throw new Error("AI options request failed");
-      aiOptions = await response.json();
+      aiOptions = await responseJson(response);
       aiOptions.providers = (Array.isArray(aiOptions.providers) ? aiOptions.providers : []).map(provider => ({
         id: String(provider && provider.id || ""),
         name: String(provider && provider.name || "AI 供应商"),
@@ -1897,16 +2272,50 @@
       if (AI_EFFORTS.includes(aiOptions.selectedTutorEffort) && !practice.updatedAt) practice.tutorSettings.reasoningEffort = aiOptions.selectedTutorEffort;
       if ([5, 10].includes(Number(aiOptions.selectedCount)) && !practice.updatedAt) practice.settings.count = Number(aiOptions.selectedCount);
       model.aiPractice = practice;
-    } catch (_) {
-      aiOptions = { configured: false, models: [], providers: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: Boolean(currentUser && currentUser.role === "admin") };
+      aiOptionsError = aiOptions.configured
+        ? ""
+        : (currentUser && currentUser.role === "admin" ? "AI 尚未配置，请先在 AI 设置中保存可用供应商。" : "AI 尚未配置，请联系管理员完成 AI 设置。");
+      aiStatusMessage = aiOptionsError;
+    } catch (error) {
+      aiOptionsError = aiOptionsFailureMessage(error);
+      aiStatusMessage = aiOptionsError;
+      aiOptions = previousOptions && previousOptions.configured
+        ? previousOptions
+        : { configured: false, models: [], providers: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: Boolean(currentUser && currentUser.role === "admin") };
     }
     aiOptionsLoaded = true;
+    aiOptionsLoading = false;
     populateAiModelSelect();
     renderAiView();
     renderExamView();
     if (activeView === "home") renderHome();
     preparePreviewPracticeSentences();
     void prefetchReviewVariantPool();
+  }
+
+  async function retryAiConnection() {
+    if (aiOptionsLoading || offlineReplayInProgress) return;
+    if (offlineSession) {
+      aiStatusMessage = browserIsOnline() ? "正在同步离线学习记录…" : "当前设备已断网；实时 AI 生成需要联网。";
+      renderAiView();
+      if (browserIsOnline()) await replayOfflineOutbox();
+      return;
+    }
+    aiStatusMessage = browserIsOnline() ? "正在重新检查 AI 配置和题组状态…" : "当前设备已断网；实时 AI 生成需要联网。";
+    renderAiView();
+    if (!browserIsOnline()) return;
+    await loadAiOptions();
+    if (!aiOptions.configured) return;
+    try {
+      const data = await responseJson(await fetch("/api/ai/questions/batch", { credentials: "same-origin", cache: "no-store" }));
+      applyAiPracticeResponse(data);
+      aiOptionsError = "";
+      aiStatusMessage = "AI 连接和题组状态已更新。";
+    } catch (error) {
+      aiOptionsError = aiOptionsFailureMessage(error);
+      aiStatusMessage = aiOptionsError;
+    }
+    renderAiView();
   }
 
   async function loadAiExams() {
@@ -2572,21 +2981,26 @@
     const previousAnswerUi = answerInput ? { key: String(answerInput.dataset.aiQuestionKey || ""), value: answerInput.value } : null;
     model.aiPractice = normalizeClientAiPractice(model.aiPractice);
     const practice = model.aiPractice;
-    const queuedCount = aiQueueGroupCount(practice);
+    const queuedCount = Math.max(aiQueueGroupCount(practice), offlineSession ? practice.queuedSets.length : 0);
     populateAiModelSelect();
     renderAiHistory();
     renderAiQueue(practice);
     $("#openAiConfigButton").hidden = !currentUser || currentUser.role !== "admin";
-    $("#aiStatus").textContent = aiStatusMessage || (aiOptions.configured ? (queuedCount ? `后续 ${queuedCount} 组已经准备好` : "AI 已配置") : "AI 尚未配置");
+    const connectivityMessage = offlineSession || !browserIsOnline() ? "当前设备处于离线学习模式；可使用已下载或已预生成内容，实时 AI 生成需要联网。" : "";
+    const baseStatusMessage = aiStatusMessage || aiOptionsError || (aiOptions.configured ? (queuedCount ? `后续 ${queuedCount} 组已经准备好` : "AI 已配置") : "AI 尚未配置");
+    $("#aiStatus").textContent = connectivityMessage ? `${connectivityMessage}${aiStatusMessage ? ` ${aiStatusMessage}` : ""}` : baseStatusMessage;
     const empty = $("#aiEmptyState");
     const panel = $("#aiPracticePanel");
     const complete = $("#aiPracticeComplete");
     const set = practice.currentSet;
     renderBatchReviewPanel("ai", set);
     renderBatchResultsPanel("ai", set);
-    if (!aiOptions.configured) {
+    const offlineReady = offlineSession && Boolean(set || queuedCount);
+    if (!aiOptions.configured && !offlineReady) {
       empty.hidden = false; panel.hidden = true; complete.hidden = true;
-      $("#aiEmptyTitle").textContent = currentUser && currentUser.role === "admin" ? "请先完成 AI 连接设置" : "AI 尚未配置";
+      $("#aiEmptyTitle").textContent = offlineSession || !browserIsOnline()
+        ? "断网时不能实时生成；请使用出门前准备的题组"
+        : currentUser && currentUser.role === "admin" ? "请先完成 AI 连接设置" : "AI 尚未配置";
       renderAiTutorWindow();
       return;
     }
@@ -2600,10 +3014,19 @@
     if (["review", "grading", "completed"].includes(set.phase)) {
       empty.hidden = true; panel.hidden = true; complete.hidden = true;
       renderAiTutorWindow();
+      const canStartOfflineNext = offlineSession && set.phase === "grading" && set.offlineGradePending && queuedCount > 0;
+      const pendingStart = $("#startNextOfflineAiBatch");
+      if (pendingStart) {
+        pendingStart.hidden = !canStartOfflineNext;
+        pendingStart.disabled = aiRequestInProgress || !practice.queuedSets.length;
+        pendingStart.innerHTML = `开始下一组（等待 ${queuedCount} 组）<i data-lucide="arrow-right" aria-hidden="true"></i>`;
+      }
       const startNext = $("#startNextAiBatch");
       if (startNext) {
         startNext.hidden = set.phase !== "completed" || queuedCount === 0;
-        startNext.disabled = aiRequestInProgress || !practice.generationQueue.length || practice.generationQueue[0].status !== "ready";
+        startNext.disabled = aiRequestInProgress || (offlineSession
+          ? !practice.queuedSets.length
+          : !practice.generationQueue.length || practice.generationQueue[0].status !== "ready");
         startNext.innerHTML = practice.generationQueue[0] && practice.generationQueue[0].status === "failed"
           ? '请先原位重试队首题组<i data-lucide="refresh-cw" aria-hidden="true"></i>'
           : practice.generationQueue[0] && practice.generationQueue[0].status === "pending"
@@ -2736,7 +3159,23 @@
     return model.aiPractice;
   }
 
+  async function offlineAiRequest(path, body = {}) {
+    if (!offlineSession || !offlineStore || !offlinePack || typeof OFFLINE_AI.operateAiPractice !== "function") throw new Error("当前账号的离线 AI 题组不可用，请联网重新准备");
+    const result = OFFLINE_AI.operateAiPractice(offlinePack, path, body, { crypto: window.crypto });
+    await offlineStore.enqueue(result.operation, currentUser.id);
+    offlinePack = await offlineStore.savePack(result.pack, currentUser.id);
+    model.aiPractice = normalizeClientAiPractice({
+      ...result.practice,
+      queuedSets: result.practice.preparedSets || []
+    });
+    offlineOutboxCount = (await offlineStore.listOutbox(currentUser.id)).length;
+    saveModel();
+    renderOfflinePackStatus();
+    return result;
+  }
+
   async function aiBatchRequest(path, { method = "POST", body } = {}) {
+    if (offlineSession) return offlineAiRequest(path, body || {});
     const accountContext = captureAccountRequestContext();
     const response = await fetch(`/api/ai/questions/batch${path}`, {
       method,
@@ -2785,6 +3224,13 @@
 
   async function loadPreview() {
     if (previewState.loading) return;
+    if (offlineSession && offlinePack) {
+      const preview = offlinePack.preview || {};
+      previewState = normalizePreviewResponse({ updatedAt: preview.updatedAt || offlinePack.generatedAt, preview: preview.document || null, previews: preview.document ? [preview.document] : [] });
+      selectedPreviewName = previewState.preview?.name || "";
+      renderPreview();
+      return;
+    }
     if (!API_ENABLED) {
       previewState = { loaded: true, loading: false, updatedAt: "", preview: null, previews: [], error: "每日预习需要登录网站后读取。" };
       renderPreview();
@@ -2840,6 +3286,16 @@
 
   async function loadPreviewWords() {
     if (previewWordsState.loading) return;
+    if (offlineSession && offlinePack) {
+      const preview = offlinePack.preview || {};
+      previewWordsState = normalizePreviewWordsResponse({ currentDay: preview.currentDay, nextDay: preview.nextDay, updatedAt: preview.updatedAt || offlinePack.generatedAt, words: preview.words || [] });
+      ensurePreviewPracticeState();
+      installOfflinePreviewSentences(offlinePack);
+      renderPreviewWords();
+      renderPreviewPractice();
+      renderStudyTimer();
+      return;
+    }
     if (!API_ENABLED) {
       previewWordsState = { ...previewWordsState, loaded: true, loading: false, words: [], error: "预习单词需要登录网站后读取。" };
       renderPreviewWords();
@@ -2985,7 +3441,7 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ wordIds: missingWords.map(word => word.id), model: settings.model, reasoningEffort: settings.reasoningEffort })
         }));
-        if (data.source !== "ai") throw Object.assign(new Error("AI 未返回可固定的预习句子"), { statusCode: 503 });
+        if (!["ai", "self-study", "mixed"].includes(data.source)) throw Object.assign(new Error("服务端未返回可固定的预习句子"), { statusCode: 503 });
         const returned = Array.isArray(data.sentences) ? data.sentences : [];
         const byWord = new Map(returned.map(item => [String(item.wordId || ""), item]));
         const nextSentences = missingWords.map(word => {
@@ -3004,7 +3460,10 @@
             english: String(sentence.english).trim(),
             chinese,
             acceptedEnglish: Array.from(new Set([String(sentence.english).trim(), ...(Array.isArray(sentence.acceptedEnglish) ? sentence.acceptedEnglish : [])].map(value => String(value || "").trim()).filter(Boolean))).slice(0, 8),
-            acceptedChinese: clientPreviewAcceptedChinese(sentence.english, chinese, [sourceChinese, ...(Array.isArray(sentence.acceptedChinese) ? sentence.acceptedChinese : [])])
+            acceptedChinese: clientPreviewAcceptedChinese(sentence.english, chinese, [sourceChinese, ...(Array.isArray(sentence.acceptedChinese) ? sentence.acceptedChinese : [])]),
+            source: String(sentence.source || data.source || ""),
+            sourceContentId: String(sentence.sourceContentId || ""),
+            formalEvidence: false
           };
         });
         const targetState = ensurePreviewPracticeState();
@@ -3314,7 +3773,7 @@
     previewPracticeGradingInProgress = true;
     renderPreviewPractice();
     try {
-      const grading = API_ENABLED ? await requestPreviewPracticeGrade(task, answer) : previewPracticeGrade(task, answer);
+      const grading = API_ENABLED && !offlineSession && browserIsOnline() ? await requestPreviewPracticeGrade(task, answer) : { ...previewPracticeGrade(task, answer), source: "local" };
       state.results[task.id] = { ...grading, answeredAt: new Date().toISOString() };
       delete state.pending[task.id];
       state.updatedAt = new Date().toISOString();
@@ -3376,7 +3835,20 @@
   }
 
   async function generateAiQuestions(retryRequestId = "", retrySettings = null) {
-    if (aiGenerationInProgress || !aiOptions.configured) return;
+    if (aiGenerationInProgress) return;
+    if (offlineSession || !browserIsOnline()) {
+      aiStatusMessage = "当前设备已断网；实时 AI 生成需要联网，请使用出门前预生成的题组。";
+      renderAiView();
+      showToast(aiStatusMessage);
+      return;
+    }
+    if (!aiOptionsLoaded) await loadAiOptions();
+    if (!aiOptions.configured) {
+      aiStatusMessage = aiOptionsError || (currentUser && currentUser.role === "admin" ? "AI 尚未配置，请先打开 AI 设置。" : "AI 尚未配置，请联系管理员。");
+      renderAiView();
+      showToast(aiStatusMessage);
+      return;
+    }
     const accountContext = captureAccountRequestContext();
     const button = $("#generateAiQuestions");
     const settings = retrySettings || {
@@ -3401,6 +3873,7 @@
       const data = await responseJson(response);
       if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
       applyAiPracticeResponse(data);
+      aiOptionsError = "";
       aiStatusMessage = data.pending
         ? "同一生成请求仍在后台处理中，当前题组可以继续作答"
         : data.started
@@ -3424,16 +3897,28 @@
     if (aiRequestInProgress) return;
     const accountContext = captureAccountRequestContext();
     const practice = normalizeClientAiPractice(model.aiPractice);
-    if (!practice.generationQueue.length) return generateAiQuestions();
-    const button = $("#startNextAiBatch") || $("#generateAnotherAiSet");
+    if (!practice.generationQueue.length && !(offlineSession && practice.queuedSets.length)) return generateAiQuestions();
+    const button = offlineSession ? $("#startNextOfflineAiBatch") : ($("#startNextAiBatch") || $("#generateAnotherAiSet"));
     aiRequestInProgress = true;
     setBusyButton(button, true, "正在进入…");
     try {
+      if (offlineSession) {
+        const nextSet = practice.queuedSets[0];
+        if (!nextSet) throw new Error("没有已下载的下一组题目；实时生成需要联网");
+        const nextRequestId = `ainext-${nextSet.id}`;
+        const data = await offlineAiRequest("/next", { setId: nextSet.id, nextRequestId });
+        aiTutorTarget = null;
+        aiStatusMessage = "已进入离线题组；当前答案只保存在本机，联网后按顺序统一批改。";
+        if (data && data.practice) model.aiPractice = normalizeClientAiPractice({ ...data.practice, queuedSets: data.practice.preparedSets || [] });
+        return;
+      }
+      const nextSetId = practice.generationQueue[0] && practice.generationQueue[0].groups && practice.generationQueue[0].groups[0] && practice.generationQueue[0].groups[0].id;
+      if (!nextSetId) throw new Error("队首题组快照暂不可用，请刷新后重试");
       const response = await fetch("/api/ai/questions/next", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: "{}"
+        body: JSON.stringify({ setId: nextSetId, nextRequestId: `ainext-${nextSetId}` })
       });
       const data = await responseJson(response);
       if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
@@ -3522,9 +4007,13 @@
     renderAiView();
     try {
       await aiBatchRequest("/grade", { body: { setId: set.id, gradeRequestId: set.gradeRequestId } });
-      invalidateReviewVariantStats();
-      invalidateAbilities();
-      await loadAbilities(true);
+      if (offlineSession) {
+        aiStatusMessage = "整组答案已保存在本机，待联网后由服务器统一批改；目前没有写入得分、错题或能力证据。";
+      } else {
+        invalidateReviewVariantStats();
+        invalidateAbilities();
+        await loadAbilities(true);
+      }
     } catch (error) { showRequestError(error); }
     finally { if (accountRequestContextIsCurrent(accountContext)) { aiRequestInProgress = false; renderAiView(); } }
   }
@@ -4891,7 +5380,7 @@
     const today = localDate();
     const existing = model.sessions[today];
     if (!existing || existing.mode !== reviewMode) {
-      const next = { date: today, mode: reviewMode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchId: "", batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
+      const next = { date: today, mode: reviewMode, taskIds: [], index: 0, doneTaskIds: Array.from(new Set(existing?.doneTaskIds || [])), currentTaskId: null, batchId: "", batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
       model.sessions[today] = next;
       saveModel();
       return next;
@@ -4926,7 +5415,7 @@
       return reviewTaskIsEligible(task, studyDate) && reviewTaskMatchesMode(task, session.mode);
     };
     const taskIds = originalTaskIds.filter(eligible);
-    const doneTaskIds = (Array.isArray(session.doneTaskIds) ? session.doneTaskIds : []).filter(eligible);
+    const doneTaskIds = Array.from(new Set(Array.isArray(session.doneTaskIds) ? session.doneTaskIds : []));
     const validTaskIds = new Set(taskIds);
     const variants = Object.fromEntries(Object.entries(session.variants && typeof session.variants === "object" ? session.variants : {}).filter(([taskId]) => validTaskIds.has(taskId)));
     const removedTasks = taskIds.length !== originalTaskIds.length;
@@ -5007,8 +5496,10 @@
   function buildGuidedReviewBatch(limit = DAILY_TARGET) {
     const session = getSession();
     const completedToday = new Set(session.doneTaskIds || []);
-    let candidates = guidedReviewCandidates("all", completedToday);
-    if (!candidates.length) candidates = guidedReviewCandidates("all", new Set());
+    const candidates = guidedReviewCandidates("all", completedToday);
+    if (REVIEW_SESSION.selectGuidedTaskIds) {
+      return REVIEW_SESSION.selectGuidedTaskIds(candidates.map(task => ({ taskId: task.taskId, type: task.item.type })), session.doneTaskIds, limit);
+    }
     const pools = {
       word: candidates.filter(task => task.item.type === "word"),
       sentence: candidates.filter(task => task.item.type === "sentence")
@@ -5030,13 +5521,14 @@
     reviewAnswerResetRequested = true;
     reviewMode = mode;
     const today = localDate();
+    const previousDoneTaskIds = Array.from(new Set(model.sessions[today]?.doneTaskIds || []));
     const normalizedTaskIds = Array.from(new Set(taskIds)).filter(taskId => reviewTaskIsEligible(taskById.get(taskId)));
     model.sessions[today] = {
       date: today,
       mode,
       taskIds: normalizedTaskIds,
       index: 0,
-      doneTaskIds: [],
+      doneTaskIds: previousDoneTaskIds,
       currentTaskId: normalizedTaskIds[0] || null,
       batchId: newReviewBatchId(),
       batchComplete: normalizedTaskIds.length === 0,
@@ -5242,6 +5734,11 @@
       return;
     }
     if (reviewVariantPreparation && reviewVariantPreparation.key === key) return reviewVariantPreparation.promise;
+    if (offlineSession) {
+      cancelReviewVariantRetry(key);
+      reviewVariantStatusMessage = "正式复习句子快照将在恢复联网后准备。";
+      return;
+    }
     if (!API_ENABLED || !aiOptionsLoaded) {
       return;
     }
@@ -5330,7 +5827,7 @@
     }
     if (changed) saveModel();
     const sessionTasks = sentenceTasksMissingVariants(session);
-    if (sessionTasks.length) prepareReviewSentenceVariants(session);
+    if (sessionTasks.length && !offlineSession) prepareReviewSentenceVariants(session);
     return session;
   }
 
@@ -5385,10 +5882,12 @@
       entryVisible: source.entryVisible === true,
       lessonCount: Math.max(0, Number(source.lessonCount) || 0),
       completedLessons: Math.max(0, Number(source.completedLessons) || 0),
+      pendingSyncLessons: Math.max(0, Number(source.pendingSyncLessons) || 0),
       current,
       availableLesson: source.availableLesson && typeof source.availableLesson === "object" ? source.availableLesson : null,
       waitingUntil: String(source.waitingUntil || ""),
-      updatedAt: String(source.updatedAt || "")
+      updatedAt: String(source.updatedAt || ""),
+      offline: source.offline === true
     };
   }
 
@@ -5423,6 +5922,25 @@
   }
 
   async function selfStudyRequest(path, options = {}) {
+    if (offlineSession) {
+      if (!offlineStore || !offlinePack || typeof OFFLINE_LEARNING.operateSelfStudy !== "function") throw new Error("当前离线课程包不可用，请联网重新准备");
+      const result = await OFFLINE_LEARNING.operateSelfStudy(offlinePack, path, options.body || {}, { crypto: window.crypto });
+      await offlineStore.enqueue(result.operation, currentUser.id);
+      offlinePack = await offlineStore.savePack(result.pack, currentUser.id);
+      offlineOutboxCount = (await offlineStore.listOutbox(currentUser.id)).length;
+      setSelfStudyFromResponse({ selfStudy: result.selfStudy });
+      selfStudyStatusMessage = result.courseReadyToSync
+        ? "这一天六个阶段已在本机完成，等待联网后由服务器原子转为正式已学。"
+        : result.pendingOnline
+          ? "当前内容已保存在本机，等待联网判定或回答；目前不计正式错误和能力证据。"
+          : "当前离线进度已保存；联网后会按原顺序幂等同步。";
+      if (options.render !== false) {
+        renderSelfStudyModeCard();
+        renderSelfStudyView();
+      }
+      renderOfflinePackStatus();
+      return result;
+    }
     const response = await fetch(`/api/self-study${path}`, {
       method: options.method || "POST",
       credentials: "same-origin",
@@ -5447,6 +5965,15 @@
   }
 
   async function loadSelfStudy(force = false) {
+    if (offlineSession) {
+      if (offlinePack && typeof OFFLINE_LEARNING.publicSelfStudyState === "function") setSelfStudyFromResponse(OFFLINE_LEARNING.publicSelfStudyState(offlinePack.selfStudy));
+      selfStudyStatusMessage = offlineOutboxCount
+        ? `离线学习中；已有 ${offlineOutboxCount} 项操作等待联网同步。`
+        : "正在使用当前账号主动准备的离线课程包。";
+      renderSelfStudyModeCard();
+      renderSelfStudyView();
+      return;
+    }
     if (!API_ENABLED || !currentUser || selfStudyLoading || (selfStudyLoaded && !force)) {
       renderSelfStudyModeCard();
       renderSelfStudyView();
@@ -5476,7 +6003,9 @@
     const current = selfStudyState.current;
     const available = selfStudyState.availableLesson;
     const status = $("#selfStudyModeStatus");
-    if (current) {
+    if (selfStudyState.pendingSyncLessons) {
+      status.textContent = `${selfStudyState.pendingSyncLessons} 天课程已在本机完成，等待联网后转为正式已学；其余 planned 内容仍不进入正式复习。`;
+    } else if (current) {
       const stage = current.stage ? current.stage.title : "准备完成";
       status.textContent = `${current.title} · ${stage} · 已完成 ${selfStudyState.completedLessons} 天`;
     } else if (available) {
@@ -5489,6 +6018,7 @@
     const toggle = $("#selfStudyModeToggle");
     toggle.textContent = selfStudyState.enabled ? "关闭出门自学" : "开启出门自学";
     $("#openSelfStudyButton").hidden = !selfStudyState.enabled;
+    renderOfflinePackStatus();
     refreshIcons();
   }
 
@@ -5568,6 +6098,7 @@
       if (!selfStudyState.enabled && selfStudyState.hasLessons) $("#selfStudyEmptyText").textContent = "请先在首页手动开启“出门自学”，正常复习和预习页面不会受影响。";
       else if (selfStudyState.availableLesson) $("#selfStudyEmptyText").textContent = `${selfStudyState.availableLesson.title} 已准备好；完成当天六阶段后才会解锁下一天。`;
       else if (selfStudyState.waitingUntil) $("#selfStudyEmptyText").textContent = `下一课尚未到启用时间：${new Date(selfStudyState.waitingUntil).toLocaleString("zh-CN")}。`;
+      else if (selfStudyState.pendingSyncLessons) $("#selfStudyEmptyText").textContent = `${selfStudyState.pendingSyncLessons} 天课程已离线完成，联网同步成功前不会转为正式已学，也不会生成正式错题或能力证据。`;
       else $("#selfStudyEmptyText").textContent = "当前没有待学课程；已完成记录会保留在同步档案中。";
       $("#nextSelfStudyLessonButton").hidden = !selfStudyState.enabled || !selfStudyState.availableLesson;
       if (selfStudyLastPromotion) $("#selfStudyCompleteText").textContent = `新内容已原子转为正式已学，首次复习安排在 ${selfStudyLastPromotion.firstReviewDue || "下一学习日"}。`;
@@ -5620,7 +6151,8 @@
     selfStudyRequestInProgress = true;
     selfStudyLastPromotion = null;
     try {
-      await selfStudyRequest("/start", { body: {} });
+      const lessonId = selfStudyState.availableLesson && selfStudyState.availableLesson.lessonId || "";
+      await selfStudyRequest("/start", { body: { lessonId, startId: `start-${lessonId || cryptoRandomId()}` } });
       setView("self-study");
     } catch (error) { showToast(error.message); }
     finally { selfStudyRequestInProgress = false; renderSelfStudyView(); }
@@ -5787,7 +6319,7 @@
     reviewAnswerResetRequested = true;
     reviewMode = mode;
     const today = localDate();
-    model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: [], currentTaskId: null, batchId: "", batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
+    model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: Array.from(new Set(model.sessions[today]?.doneTaskIds || [])), currentTaskId: null, batchId: "", batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
     saveModel();
     $$("[data-mode]").forEach(button => {
       const active = button.dataset.mode === mode;
@@ -5981,13 +6513,16 @@
       <span class="batch-question-number">${index + 1}</span>
       <div><p class="batch-question-prompt">${escapeHtml(question.prompt || "")}</p><p class="batch-user-answer"><span>你的答案</span>${escapeHtml(question.answer || question.userAnswer || "（未填写）")}</p></div>
     </li>`).join("");
+    const offlinePending = prefix === "ai" && offlineSession && batch.offlineGradePending === true;
     const grading = batch.phase === "grading";
     const gradeButton = $(`#grade${prefix[0].toUpperCase()}${prefix.slice(1)}Batch`);
     const editButton = $(`#edit${prefix[0].toUpperCase()}${prefix.slice(1)}Batch`);
     if (gradeButton) gradeButton.disabled = grading;
     if (editButton) editButton.disabled = grading;
     const status = $(`#${prefix}BatchGradeStatus`);
-    if (status) status.textContent = grading ? "正在统一批改整组答案，请勿重复提交…" : (batch.lastError || "");
+    if (status) status.textContent = offlinePending
+      ? "整组答案已保存在本机，待联网后统一批改；目前不产生正式得分或错误证据。"
+      : grading ? "正在统一批改整组答案，请勿重复提交…" : (batch.lastError || "");
   }
 
   function renderBatchResultsPanel(prefix, batch) {
@@ -6088,6 +6623,24 @@
     }
     panel.hidden = false; complete.hidden = true;
     if (API_ENABLED && currentUser && !batchMatchesSession) {
+      if (offlineSession) {
+        reviewVariantRetryUi(session, false);
+        $("#promptType").textContent = "正式复习待联网";
+        $("#promptDay").textContent = "离线模式";
+        $("#questionCount").textContent = `1 / ${session.taskIds.length}`;
+        $("#directionLabel").textContent = "当前离线包未写入正式复习证据";
+        $("#promptText").textContent = "请先使用出门自学、每日预习、预习练习或已下载的 AI 题组。";
+        $("#promptSpeech").innerHTML = "";
+        $("#phoneticLine").textContent = "恢复联网后再创建正式复习批次，避免断网期间产生半组证据。";
+        $("#exampleLine").textContent = "";
+        answerInput.value = "";
+        answerInput.disabled = true;
+        submitButton.disabled = true;
+        $("#previousReviewQuestion").disabled = true;
+        feedback.hidden = true;
+        feedbackActions.hidden = true;
+        return;
+      }
       const canStartServerBatch = reviewSessionCanStartBatch(session);
       const missingSentenceCount = sentenceTasksMissingVariants(session).length;
       reviewVariantRetryUi(session, Boolean(baseTask.item.type === "sentence" && !session.variants[baseTask.taskId]));
@@ -6389,7 +6942,7 @@
     const today = localDate();
     reviewAnswerResetRequested = true;
     reviewMode = task.item.type;
-    model.sessions[today] = { date: today, mode: reviewMode, taskIds: [taskId], index: 0, doneTaskIds: [], currentTaskId: taskId, batchId: newReviewBatchId(), batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
+    model.sessions[today] = { date: today, mode: reviewMode, taskIds: [taskId], index: 0, doneTaskIds: Array.from(new Set(model.sessions[today]?.doneTaskIds || [])), currentTaskId: taskId, batchId: newReviewBatchId(), batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
     saveModel();
     $$("[data-mode]").forEach(button => { const active = button.dataset.mode === reviewMode; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
     setView("home");
@@ -6404,7 +6957,7 @@
     const today = localDate();
     reviewAnswerResetRequested = true;
     reviewMode = "all";
-    model.sessions[today] = { date: today, mode: reviewMode, taskIds, index: 0, doneTaskIds: [], currentTaskId: taskIds[0], batchId: newReviewBatchId(), batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
+    model.sessions[today] = { date: today, mode: reviewMode, taskIds, index: 0, doneTaskIds: Array.from(new Set(model.sessions[today]?.doneTaskIds || [])), currentTaskId: taskIds[0], batchId: newReviewBatchId(), batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
     saveModel();
     $$("[data-mode]").forEach(button => { const active = button.dataset.mode === reviewMode; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
     setView("home");
@@ -6782,6 +7335,8 @@
     document.addEventListener("visibilitychange", handleStudyVisibility);
     window.addEventListener("pagehide", () => stopStudyClock("页面关闭", true));
     $$("[data-view]").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
+    $("#prepareOfflinePack").addEventListener("click", prepareOfflinePack);
+    $("#deleteOfflinePack").addEventListener("click", deleteOfflinePack);
     $("#selfStudyModeToggle").addEventListener("click", () => setSelfStudyMode(!selfStudyState.enabled));
     $("#disableSelfStudyButton").addEventListener("click", () => setSelfStudyMode(false));
     $("#openSelfStudyButton").addEventListener("click", () => setView("self-study"));
@@ -6915,6 +7470,7 @@
     $("#generateAiQuestions").addEventListener("click", () => generateAiQuestions());
     $("#generateAnotherAiSet").addEventListener("click", continuePreparedAiSet);
     $("#startNextAiBatch").addEventListener("click", continuePreparedAiSet);
+    $("#startNextOfflineAiBatch").addEventListener("click", continuePreparedAiSet);
     $("#aiQueueList").addEventListener("click", event => {
       const retry = event.target.closest("[data-retry-ai-generation]");
       if (retry) void retryQueuedAiGeneration(retry.dataset.retryAiGeneration);
@@ -7065,6 +7621,7 @@
       if (button) removeConfigAiModel(button.dataset.model);
     });
     $("#testAiConfigButton").addEventListener("click", testAiConfiguration);
+    $("#retryAiConnection").addEventListener("click", retryAiConnection);
     $("#answerForm").addEventListener("submit", submitAnswer);
     $("#previousReviewQuestion").addEventListener("click", () => moveReviewBatchQuestion(-1));
     $("#editReviewBatch").addEventListener("click", editReviewBatch);
@@ -7087,10 +7644,21 @@
     $("#resetButton").addEventListener("click", () => $("#resetDialog").showModal());
     $("#openResetButton").addEventListener("click", () => $("#resetDialog").showModal());
     $("#confirmReset").addEventListener("click", event => { event.preventDefault(); $("#resetDialog").close(); resetModel(); });
+    window.addEventListener("offline", () => {
+      aiStatusMessage = "当前设备已断网；可使用已下载或已预生成内容，实时 AI 生成需要联网。";
+      if (activeView === "ai") renderAiView();
+      void enterPreparedOfflineSession();
+    });
+    window.addEventListener("online", () => {
+      aiStatusMessage = "网络已恢复，正在重新检查 AI 连接…";
+      if (activeView === "ai") renderAiView();
+      if (offlineSession) void replayOfflineOutbox();
+      else void retryAiConnection();
+    });
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=60", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=61", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
@@ -7101,13 +7669,29 @@
     const authenticated = await fetchCurrentUser();
     if (!authenticated) { showAuthView(); refreshIcons(); return; }
     model = loadModel();
+    if (offlineSession && offlinePack) hydrateOfflinePack(offlinePack);
   }
   showAppView();
   bindAppEvents();
   renderHome();
+  refreshIcons();
+  if (offlineSession) {
+    await loadPreviewWords();
+    await loadSelfStudy();
+    renderPreview();
+    renderPreviewPractice();
+    renderAiView();
+    refreshIcons();
+    return;
+  }
+  if (API_ENABLED && offlineOutboxCount) {
+    if (offlinePack) hydrateOfflinePack(offlinePack);
+    await replayOfflineOutbox();
+    refreshIcons();
+    return;
+  }
   loadPreviewWords();
   loadSelfStudy();
-  refreshIcons();
   await loadAiOptions();
   await loadAiExams();
   syncRemoteState();

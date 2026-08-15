@@ -43,7 +43,8 @@ test("AI practice can prepare independent groups and continue without another ge
   assert.match(app, /groupCount: Number\(\$\("#aiGroupCount"\)\.value\) \|\| 1/);
   assert.match(app, /body: JSON\.stringify\(\{ \.\.\.settings, requestId \}\)/);
   assert.match(app, /let aiGenerationInProgress = false/);
-  assert.match(app, /if \(aiGenerationInProgress \|\| !aiOptions\.configured\) return/);
+  assert.match(app, /if \(aiGenerationInProgress\) return/);
+  assert.match(app, /if \(!aiOptions\.configured\) \{[\s\S]*AI 尚未配置/);
   assert.match(app, /answerInput\.disabled = aiRequestInProgress/);
   assert.match(app, /previousAnswerUi && previousAnswerUi\.key === questionKey/);
   assert.match(app, /answerInput\.value = preserveAnswerUi \? previousAnswerUi\.value : question\.userAnswer \|\| ""/);
@@ -210,14 +211,14 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=60/);
+  assert.match(html, /pronunciation-data\.js\?v=61/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /phonemeSoundButtonHtml\(item\)/);
   assert.match(app, /speechButtonHtml\(item\.example, `慢速播放完整示范词/);
   assert.match(app, /data-pronunciation-sound/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=60/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=61/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -357,7 +358,7 @@ test("preview practice keeps word and sentence exercises isolated from formal re
   assert.match(server, /\[\.\.\.learnedWords, \.\.\.previewWords\.flatMap/);
   assert.match(server, /targetTokens\.every\(token => tokens\.includes\(token\)\)/);
   assert.match(server, /expandPreviewAcceptedChinese\(contentValue, english/);
-  assert.match(server, /expandPreviewAcceptedChinese\(content, english, \[school\.chinese\], chinese, 16\)/);
+  assert.match(server, /expandPreviewAcceptedChinese\(previewContentForAccount\(previewData\), english/);
   assert.match(previewPractice, /repairRegisteredChineseResults/);
   assert.match(previewPractice, /不会计入正式错题、待复习、薄弱点或能力分/);
   assert.match(server, /url\.pathname === "\/api\/preview\/practice\/sentences"/);
@@ -532,7 +533,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 60", () => {
+test("PWA client assets consistently use the displayed cache version 61", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -543,8 +544,8 @@ test("PWA client assets consistently use the displayed cache version 60", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "60");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v60"/);
+  assert.equal(displayedVersion[1], "61");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v61"/);
 });
 
 test("complete self-study exposes one-step teaching, recovery, questions, and explicit continuation controls", () => {
@@ -565,6 +566,53 @@ test("complete self-study exposes one-step teaching, recovery, questions, and ex
   assert.match(app, /daily-english-self-study-/);
   assert.match(app, /"-draft", "-attempt", "-continue", "-question"/);
   assert.match(css, /@media \(max-width:\s*520px\)[\s\S]*\.self-study-stage-list/s);
+});
+
+test("AI generation reports connection failures and offers an explicit retry instead of silently returning", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  assert.match(html, /id="retryAiConnection"/);
+  assert.match(app, /function aiOptionsFailureMessage\(error\)/);
+  assert.match(app, /async function retryAiConnection\(\)/);
+  assert.match(app, /当前设备已断网；实时 AI 生成需要联网/);
+  assert.match(app, /AI 尚未配置，请先打开 AI 设置/);
+  assert.match(app, /\$\("#retryAiConnection"\)\.addEventListener\("click", retryAiConnection\)/);
+  assert.doesNotMatch(app, /if \(aiGenerationInProgress \|\| !aiOptions\.configured\) return;/);
+});
+
+test("offline travel mode is explicit, account-bound, FIFO replayed, and never caches private API responses", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  const css = read("styles.css");
+  const serviceWorker = read("sw.js");
+  const server = read("server.js");
+  assert.match(html, /id="prepareOfflinePack"/);
+  assert.match(html, /id="deleteOfflinePack"/);
+  assert.match(html, /id="offlinePackStatus"/);
+  assert.match(html, /id="startNextOfflineAiBatch"/);
+  assert.match(html, /offline-store\.js\?v=61/);
+  assert.match(html, /offline-learning\.js\?v=61/);
+  assert.match(html, /offline-ai\.js\?v=61/);
+  assert.match(html, /offline-replay\.js\?v=61/);
+  assert.match(app, /function enterPreparedOfflineSession\(\)/);
+  assert.match(app, /offlineStore\.activeAccountId\(\) !== accountId/);
+  assert.match(app, /async function replayOfflineOutbox\(\)/);
+  assert.match(app, /OFFLINE_REPLAY\.replayOutbox/);
+  assert.match(app, /当前账号离线包/);
+  assert.match(app, /offlineSession \|\| !browserIsOnline\(\)/);
+  assert.match(app, /startNextOfflineAiBatch/);
+  assert.match(app, /正式复习待联网/);
+  assert.match(app, /正式复习句子快照将在恢复联网后准备/);
+  assert.match(app, /\["auth_required", "account_mismatch"\]\.includes\(error\.code\)/);
+  assert.match(app, /offlineGradePending/);
+  assert.match(app, /目前没有写入得分、错题或能力证据/);
+  assert.match(server, /outbox: \{ mode: "client-fifo", formalEvidencePending: true \}/);
+  assert.doesNotMatch(`${app}\n${server}`, /\/api\/offline\/replay/);
+  assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)\) return/);
+  assert.doesNotMatch(serviceWorker, /\/api\/state/);
+  assert.match(serviceWorker, /offline-store\.js\?v=61/);
+  assert.match(serviceWorker, /offline-replay\.js\?v=61/);
+  assert.match(css, /@media \(max-width: 520px\)[\s\S]*\.self-study-mode-actions button:not\(\.offline-pack-delete\)/);
 });
 
 test("daily study plan offers six free-choice projects and records sixty minutes across web and learning-window work", () => {
@@ -597,6 +645,6 @@ test("daily study plan offers six free-choice projects and records sixty minutes
   assert.doesNotMatch(app, /String\(stage\.index \+ 1\)/);
   assert.doesNotMatch(app, /按顺序完成/);
   assert.doesNotMatch(html, /按顺序学习/);
-  assert.match(html, /study-time\.js\?v=60/);
-  assert.match(serviceWorker, /study-time\.js\?v=60/);
+  assert.match(html, /study-time\.js\?v=61/);
+  assert.match(serviceWorker, /study-time\.js\?v=61/);
 });
