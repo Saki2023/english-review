@@ -107,6 +107,10 @@
   let gradingInProgress = false;
   let reviewBatchRequestInProgress = false;
   let reviewBatchStartFailure = null;
+  let reviewRepeatResolutionInProgress = false;
+  let reviewRepeatResolutionError = null;
+  let reviewRepeatAutoAttemptKey = "";
+  let reviewCompletedConflictRecoveryKey = "";
   // renderHome() is also called by background sync/prefetch polling. Keep the
   // answer controls tied to the current task so those redraws cannot erase a
   // draft (or hide feedback) while the learner is working.
@@ -706,6 +710,10 @@
       currentTaskId: String(source.currentTaskId || "").slice(0, 180),
       batchId: String(source.batchId || "").slice(0, 180),
       batchComplete: Boolean(source.batchComplete),
+      allowRepeat: source.allowRepeat === true,
+      retiredBatchIds: REVIEW_SESSION.uniqueBatchIds
+        ? REVIEW_SESSION.uniqueBatchIds(source.retiredBatchIds)
+        : Array.from(new Set(Array.isArray(source.retiredBatchIds) ? source.retiredBatchIds.map(item => String(item || "").slice(0, 180)).filter(Boolean) : [])).slice(-200),
       updatedAt: String(source.updatedAt || "").slice(0, 40),
       variants
     };
@@ -1954,6 +1962,10 @@
     currentUser = user;
     reviewBatchRequestInProgress = false;
     reviewBatchStartFailure = null;
+    reviewRepeatResolutionInProgress = false;
+    reviewRepeatResolutionError = null;
+    reviewRepeatAutoAttemptKey = "";
+    reviewCompletedConflictRecoveryKey = "";
     aiRequestInProgress = false;
     aiGenerationInProgress = false;
     [$("#generateAiQuestions"), $("#startNextAiBatch"), $("#startNextOfflineAiBatch"), $("#generateAnotherAiSet")].filter(Boolean).forEach(button => setBusyButton(button, false, ""));
@@ -3113,6 +3125,44 @@
     return model.formalPractice.review.current;
   }
 
+  function projectReviewBatchToSession(batch) {
+    if (!batch || !Array.isArray(batch.questions)) return null;
+    const studyDate = String(batch.date || localDate()).slice(0, 20);
+    reviewMode = ["all", "word", "sentence"].includes(batch.mode) ? batch.mode : reviewMode;
+    const current = normalizeClientReviewSession(model.sessions[studyDate]);
+    const projected = REVIEW_SESSION.applyReviewBatchToSession
+      ? REVIEW_SESSION.applyReviewBatchToSession(current, batch)
+      : {
+        ...current,
+        date: studyDate,
+        mode: reviewMode,
+        taskIds: batch.questions.map(question => question.taskId),
+        index: batch.phase === "completed" ? batch.questions.length : Math.min(Math.max(Number(batch.index) || 0, 0), Math.max(0, batch.questions.length - 1)),
+        currentTaskId: batch.phase === "completed" ? null : (batch.questions[Number(batch.index) || 0]?.taskId || null),
+        batchId: batch.id,
+        batchComplete: batch.phase === "completed",
+        allowRepeat: batch.allowRepeat === true,
+        updatedAt: String(batch.updatedAt || current.updatedAt || new Date().toISOString())
+      };
+    model.sessions[studyDate] = normalizeClientReviewSession(projected);
+    return model.sessions[studyDate];
+  }
+
+  function applyRetiredReviewBatchResponse(data) {
+    const retiredBatchId = String(data && (data.archivedBatchId || data.retiredBatchId) || "").trim();
+    if (!retiredBatchId || typeof REVIEW_SESSION.retireReviewSession !== "function") return;
+    Object.entries(model.sessions || {}).forEach(([date, value]) => {
+      const session = normalizeClientReviewSession(value);
+      if (session.batchId !== retiredBatchId) return;
+      model.sessions[date] = normalizeClientReviewSession(REVIEW_SESSION.retireReviewSession(
+        session,
+        retiredBatchId,
+        session.doneTaskIds,
+        new Date().toISOString()
+      ));
+    });
+  }
+
   function applyReviewBatchResponse(data) {
     if (data && data.state && typeof data.state === "object") model = mergeModels(model, data.state);
     model.formalPractice = normalizeClientFormalPractice(model.formalPractice);
@@ -3123,15 +3173,9 @@
     const batch = currentFormalReviewBatch();
     if (batch) {
       if (reviewBatchStartFailure && reviewBatchStartFailure.accountId === String(currentUser && currentUser.id || "")) reviewBatchStartFailure = null;
-      const session = getSession();
-      session.batchId = batch.id;
-      session.mode = batch.mode;
-      session.taskIds = batch.questions.map(question => question.taskId);
-      session.index = Math.min(Math.max(Number(batch.index) || 0, 0), Math.max(0, session.taskIds.length - 1));
-      session.currentTaskId = session.taskIds[session.index] || null;
-      session.batchComplete = batch.phase === "completed";
-      touchReviewSession(session);
-    }
+      reviewCompletedConflictRecoveryKey = "";
+      projectReviewBatchToSession(batch);
+    } else applyRetiredReviewBatchResponse(data);
     saveModel();
     return batch;
   }
@@ -5384,14 +5428,28 @@
 
   function getSession() {
     const today = localDate();
-    const existing = model.sessions[today];
-    if (!existing || existing.mode !== reviewMode) {
-      const next = { date: today, mode: reviewMode, taskIds: [], index: 0, doneTaskIds: Array.from(new Set(existing?.doneTaskIds || [])), currentTaskId: null, batchId: "", batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
+    const stored = model.sessions[today];
+    const existing = normalizeClientReviewSession(stored);
+    if (!stored || existing.mode !== reviewMode) {
+      const next = {
+        date: today,
+        mode: reviewMode,
+        taskIds: [],
+        index: 0,
+        doneTaskIds: existing.doneTaskIds,
+        currentTaskId: null,
+        batchId: "",
+        batchComplete: false,
+        allowRepeat: false,
+        retiredBatchIds: existing.retiredBatchIds,
+        updatedAt: new Date().toISOString(),
+        variants: {}
+      };
       model.sessions[today] = next;
       saveModel();
       return next;
     }
-    existing.variants = existing.variants && typeof existing.variants === "object" ? existing.variants : {};
+    model.sessions[today] = existing;
     return existing;
   }
 
@@ -5412,7 +5470,12 @@
   }
 
   function pruneReviewSession(session) {
-    const before = JSON.stringify({ taskIds: session.taskIds, index: session.index, doneTaskIds: session.doneTaskIds, currentTaskId: session.currentTaskId, batchComplete: session.batchComplete, variants: session.variants });
+    const snapshot = () => JSON.stringify({ taskIds: session.taskIds, index: session.index, doneTaskIds: session.doneTaskIds, currentTaskId: session.currentTaskId, batchId: session.batchId, batchComplete: session.batchComplete, allowRepeat: session.allowRepeat, retiredBatchIds: session.retiredBatchIds, variants: session.variants });
+    const before = snapshot();
+    const retiredBatchIds = REVIEW_SESSION.uniqueBatchIds ? REVIEW_SESSION.uniqueBatchIds(session.retiredBatchIds) : Array.from(new Set(Array.isArray(session.retiredBatchIds) ? session.retiredBatchIds : [])).slice(-200);
+    if (session.batchId && retiredBatchIds.includes(session.batchId) && typeof REVIEW_SESSION.retireReviewSession === "function") {
+      Object.assign(session, REVIEW_SESSION.retireReviewSession(session, session.batchId, session.doneTaskIds, session.updatedAt));
+    }
     const originalTaskIds = Array.isArray(session.taskIds) ? session.taskIds : [];
     const originalIndex = Math.max(0, Math.min(Number(session.index) || 0, originalTaskIds.length));
     const studyDate = localDate();
@@ -5421,19 +5484,22 @@
       return reviewTaskIsEligible(task, studyDate) && reviewTaskMatchesMode(task, session.mode);
     };
     const taskIds = originalTaskIds.filter(eligible);
-    const doneTaskIds = Array.from(new Set(Array.isArray(session.doneTaskIds) ? session.doneTaskIds : []));
+    const doneTaskIds = REVIEW_SESSION.uniqueTaskIds ? REVIEW_SESSION.uniqueTaskIds(session.doneTaskIds) : Array.from(new Set(Array.isArray(session.doneTaskIds) ? session.doneTaskIds : []));
     const validTaskIds = new Set(taskIds);
     const variants = Object.fromEntries(Object.entries(session.variants && typeof session.variants === "object" ? session.variants : {}).filter(([taskId]) => validTaskIds.has(taskId)));
     const removedTasks = taskIds.length !== originalTaskIds.length;
-    const index = Math.min(originalTaskIds.slice(0, originalIndex).filter(eligible).length, taskIds.length);
+    const completedSnapshot = Boolean(session.batchComplete) && taskIds.length > 0 && taskIds.every(taskId => doneTaskIds.includes(taskId));
+    const index = completedSnapshot ? taskIds.length : Math.min(originalTaskIds.slice(0, originalIndex).filter(eligible).length, taskIds.length);
     session.taskIds = taskIds;
     session.index = index;
     session.doneTaskIds = doneTaskIds;
     session.currentTaskId = taskIds[index] || null;
     session.batchComplete = taskIds.length ? index >= taskIds.length : (removedTasks ? false : Boolean(session.batchComplete));
+    session.allowRepeat = session.allowRepeat === true;
+    session.retiredBatchIds = REVIEW_SESSION.uniqueBatchIds ? REVIEW_SESSION.uniqueBatchIds(session.retiredBatchIds) : retiredBatchIds;
     session.variants = variants;
-    if (before !== JSON.stringify({ taskIds: session.taskIds, index: session.index, doneTaskIds: session.doneTaskIds, currentTaskId: session.currentTaskId, batchComplete: session.batchComplete, variants: session.variants })) touchReviewSession(session);
-    return before !== JSON.stringify({ taskIds: session.taskIds, index: session.index, doneTaskIds: session.doneTaskIds, currentTaskId: session.currentTaskId, batchComplete: session.batchComplete, variants: session.variants });
+    if (before !== snapshot()) touchReviewSession(session);
+    return before !== snapshot();
   }
 
   function isDue(task) {
@@ -5523,11 +5589,12 @@
     return selected.map(task => task.taskId);
   }
 
-  function replaceReviewSession(taskIds, mode = "all") {
+  function replaceReviewSession(taskIds, mode = "all", { allowRepeat = false } = {}) {
     reviewAnswerResetRequested = true;
     reviewMode = mode;
     const today = localDate();
-    const previousDoneTaskIds = Array.from(new Set(model.sessions[today]?.doneTaskIds || []));
+    const previous = normalizeClientReviewSession(model.sessions[today]);
+    const previousDoneTaskIds = previous.doneTaskIds;
     const normalizedTaskIds = Array.from(new Set(taskIds)).filter(taskId => reviewTaskIsEligible(taskById.get(taskId)));
     model.sessions[today] = {
       date: today,
@@ -5536,8 +5603,10 @@
       index: 0,
       doneTaskIds: previousDoneTaskIds,
       currentTaskId: normalizedTaskIds[0] || null,
-      batchId: newReviewBatchId(),
+      batchId: normalizedTaskIds.length ? newReviewBatchId() : "",
       batchComplete: normalizedTaskIds.length === 0,
+      allowRepeat: allowRepeat === true,
+      retiredBatchIds: previous.retiredBatchIds,
       updatedAt: new Date().toISOString(),
       variants: {}
     };
@@ -5548,6 +5617,13 @@
     });
     saveModel();
     return model.sessions[today];
+  }
+
+  function startNextReviewGroup() {
+    const currentPlanStage = currentStudyPlan().currentStage;
+    const guidedStageActive = Boolean(currentPlanStage && ["review", "correction"].includes(currentPlanStage.id));
+    const taskIds = guidedStageActive ? buildGuidedReviewBatch(DAILY_TARGET) : buildBatch();
+    return replaceReviewSession(taskIds, guidedStageActive ? "all" : reviewMode);
   }
 
   function ensureGuidedReviewSession(limit = DAILY_TARGET) {
@@ -5857,7 +5933,7 @@
   }
 
   function reviewSessionCanStartBatch(session) {
-    return Boolean(session && session.taskIds.length && session.taskIds.every(taskId => {
+    return Boolean(session && !session.batchComplete && session.taskIds.length && session.taskIds.every(taskId => {
       const task = taskById.get(taskId);
       return task && (task.item.type !== "sentence" || normalizeClientReviewVariant(session.variants && session.variants[taskId]));
     }));
@@ -5886,6 +5962,7 @@
           date: session.date || localDate(),
           mode: session.mode,
           taskIds: session.taskIds,
+          allowRepeat: session.allowRepeat === true,
           variantIds: Object.fromEntries(Object.entries(session.variants || {}).map(([taskId, variant]) => [taskId, variant && variant.id || ""])),
           model: settings.model,
           reasoningEffort: settings.reasoningEffort
@@ -5896,6 +5973,23 @@
       if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
       applyReviewBatchResponse(result.data);
     } catch (error) {
+      if (accountRequestContextIsCurrent(accountContext) && error && error.data && error.data.code === "review_tasks_already_completed") {
+        applyReviewBatchResponse(error.data);
+        const recoveryKey = `${accountContext.userId}:${String(session.date || localDate())}`;
+        const recoveredSession = startNextReviewGroup();
+        if (reviewCompletedConflictRecoveryKey === recoveryKey) {
+          reviewBatchStartFailure = {
+            accountId: accountContext.userId,
+            batchId: String(recoveredSession.batchId || ""),
+            code: "review-completed-conflict-repeated",
+            message: "服务器连续拒绝了重复题组。新题已经重新筛选，请手动重试；系统不会连续请求。"
+          };
+        } else {
+          reviewCompletedConflictRecoveryKey = recoveryKey;
+          reviewBatchStartFailure = null;
+        }
+        return currentFormalReviewBatch();
+      }
       if (accountRequestContextIsCurrent(accountContext) && !error.silent) {
         reviewBatchStartFailure = {
           accountId: accountContext.userId,
@@ -5920,6 +6014,94 @@
     reviewBatchStartFailure = null;
     void ensureServerReviewBatch(session, { manual: true });
     renderHome();
+  }
+
+  function repeatedReviewBatchState(batch, session) {
+    if (!batch || !session || typeof REVIEW_SESSION.classifyRepeatedReviewBatch !== "function") return null;
+    return REVIEW_SESSION.classifyRepeatedReviewBatch(batch, session.doneTaskIds);
+  }
+
+  function reviewRepeatResolutionErrorFor(batch) {
+    if (!batch || !reviewRepeatResolutionError) return null;
+    if (reviewRepeatResolutionError.accountId !== String(currentUser && currentUser.id || "")) return null;
+    return reviewRepeatResolutionError.batchId === String(batch.id || "") ? reviewRepeatResolutionError : null;
+  }
+
+  function renderReviewRepeatResolution(batch, repeated) {
+    const panel = $("#reviewRepeatResolution");
+    if (!panel) return;
+    panel.hidden = !repeated;
+    if (!repeated) return;
+    const error = reviewRepeatResolutionErrorFor(batch);
+    const draft = repeated.kind === "draft";
+    $("#reviewRepeatResolutionTitle").textContent = draft ? "发现上一版本保留的重复草稿" : "正在整理上一版本的重复题组";
+    $("#reviewRepeatResolutionNote").textContent = error
+      ? error.message
+      : draft
+        ? `这组 ${repeated.questionCount} 题全部已经正式完成过，但仍保留 ${repeated.answeredCount} 题草稿。请选择继续完成草稿，或明确放弃后换一组新题。`
+        : "这组题已经正式完成且没有草稿，系统会无证据退役它，并从今天尚未完成的内容中换一组新题。";
+    const continueButton = $("#continueRepeatedReviewBatch");
+    const discardButton = $("#discardRepeatedReviewBatch");
+    continueButton.hidden = !draft;
+    continueButton.disabled = reviewRepeatResolutionInProgress;
+    discardButton.disabled = reviewRepeatResolutionInProgress;
+    discardButton.innerHTML = draft
+      ? '<i data-lucide="trash-2" aria-hidden="true"></i>放弃草稿并换新题'
+      : reviewRepeatResolutionInProgress
+        ? '<i data-lucide="loader-circle" aria-hidden="true"></i>正在换新题…'
+        : '<i data-lucide="refresh-cw" aria-hidden="true"></i>重试换新题';
+    $("#reviewRepeatResolutionStatus").textContent = reviewRepeatResolutionInProgress
+      ? "正在保存处理结果，请勿重复点击。"
+      : draft
+        ? "系统不会自行删除草稿；继续时会保留已输入答案并换用新的批次编号。"
+        : "自动处理只尝试一次；失败后由你手动重试，不会连续请求。";
+    refreshIcons();
+  }
+
+  async function resolveRepeatedReviewBatch(action, { automatic = false } = {}) {
+    const batch = currentFormalReviewBatch();
+    const session = getSession();
+    const repeated = repeatedReviewBatchState(batch, session);
+    if (!batch || !repeated || reviewRepeatResolutionInProgress) return;
+    if (action === "continue" && repeated.kind !== "draft") return;
+    const accountContext = captureAccountRequestContext();
+    reviewRepeatResolutionInProgress = true;
+    reviewRepeatResolutionError = null;
+    renderHome();
+    try {
+      await reviewBatchRequest("/resolve-repeat", {
+        body: {
+          batchId: batch.id,
+          action,
+          confirmDiscard: action === "discard" && repeated.kind === "draft"
+        }
+      });
+      if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
+      reviewAnswerResetRequested = true;
+      if (action === "discard") startNextReviewGroup();
+    } catch (error) {
+      if (accountRequestContextIsCurrent(accountContext) && !error.silent) {
+        reviewRepeatResolutionError = {
+          accountId: accountContext.userId,
+          batchId: String(batch.id || ""),
+          message: String(error.message || "重复题组处理失败，请稍后手动重试").slice(0, 300)
+        };
+        if (!automatic) showRequestError(error);
+      }
+    } finally {
+      if (accountRequestContextIsCurrent(accountContext)) {
+        reviewRepeatResolutionInProgress = false;
+        renderHome();
+      }
+    }
+  }
+
+  function ensureEmptyRepeatedReviewBatchResolution(batch, repeated) {
+    if (!batch || !repeated || repeated.kind !== "empty" || reviewRepeatResolutionInProgress || reviewRepeatResolutionErrorFor(batch)) return;
+    const key = `${String(currentUser && currentUser.id || "")}:${String(batch.id || "")}`;
+    if (!key || reviewRepeatAutoAttemptKey === key) return;
+    reviewRepeatAutoAttemptKey = key;
+    queueMicrotask(() => { void resolveRepeatedReviewBatch("discard", { automatic: true }); });
   }
 
   function normalizeClientSelfStudy(value) {
@@ -6368,7 +6550,8 @@
     reviewAnswerResetRequested = true;
     reviewMode = mode;
     const today = localDate();
-    model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: Array.from(new Set(model.sessions[today]?.doneTaskIds || [])), currentTaskId: null, batchId: "", batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
+    const previous = normalizeClientReviewSession(model.sessions[today]);
+    model.sessions[today] = { date: today, mode, taskIds: [], index: 0, doneTaskIds: previous.doneTaskIds, currentTaskId: null, batchId: "", batchComplete: false, allowRepeat: false, retiredBatchIds: previous.retiredBatchIds, updatedAt: new Date().toISOString(), variants: {} };
     saveModel();
     $$("[data-mode]").forEach(button => {
       const active = button.dataset.mode === mode;
@@ -6621,21 +6804,15 @@
         button.setAttribute("aria-pressed", String(active));
       });
     }
-    const session = ensureBatch();
+    let session = ensureBatch();
     reviewBatchStartRetryUi(session, false);
     formalBatch = currentFormalReviewBatch();
-    if (formalBatch && formalBatch.id !== session.batchId && formalBatch.phase !== "completed") {
-      session.batchId = formalBatch.id;
-      session.mode = formalBatch.mode;
-      session.taskIds = formalBatch.questions.map(question => question.taskId);
-      session.index = Math.min(Math.max(Number(formalBatch.index) || 0, 0), Math.max(0, session.taskIds.length - 1));
-      session.currentTaskId = session.taskIds[session.index] || null;
-      touchReviewSession(session);
+    if (formalBatch && formalBatch.id !== session.batchId) {
+      session = projectReviewBatchToSession(formalBatch) || session;
     }
     const batchMatchesSession = Boolean(formalBatch && formalBatch.id === session.batchId);
-    if (batchMatchesSession && formalBatch.phase !== "completed") {
-      session.index = Math.min(Math.max(Number(formalBatch.index) || 0, 0), Math.max(0, session.taskIds.length - 1));
-      session.currentTaskId = session.taskIds[session.index] || null;
+    if (batchMatchesSession && typeof REVIEW_SESSION.applyReviewBatchToSession === "function") {
+      Object.assign(session, normalizeClientReviewSession(REVIEW_SESSION.applyReviewBatchToSession(session, formalBatch)));
     }
     const stats = todayStats();
     const due = taskCandidates(reviewMode, new Set()).length;
@@ -6647,11 +6824,23 @@
     $("#goalReadout").textContent = `${Math.min(done, DAILY_TARGET)} / ${DAILY_TARGET}`;
     renderStudyTimer();
     $("#queueNote").textContent = due ? "先复习错题，再练新词和句子。" : "今天的到期题已完成，可以回到词句库自由练习。";
+    const panel = $("#reviewPanel"); const complete = $("#reviewComplete");
+    const repeated = batchMatchesSession ? repeatedReviewBatchState(formalBatch, session) : null;
+    renderReviewRepeatResolution(formalBatch, repeated);
+    if (repeated) {
+      panel.hidden = true;
+      complete.hidden = true;
+      renderBatchReviewPanel("review", null);
+      renderBatchResultsPanel("review", null);
+      reviewVariantRetryUi(session, false);
+      renderAiTutorWindow();
+      ensureEmptyRepeatedReviewBatchResolution(formalBatch, repeated);
+      return;
+    }
     const baseTask = currentBaseTask();
     renderReviewVariantPoolStatus(session, baseTask);
     const task = currentTask();
     renderAiTutorWindow();
-    const panel = $("#reviewPanel"); const complete = $("#reviewComplete");
     renderBatchReviewPanel("review", batchMatchesSession ? formalBatch : null);
     renderBatchResultsPanel("review", batchMatchesSession ? formalBatch : null);
     if (batchMatchesSession && ["review", "grading", "completed"].includes(formalBatch.phase)) {
@@ -7000,11 +7189,8 @@
       showToast("预习单词不会进入今日复习，正式学完后才能练习");
       return;
     }
-    const today = localDate();
-    reviewAnswerResetRequested = true;
     reviewMode = task.item.type;
-    model.sessions[today] = { date: today, mode: reviewMode, taskIds: [taskId], index: 0, doneTaskIds: Array.from(new Set(model.sessions[today]?.doneTaskIds || [])), currentTaskId: taskId, batchId: newReviewBatchId(), batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
-    saveModel();
+    replaceReviewSession([taskId], reviewMode, { allowRepeat: true });
     $$("[data-mode]").forEach(button => { const active = button.dataset.mode === reviewMode; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
     setView("home");
   }
@@ -7015,11 +7201,8 @@
       showToast("这组内容尚未正式学完，暂不加入今日复习");
       return;
     }
-    const today = localDate();
-    reviewAnswerResetRequested = true;
     reviewMode = "all";
-    model.sessions[today] = { date: today, mode: reviewMode, taskIds, index: 0, doneTaskIds: Array.from(new Set(model.sessions[today]?.doneTaskIds || [])), currentTaskId: taskIds[0], batchId: newReviewBatchId(), batchComplete: false, updatedAt: new Date().toISOString(), variants: {} };
-    saveModel();
+    replaceReviewSession(taskIds, reviewMode, { allowRepeat: true });
     $$("[data-mode]").forEach(button => { const active = button.dataset.mode === reviewMode; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
     setView("home");
   }
@@ -7689,6 +7872,8 @@
     $("#gradeReviewBatch").addEventListener("click", gradeReviewBatch);
     $("#finishReviewBatch").addEventListener("click", finishReviewBatch);
     $("#reviewBatchStartRetryButton").addEventListener("click", retryReviewBatchStart);
+    $("#continueRepeatedReviewBatch").addEventListener("click", () => resolveRepeatedReviewBatch("continue"));
+    $("#discardRepeatedReviewBatch").addEventListener("click", () => resolveRepeatedReviewBatch("discard"));
     $("#previousAiQuestion").addEventListener("click", () => moveAiQuestion(-1));
     $("#editAiBatch").addEventListener("click", editAiBatch);
     $("#gradeAiBatch").addEventListener("click", gradeAiBatch);
@@ -7696,10 +7881,7 @@
     $("#nextButton").addEventListener("click", () => advance(false));
     $("#retryButton").addEventListener("click", () => advance(true));
     $("#moreReviewButton").addEventListener("click", () => {
-      const currentPlanStage = currentStudyPlan().currentStage;
-      const guidedStageActive = Boolean(currentPlanStage && ["review", "correction"].includes(currentPlanStage.id));
-      const taskIds = guidedStageActive ? buildGuidedReviewBatch(DAILY_TARGET) : buildBatch();
-      replaceReviewSession(taskIds, guidedStageActive ? "all" : reviewMode);
+      startNextReviewGroup();
       renderHome();
       focusStudyStageContent("#reviewPanel", ["#answerInput"]);
     });
@@ -7720,7 +7902,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=62", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=63", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

@@ -193,7 +193,10 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .feedback-note { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
 .feedback-actions { display: flex; justify-content: center; gap: 10px; margin-top: 14px; }
 .batch-answer-navigation { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 12px; }
-.batch-review-panel, .batch-results-panel { padding: 24px 28px 28px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.batch-review-panel, .batch-results-panel, .review-repeat-resolution { padding: 24px 28px 28px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.review-repeat-resolution-note { max-width: 720px; margin: 16px 0 0; color: var(--muted); line-height: 1.7; }
+.review-repeat-resolution-actions { flex-wrap: wrap; }
+.review-repeat-resolution-actions .secondary-button { white-space: normal; }
 .batch-panel-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
 .batch-panel-heading h2 { margin: 3px 0 0; font-size: 20px; }
 .batch-panel-heading > span, .batch-panel-heading > strong { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
@@ -963,7 +966,9 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
   .answer-input, .answer-form .primary-button { width: 100%; }
   .batch-answer-navigation { align-items: stretch; flex-direction: column; }
   .batch-answer-navigation .secondary-button { width: 100%; }
-  .batch-review-panel, .batch-results-panel { padding: 20px 14px 22px; }
+  .batch-review-panel, .batch-results-panel, .review-repeat-resolution { padding: 20px 14px 22px; }
+  .review-repeat-resolution-actions { display: grid; grid-template-columns: 1fr; }
+  .review-repeat-resolution-actions .secondary-button { width: 100%; }
   .batch-panel-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
   .batch-review-list > li { grid-template-columns: 30px minmax(0, 1fr); gap: 8px; }
   .batch-panel-actions { align-items: stretch; flex-direction: column-reverse; }

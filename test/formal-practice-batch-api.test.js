@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const vm = require("node:vm");
 const { once } = require("node:events");
 const { spawn } = require("node:child_process");
 const { test } = require("node:test");
@@ -83,6 +84,48 @@ function createAccounts(dataDir) {
   const other = createUser(store, { username: "formal-other", password: "formal-other-password" });
   saveUsers(dataDir, store);
   return { owner, other };
+}
+
+function learnedWordReviewTasks(limit = 20) {
+  const sandbox = { window: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(ROOT, "data.js"), "utf8"), sandbox, { filename: "data.js" });
+  return Array.from(sandbox.window.ENGLISH_REVIEW_DATA.words)
+    .filter(item => !item.preview && item.id && (item.acceptedChinese?.[0] || item.chinese))
+    .slice(0, limit)
+    .map(item => ({ taskId: `${item.id}:en-zh`, answer: String(item.acceptedChinese?.[0] || item.chinese) }));
+}
+
+async function completeReviewBatch(baseUrl, cookie, batchId, date, tasks) {
+  const started = await jsonRequest(baseUrl, cookie, "/api/review/batches/start", {
+    method: "POST",
+    body: { batchId, date, mode: "word", taskIds: tasks.map(item => item.taskId) }
+  });
+  assert.equal(started.response.status, 201);
+  for (let index = 0; index < started.body.batch.questions.length; index += 1) {
+    const question = started.body.batch.questions[index];
+    const answer = tasks.find(item => item.taskId === question.taskId)?.answer || "";
+    const drafted = await jsonRequest(baseUrl, cookie, "/api/review/batches/draft", {
+      method: "PUT",
+      body: {
+        batchId,
+        questionId: question.id,
+        index,
+        nextIndex: Math.min(index + 1, started.body.batch.questions.length - 1),
+        answer
+      }
+    });
+    assert.equal(drafted.response.status, 200);
+  }
+  const reviewed = await jsonRequest(baseUrl, cookie, "/api/review/batches/review", { method: "POST", body: { batchId } });
+  assert.equal(reviewed.response.status, 200);
+  assert.equal(reviewed.body.batch.phase, "review");
+  const graded = await jsonRequest(baseUrl, cookie, "/api/review/batches/grade", {
+    method: "POST",
+    body: { batchId, gradeRequestId: reviewed.body.batch.gradeRequestId }
+  });
+  assert.equal(graded.response.status, 200);
+  assert.equal(graded.body.batch.phase, "completed");
+  return graded;
 }
 
 test("formal review batches keep drafts private and write evidence once after whole-group grading", async () => {
@@ -196,6 +239,154 @@ test("formal review batches keep drafts private and write evidence once after wh
     assert.equal(repeatedState.attempts.length, completedState.attempts.length);
     assert.deepEqual(repeatedState.history, completedState.history);
     assert.deepEqual(repeatedState.taskStates, completedState.taskStates);
+
+    const archived = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/archive", {
+      method: "POST",
+      body: { batchId: "review-batch-fixed" }
+    });
+    assert.equal(archived.response.status, 200);
+    assert.equal(archived.body.batch, null);
+    assert.equal(archived.body.archivedBatchId, "review-batch-fixed");
+    assert.equal(archived.body.state.sessions["2026-08-09"].batchId, "");
+    assert.deepEqual(archived.body.state.sessions["2026-08-09"].taskIds, []);
+    assert.equal(archived.body.state.sessions["2026-08-09"].batchComplete, true);
+    assert.deepEqual(archived.body.state.sessions["2026-08-09"].retiredBatchIds, ["review-batch-fixed"]);
+    assert.deepEqual(archived.body.state.sessions["2026-08-09"].doneTaskIds.sort(), ["d1-man:en-zh", "d1-mat:zh-en"].sort());
+
+    const archiveRetry = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/archive", {
+      method: "POST",
+      body: { batchId: "review-batch-fixed" }
+    });
+    assert.equal(archiveRetry.response.status, 200);
+    assert.equal(archiveRetry.body.reused, true);
+
+    const delayedOldPut = await jsonRequest(app.baseUrl, cookie, "/api/state", {
+      method: "PUT",
+      body: {
+        ...archived.body.state,
+        sessions: {
+          ...archived.body.state.sessions,
+          "2026-08-09": {
+            ...completedState.sessions["2026-08-09"],
+            batchId: "review-batch-fixed",
+            taskIds: ["d1-man:en-zh", "d1-mat:zh-en"],
+            index: 0,
+            batchComplete: false,
+            updatedAt: "2099-01-01T00:00:00.000Z"
+          }
+        }
+      }
+    });
+    assert.equal(delayedOldPut.response.status, 200);
+    assert.equal(delayedOldPut.body.sessions["2026-08-09"].batchId, "");
+    assert.deepEqual(delayedOldPut.body.sessions["2026-08-09"].taskIds, []);
+    assert.deepEqual(delayedOldPut.body.sessions["2026-08-09"].doneTaskIds.sort(), ["d1-man:en-zh", "d1-mat:zh-en"].sort());
+
+    const blockedDuplicateStart = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: {
+        batchId: "review-batch-stale-client",
+        date: "2026-08-09",
+        mode: "word",
+        taskIds: ["d1-man:en-zh", "d2-sit:en-zh"]
+      }
+    });
+    assert.equal(blockedDuplicateStart.response.status, 409);
+    assert.equal(blockedDuplicateStart.body.code, "review_tasks_already_completed");
+    assert.deepEqual(blockedDuplicateStart.body.completedTaskIds, ["d1-man:en-zh"]);
+    assert.equal((await jsonRequest(app.baseUrl, cookie, "/api/review/batches")).body.batch, null);
+
+    const nextStarted = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: {
+        batchId: "review-batch-next",
+        date: "2026-08-09",
+        mode: "word",
+        taskIds: ["d2-sit:en-zh", "d2-cat:zh-en"]
+      }
+    });
+    assert.equal(nextStarted.response.status, 201);
+    assert.notEqual(nextStarted.body.batch.id, "review-batch-fixed");
+    assert.deepEqual(nextStarted.body.batch.questions.map(question => question.taskId), ["d2-sit:en-zh", "d2-cat:zh-en"]);
+    assert.deepEqual(nextStarted.body.batch.questions.map(question => question.taskId).filter(taskId => completedState.sessions["2026-08-09"].doneTaskIds.includes(taskId)), []);
+
+    await stopApp(app);
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const nextAfterRestart = await jsonRequest(app.baseUrl, cookie, "/api/review/batches");
+    assert.equal(nextAfterRestart.body.batch.id, "review-batch-next");
+    assert.deepEqual(nextAfterRestart.body.batch.questions, nextStarted.body.batch.questions);
+  } finally {
+    await stopApp(app);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("two complete ten-question groups archive into different IDs with no repeated task or evidence", async () => {
+  const dataDir = temporaryDataDir();
+  createAccounts(dataDir);
+  let app;
+  const studyDate = "2026-08-16";
+  const tasks = learnedWordReviewTasks(20);
+  assert.equal(tasks.length, 20);
+  try {
+    app = await startApp(dataDir);
+    let cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const firstTasks = tasks.slice(0, 10);
+    const secondTasks = tasks.slice(10, 20);
+    const first = await completeReviewBatch(app.baseUrl, cookie, "review-batch-ten-a", studyDate, firstTasks);
+    assert.equal(first.body.batch.questions.length, 10);
+    assert.equal(first.body.state.sessions[studyDate].index, 10);
+    assert.deepEqual(first.body.state.sessions[studyDate].doneTaskIds.sort(), firstTasks.map(item => item.taskId).sort());
+
+    const firstArchive = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/archive", {
+      method: "POST",
+      body: { batchId: "review-batch-ten-a" }
+    });
+    assert.equal(firstArchive.response.status, 200);
+    assert.equal(firstArchive.body.batch, null);
+    assert.equal(firstArchive.body.state.sessions[studyDate].batchId, "");
+    assert.deepEqual(firstArchive.body.state.sessions[studyDate].taskIds, []);
+
+    const secondStart = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: { batchId: "review-batch-ten-b", date: studyDate, mode: "word", taskIds: secondTasks.map(item => item.taskId) }
+    });
+    assert.equal(secondStart.response.status, 201);
+    assert.notEqual(secondStart.body.batch.id, first.body.batch.id);
+    const firstIds = new Set(first.body.batch.questions.map(question => question.taskId));
+    assert.equal(secondStart.body.batch.questions.length, 10);
+    assert.deepEqual(secondStart.body.batch.questions.map(question => question.taskId).filter(taskId => firstIds.has(taskId)), []);
+
+    await stopApp(app);
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const restoredSecond = await jsonRequest(app.baseUrl, cookie, "/api/review/batches");
+    assert.equal(restoredSecond.body.batch.id, "review-batch-ten-b");
+    assert.deepEqual(restoredSecond.body.batch.questions, secondStart.body.batch.questions);
+
+    for (let index = 0; index < restoredSecond.body.batch.questions.length; index += 1) {
+      const question = restoredSecond.body.batch.questions[index];
+      const answer = secondTasks.find(item => item.taskId === question.taskId)?.answer || "";
+      await jsonRequest(app.baseUrl, cookie, "/api/review/batches/draft", {
+        method: "PUT",
+        body: { batchId: "review-batch-ten-b", questionId: question.id, index, nextIndex: Math.min(index + 1, 9), answer }
+      });
+    }
+    const secondReview = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/review", { method: "POST", body: { batchId: "review-batch-ten-b" } });
+    const secondGrade = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/grade", {
+      method: "POST",
+      body: { batchId: "review-batch-ten-b", gradeRequestId: secondReview.body.batch.gradeRequestId }
+    });
+    assert.equal(secondGrade.body.batch.phase, "completed");
+    const repeatedGrade = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/grade", {
+      method: "POST",
+      body: { batchId: "review-batch-ten-b", gradeRequestId: secondReview.body.batch.gradeRequestId }
+    });
+    assert.equal(repeatedGrade.body.reused, true);
+    assert.equal(repeatedGrade.body.state.attempts.length, 20);
+    assert.equal(new Set(repeatedGrade.body.state.attempts.map(item => item.id)).size, 20);
+    assert.deepEqual(new Set(repeatedGrade.body.state.sessions[studyDate].doneTaskIds), new Set(tasks.map(item => item.taskId)));
   } finally {
     await stopApp(app);
     fs.rmSync(dataDir, { recursive: true, force: true });
@@ -247,6 +438,125 @@ test("concurrent review starts converge, stay evidence-free, and survive relogin
     assert.equal(retried.response.status, 200);
     assert.equal(retried.body.reused, true);
     assert.deepEqual(retried.body.batch.questions, left.body.batch.questions);
+  } finally {
+    await stopApp(app);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("legacy repeated batches retire empty state without evidence and protect drafts until an explicit choice", async () => {
+  const dataDir = temporaryDataDir();
+  const { owner } = createAccounts(dataDir);
+  let app;
+  const studyDate = "2026-08-15";
+  const legacyBatchId = "review-legacy-repeated";
+  try {
+    app = await startApp(dataDir);
+    let cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const started = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: { batchId: legacyBatchId, date: studyDate, mode: "word", taskIds: ["d1-man:en-zh", "d1-mat:zh-en"] }
+    });
+    for (let index = 0; index < started.body.batch.questions.length; index += 1) {
+      const question = started.body.batch.questions[index];
+      await jsonRequest(app.baseUrl, cookie, "/api/review/batches/draft", {
+        method: "PUT",
+        body: { batchId: legacyBatchId, questionId: question.id, index, nextIndex: Math.min(index + 1, 1), answer: index === 0 ? "男人" : "mat" }
+      });
+    }
+    const review = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/review", { method: "POST", body: { batchId: legacyBatchId } });
+    await jsonRequest(app.baseUrl, cookie, "/api/review/batches/grade", { method: "POST", body: { batchId: legacyBatchId, gradeRequestId: review.body.batch.gradeRequestId } });
+    await jsonRequest(app.baseUrl, cookie, "/api/review/batches/archive", { method: "POST", body: { batchId: legacyBatchId } });
+    const baseline = (await jsonRequest(app.baseUrl, cookie, "/api/state")).body;
+
+    const installLegacyDuplicate = async firstAnswer => {
+      await stopApp(app);
+      const stateFile = path.join(dataDir, "user-states.json");
+      const disk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+      const accountState = disk.users[owner.id];
+      const completed = accountState.formalPractice.review.history.find(item => item.id === legacyBatchId);
+      const duplicate = JSON.parse(JSON.stringify(completed));
+      duplicate.phase = "answering";
+      duplicate.index = 0;
+      duplicate.allowRepeat = false;
+      duplicate.completedAt = "";
+      duplicate.gradeRequestId = "";
+      duplicate.questions = duplicate.questions.map((question, index) => ({
+        ...question,
+        answer: index === 0 ? firstAnswer : "",
+        draftUpdatedAt: index === 0 && firstAnswer ? "2026-08-15T12:00:00.000Z" : "",
+        result: null
+      }));
+      accountState.formalPractice.review.current = duplicate;
+      accountState.sessions[studyDate] = {
+        ...accountState.sessions[studyDate],
+        taskIds: duplicate.questions.map(question => question.taskId),
+        index: 0,
+        currentTaskId: duplicate.questions[0].taskId,
+        batchId: legacyBatchId,
+        batchComplete: false,
+        allowRepeat: false,
+        retiredBatchIds: [],
+        updatedAt: "2026-08-15T12:00:00.000Z"
+      };
+      fs.writeFileSync(stateFile, `${JSON.stringify(disk, null, 2)}\n`, "utf8");
+      app = await startApp(dataDir);
+      cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    };
+
+    await installLegacyDuplicate("");
+    const retired = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: legacyBatchId, action: "discard" }
+    });
+    assert.equal(retired.response.status, 200);
+    assert.equal(retired.body.batch, null);
+    assert.equal(retired.body.state.sessions[studyDate].batchId, "");
+    assert.deepEqual(retired.body.state.sessions[studyDate].taskIds, []);
+    assert.deepEqual(retired.body.state.sessions[studyDate].retiredBatchIds, [legacyBatchId]);
+    assert.equal(retired.body.state.attempts.length, baseline.attempts.length);
+    assert.deepEqual(retired.body.state.history, baseline.history);
+    assert.deepEqual(retired.body.state.mistakes, baseline.mistakes);
+    const retiredAgain = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: legacyBatchId, action: "discard" }
+    });
+    assert.equal(retiredAgain.response.status, 200);
+    assert.equal(retiredAgain.body.reused, true);
+
+    await installLegacyDuplicate("男人");
+    const blockedDiscard = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: legacyBatchId, action: "discard" }
+    });
+    assert.equal(blockedDiscard.response.status, 409);
+    assert.equal(blockedDiscard.body.requiresConfirmation, true);
+    assert.equal(blockedDiscard.body.batch.questions[0].answer, "男人");
+    const preserved = await jsonRequest(app.baseUrl, cookie, "/api/review/batches");
+    assert.equal(preserved.body.batch.questions[0].answer, "男人");
+
+    const continued = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: legacyBatchId, action: "continue" }
+    });
+    assert.equal(continued.response.status, 200);
+    assert.notEqual(continued.body.batch.id, legacyBatchId);
+    assert.equal(continued.body.batch.allowRepeat, true);
+    assert.equal(continued.body.batch.recoveredFromBatchId, legacyBatchId);
+    assert.equal(continued.body.batch.questions[0].answer, "男人");
+    assert.equal(continued.body.state.sessions[studyDate].batchId, continued.body.batch.id);
+    assert.ok(continued.body.state.sessions[studyDate].retiredBatchIds.includes(legacyBatchId));
+    assert.equal(continued.body.state.attempts.length, baseline.attempts.length);
+    assert.deepEqual(continued.body.state.history, baseline.history);
+    assert.deepEqual(continued.body.state.mistakes, baseline.mistakes);
+    const lostContinueResponseRetry = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: legacyBatchId, action: "continue" }
+    });
+    assert.equal(lostContinueResponseRetry.response.status, 200);
+    assert.equal(lostContinueResponseRetry.body.reused, true);
+    assert.equal(lostContinueResponseRetry.body.batch.id, continued.body.batch.id);
+    assert.equal(lostContinueResponseRetry.body.batch.questions[0].answer, "男人");
   } finally {
     await stopApp(app);
     fs.rmSync(dataDir, { recursive: true, force: true });

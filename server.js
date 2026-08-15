@@ -15,6 +15,7 @@ const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./se
 const { publicTeachingProfile, sanitizeTeachingProfile } = require("./server/teaching-profile");
 const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis");
 const { expandRegisteredChineseAnswers, naturalizePlainDeepChinese, normalizeEnglish: normalizeVariantEnglish, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById, validateGeneratedSentenceVariant } = require("./review-variants");
+const { classifyRepeatedReviewBatch, mergeReviewSession, retireReviewSession, uniqueBatchIds } = require("./review-session");
 const {
   REVIEW_VARIANT_POOL_BATCH,
   REVIEW_VARIANT_POOL_TARGET,
@@ -296,17 +297,14 @@ function reviewSessionDoneTaskIds(value) {
 function mergeReviewSessionState(existingValue, incomingValue) {
   const existing = existingValue && typeof existingValue === "object" ? existingValue : {};
   const incoming = incomingValue && typeof incomingValue === "object" ? incomingValue : {};
-  const preferred = String(incoming.updatedAt || "") >= String(existing.updatedAt || "") ? incoming : existing;
-  const existingDoneTaskIds = Array.isArray(existing.doneTaskIds) ? existing.doneTaskIds : [];
-  const incomingDoneTaskIds = Array.isArray(incoming.doneTaskIds) ? incoming.doneTaskIds : [];
-  return {
-    ...preferred,
-    doneTaskIds: reviewSessionDoneTaskIds([...existingDoneTaskIds, ...incomingDoneTaskIds]),
-    variants: {
-      ...(existing.variants && typeof existing.variants === "object" ? existing.variants : {}),
-      ...(incoming.variants && typeof incoming.variants === "object" ? incoming.variants : {})
-    }
-  };
+  const merged = mergeReviewSession(existing, incoming);
+  merged.doneTaskIds = reviewSessionDoneTaskIds(merged.doneTaskIds);
+  merged.retiredBatchIds = uniqueBatchIds(merged.retiredBatchIds);
+  merged.variants = merged.batchId ? {
+    ...(existing.variants && typeof existing.variants === "object" ? existing.variants : {}),
+    ...(incoming.variants && typeof incoming.variants === "object" ? incoming.variants : {})
+  } : {};
+  return merged;
 }
 
 function mergeReviewSessionStates(existingValue, incomingValue) {
@@ -2777,6 +2775,36 @@ function reviewBatchResponse(state) {
   return { batch: publicReviewBatch(state.formalPractice && state.formalPractice.review && state.formalPractice.review.current) };
 }
 
+function reviewBatchSessionDate(batch) {
+  return String(batch && batch.date || today()).slice(0, 20);
+}
+
+function reviewBatchSession(state, batch) {
+  const studyDate = reviewBatchSessionDate(batch);
+  const sessions = state.sessions && typeof state.sessions === "object" ? state.sessions : {};
+  return sessions[studyDate] && typeof sessions[studyDate] === "object" ? sessions[studyDate] : { date: studyDate };
+}
+
+function reviewBatchWasRetired(state, batchId) {
+  const requestedId = String(batchId || "").trim();
+  if (!requestedId) return false;
+  return Object.values(state.sessions && typeof state.sessions === "object" ? state.sessions : {}).some(session => (
+    uniqueBatchIds(session && session.retiredBatchIds).includes(requestedId)
+  ));
+}
+
+function retireReviewBatchState(state, batch, updatedAt) {
+  const studyDate = reviewBatchSessionDate(batch);
+  state.sessions = state.sessions && typeof state.sessions === "object" ? state.sessions : {};
+  state.sessions[studyDate] = retireReviewSession(
+    reviewBatchSession(state, batch),
+    batch && batch.id,
+    (Array.isArray(batch && batch.questions) ? batch.questions : []).map(question => question && question.taskId),
+    updatedAt
+  );
+  return state.sessions[studyDate];
+}
+
 async function gradeFormalQuestion(question, answer, route = null) {
   const acceptedAnswers = question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese;
   const local = localTranslationGrade(question.direction, question.english, answer, acceptedAnswers);
@@ -2937,6 +2965,7 @@ function applyCompletedReviewBatch(user, expectedBatch, results) {
     currentTaskId: null,
     batchId: batch.id,
     batchComplete: true,
+    allowRepeat: batch.allowRepeat === true,
     updatedAt: completedAt,
     variants: existingSession.variants && typeof existingSession.variants === "object" ? existingSession.variants : {}
   };
@@ -2967,13 +2996,26 @@ function handleReviewBatches(req, res, url, user) {
       if (current && current.phase !== "completed") return sendJson(res, 409, { error: "已有未完成的今日复习题组", batch: publicReviewBatch(current) });
       const taskIds = Array.from(new Set((Array.isArray(body.taskIds) ? body.taskIds : []).map(item => String(item || "").trim()).filter(Boolean))).slice(0, 100);
       if (!taskIds.length) return sendError(res, 400, "review task IDs are required");
+      const studyDate = String(body.date || today()).slice(0, 20);
+      const allowRepeat = body.allowRepeat === true;
+      const completed = new Set(reviewSessionDoneTaskIds(reviewBatchSession(state, { date: studyDate }).doneTaskIds));
+      const alreadyCompleted = taskIds.filter(taskId => completed.has(taskId));
+      if (!allowRepeat && alreadyCompleted.length) {
+        return sendJson(res, 409, {
+          code: "review_tasks_already_completed",
+          error: "这组题包含今天已经完成的内容，已阻止重复建组",
+          completedTaskIds: alreadyCompleted,
+          state: publicReviewState(state)
+        });
+      }
       refreshContent();
       const variantIds = body.variantIds && typeof body.variantIds === "object" ? body.variantIds : {};
       const questions = taskIds.map(taskId => reviewQuestionSnapshot(user, taskId, variantIds[taskId]));
       const batch = createReviewBatch(questions, {
         id: requestedId,
-        date: String(body.date || today()),
+        date: studyDate,
         mode: body.mode,
+        allowRepeat,
         model: body.model,
         reasoningEffort: body.reasoningEffort
       });
@@ -2982,6 +3024,80 @@ function handleReviewBatches(req, res, url, user) {
       practice.updatedAt = now;
       saveFormalPracticeState(user, state, practice);
       return sendJson(res, 201, { batch: publicReviewBatch(batch), reused: false });
+    }
+    const requestedBatchId = String(body.batchId || "").trim().slice(0, 180);
+    if (suffix === "/archive" && req.method === "POST") {
+      const current = practice.review.current;
+      if (!current) {
+        if (reviewBatchWasRetired(state, requestedBatchId)) return sendJson(res, 200, { batch: null, archivedBatchId: requestedBatchId, reused: true, state: publicReviewState(state) });
+        const archived = practice.review.history.find(item => item.id === requestedBatchId && item.phase === "completed");
+        if (!archived) return sendError(res, 404, "review batch not found");
+        retireReviewBatchState(state, archived, now);
+        saveFormalPracticeState(user, state, practice);
+        const saved = getUserState(user);
+        return sendJson(res, 200, { batch: null, archivedBatchId: requestedBatchId, reused: true, state: publicReviewState(saved) });
+      }
+      if (current.id !== requestedBatchId) return sendJson(res, 409, { error: "另一个复习题组正在进行", batch: publicReviewBatch(current) });
+      if (current.phase !== "completed") return sendJson(res, 409, { error: "题组尚未完成", batch: publicReviewBatch(current) });
+      practice.review.history = [...practice.review.history, current].filter((item, index, items) => items.findIndex(candidate => candidate.id === item.id) === index).slice(-40);
+      practice.review.current = null;
+      retireReviewBatchState(state, current, now);
+      practice.updatedAt = now;
+      saveFormalPracticeState(user, state, practice);
+      const saved = getUserState(user);
+      return sendJson(res, 200, { batch: null, archivedBatchId: requestedBatchId, reused: false, state: publicReviewState(saved) });
+    }
+    if (suffix === "/resolve-repeat" && req.method === "POST") {
+      const batch = practice.review.current;
+      if (!batch || batch.id !== requestedBatchId) {
+        if (reviewBatchWasRetired(state, requestedBatchId)) return sendJson(res, 200, { batch: publicReviewBatch(batch), retiredBatchId: requestedBatchId, reused: true, state: publicReviewState(state) });
+        return sendError(res, 404, "review batch not found");
+      }
+      const repeated = classifyRepeatedReviewBatch(batch, reviewBatchSession(state, batch).doneTaskIds);
+      if (!repeated) return sendJson(res, 409, { error: "当前题组不是可处理的遗留重复组", batch: publicReviewBatch(batch) });
+      const action = String(body.action || "");
+      if (action === "continue") {
+        if (repeated.kind !== "draft") return sendJson(res, 409, { error: "空白重复组应直接换成新题", batch: publicReviewBatch(batch) });
+        const previousBatchId = batch.id;
+        const nextBatchId = `reviewbatch-${crypto.randomUUID()}`;
+        const studyDate = reviewBatchSessionDate(batch);
+        const session = reviewBatchSession(state, batch);
+        const taskIds = batch.questions.map(question => question.taskId);
+        batch.id = nextBatchId;
+        batch.allowRepeat = true;
+        batch.recoveredFromBatchId = previousBatchId;
+        batch.updatedAt = now;
+        practice.updatedAt = now;
+        state.sessions = state.sessions && typeof state.sessions === "object" ? state.sessions : {};
+        state.sessions[studyDate] = {
+          ...session,
+          date: studyDate,
+          mode: batch.mode,
+          taskIds,
+          index: batch.index,
+          doneTaskIds: reviewSessionDoneTaskIds(session.doneTaskIds),
+          currentTaskId: taskIds[batch.index] || null,
+          batchId: nextBatchId,
+          batchComplete: false,
+          allowRepeat: true,
+          retiredBatchIds: uniqueBatchIds([...(Array.isArray(session.retiredBatchIds) ? session.retiredBatchIds : []), previousBatchId]),
+          updatedAt: now,
+          variants: session.variants && typeof session.variants === "object" ? session.variants : {}
+        };
+        saveFormalPracticeState(user, state, practice);
+        const saved = getUserState(user);
+        return sendJson(res, 200, { batch: publicReviewBatch(saved.formalPractice.review.current), previousBatchId, reused: false, state: publicReviewState(saved) });
+      }
+      if (action !== "discard") return sendError(res, 400, "repeat resolution action is required");
+      if (repeated.kind === "draft" && body.confirmDiscard !== true) {
+        return sendJson(res, 409, { error: "这组已有草稿，请明确选择继续或放弃", requiresConfirmation: true, batch: publicReviewBatch(batch) });
+      }
+      practice.review.current = null;
+      practice.updatedAt = now;
+      retireReviewBatchState(state, batch, now);
+      saveFormalPracticeState(user, state, practice);
+      const saved = getUserState(user);
+      return sendJson(res, 200, { batch: null, retiredBatchId: requestedBatchId, reused: false, state: publicReviewState(saved) });
     }
     const batch = practice.review.current;
     if (!batch || batch.id !== String(body.batchId || "")) return sendError(res, 404, "review batch not found");
@@ -3060,14 +3176,6 @@ function handleReviewBatches(req, res, url, user) {
         const status = error && [400, 404, 409, 429, 503].includes(error.statusCode) ? error.statusCode : 503;
         return sendJson(res, status, { error: String(error && error.message || "AI 批改暂不可用，整组答案已保留，请稍后重试"), batch: publicReviewBatch(failedPractice.review.current) }, error && error.retryAfterSeconds ? { "Retry-After": String(error.retryAfterSeconds) } : {});
       }
-    }
-    if (suffix === "/archive" && req.method === "POST") {
-      if (batch.phase !== "completed") return sendJson(res, 409, { error: "题组尚未完成", batch: publicReviewBatch(batch) });
-      practice.review.history = [...practice.review.history, batch].filter((item, index, items) => items.findIndex(candidate => candidate.id === item.id) === index).slice(-40);
-      practice.review.current = null;
-      practice.updatedAt = now;
-      saveFormalPracticeState(user, state, practice);
-      return sendJson(res, 200, { batch: null });
     }
     return sendError(res, 404, "review batch endpoint not found");
   }, `review-batch:${suffix}`)).catch(error => sendError(res, error.statusCode || 400, error.message));
