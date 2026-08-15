@@ -6,6 +6,7 @@
   const REVIEW_VARIANTS = window.ENGLISH_REVIEW_VARIANTS || { chooseSentenceVariant: () => null, expandRegisteredChineseAnswers: (_content, _english, answers) => answers, naturalizePlainDeepChinese: (_english, value) => value, sanitizeGeneratedSentenceVariant: () => null };
   const STUDY_TIME = window.ENGLISH_REVIEW_STUDY_TIME || {};
   const REVIEW_SESSION = window.ENGLISH_REVIEW_SESSION || {};
+  const REVIEW_BATCH_CLIENT = window.ENGLISH_REVIEW_BATCH_CLIENT || {};
   const OFFLINE_STORAGE = window.ENGLISH_REVIEW_OFFLINE || {};
   const OFFLINE_LEARNING = window.ENGLISH_REVIEW_OFFLINE_LEARNING || {};
   const OFFLINE_AI = window.ENGLISH_REVIEW_OFFLINE_AI || {};
@@ -66,6 +67,8 @@
   const REVIEW_VARIANT_POOL_PAGE_SIZES = [10, 20, 50];
   const REVIEW_VARIANT_WAIT_TIMEOUT_MS = 12 * 60 * 1000;
   const REVIEW_VARIANT_POLL_REQUEST_TIMEOUT_MS = 15000;
+  const REVIEW_BATCH_START_TIMEOUT_MS = Number(REVIEW_BATCH_CLIENT.DEFAULT_START_TIMEOUT_MS) || 12000;
+  const REVIEW_BATCH_RECOVERY_TIMEOUT_MS = Number(REVIEW_BATCH_CLIENT.DEFAULT_RECOVERY_TIMEOUT_MS) || 6000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
   const offlineStore = API_ENABLED && typeof OFFLINE_STORAGE.createOfflineStore === "function" ? OFFLINE_STORAGE.createOfflineStore(window) : null;
   let remoteReady = !API_ENABLED;
@@ -103,6 +106,7 @@
   let toastTimer;
   let gradingInProgress = false;
   let reviewBatchRequestInProgress = false;
+  let reviewBatchStartFailure = null;
   // renderHome() is also called by background sync/prefetch polling. Keep the
   // answer controls tied to the current task so those redraws cannot erase a
   // draft (or hide feedback) while the learner is working.
@@ -1949,6 +1953,7 @@
     accountRequestEpoch += 1;
     currentUser = user;
     reviewBatchRequestInProgress = false;
+    reviewBatchStartFailure = null;
     aiRequestInProgress = false;
     aiGenerationInProgress = false;
     [$("#generateAiQuestions"), $("#startNextAiBatch"), $("#startNextOfflineAiBatch"), $("#generateAnotherAiSet")].filter(Boolean).forEach(button => setBusyButton(button, false, ""));
@@ -3117,6 +3122,7 @@
     }
     const batch = currentFormalReviewBatch();
     if (batch) {
+      if (reviewBatchStartFailure && reviewBatchStartFailure.accountId === String(currentUser && currentUser.id || "")) reviewBatchStartFailure = null;
       const session = getSession();
       session.batchId = batch.id;
       session.mode = batch.mode;
@@ -5601,6 +5607,25 @@
     return `reviewbatch-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   }
 
+  function reviewBatchStartFailureFor(session) {
+    if (!reviewBatchStartFailure || !session) return null;
+    if (reviewBatchStartFailure.accountId !== String(currentUser && currentUser.id || "")) return null;
+    return reviewBatchStartFailure.batchId === String(session.batchId || "") ? reviewBatchStartFailure : null;
+  }
+
+  function reviewBatchStartRetryUi(session, visible) {
+    const actions = $("#reviewBatchStartRetryActions");
+    const button = $("#reviewBatchStartRetryButton");
+    const note = $("#reviewBatchStartRetryNote");
+    if (!actions || !button || !note) return;
+    const failure = reviewBatchStartFailureFor(session);
+    actions.hidden = !visible || !failure;
+    if (actions.hidden) return;
+    button.disabled = reviewBatchRequestInProgress;
+    button.setAttribute("aria-busy", String(reviewBatchRequestInProgress));
+    note.textContent = failure.message;
+  }
+
   function reviewVariantRetryUi(session, visible) {
     const actions = $("#reviewVariantRetryActions");
     const button = $("#reviewVariantRetryButton");
@@ -5838,8 +5863,9 @@
     }));
   }
 
-  async function ensureServerReviewBatch(session) {
+  async function ensureServerReviewBatch(session, { manual = false } = {}) {
     if (!API_ENABLED || !currentUser || reviewBatchRequestInProgress || !reviewSessionCanStartBatch(session)) return currentFormalReviewBatch();
+    if (reviewBatchStartFailureFor(session) && !manual) return currentFormalReviewBatch();
     const accountContext = captureAccountRequestContext();
     const existing = currentFormalReviewBatch();
     if (existing && existing.id === session.batchId) return existing;
@@ -5848,10 +5874,13 @@
       touchReviewSession(session);
       saveModel();
     }
+    reviewBatchStartFailure = null;
     reviewBatchRequestInProgress = true;
     try {
       const settings = selectedAiSettings();
-      await reviewBatchRequest("/start", {
+      if (typeof REVIEW_BATCH_CLIENT.startReviewBatchWithRecovery !== "function") throw new Error("题组恢复组件未加载，请刷新页面后重试");
+      const result = await REVIEW_BATCH_CLIENT.startReviewBatchWithRecovery({
+        fetchImpl: (...args) => fetch(...args),
         body: {
           batchId: session.batchId,
           date: session.date || localDate(),
@@ -5860,10 +5889,22 @@
           variantIds: Object.fromEntries(Object.entries(session.variants || {}).map(([taskId, variant]) => [taskId, variant && variant.id || ""])),
           model: settings.model,
           reasoningEffort: settings.reasoningEffort
-        }
+        },
+        startTimeoutMs: REVIEW_BATCH_START_TIMEOUT_MS,
+        recoveryTimeoutMs: REVIEW_BATCH_RECOVERY_TIMEOUT_MS
       });
+      if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
+      applyReviewBatchResponse(result.data);
     } catch (error) {
-      if ((!error.data || !error.data.batch) && !error.silent) showToast(error.message);
+      if (accountRequestContextIsCurrent(accountContext) && !error.silent) {
+        reviewBatchStartFailure = {
+          accountId: accountContext.userId,
+          batchId: String(session.batchId || ""),
+          code: String(error.code || "review-batch-start-failed"),
+          message: String(error.message || "题目快照保存失败，请手动重试").slice(0, 300)
+        };
+        showToast(reviewBatchStartFailure.message);
+      }
     } finally {
       if (accountRequestContextIsCurrent(accountContext)) {
         reviewBatchRequestInProgress = false;
@@ -5871,6 +5912,14 @@
       }
     }
     return currentFormalReviewBatch();
+  }
+
+  function retryReviewBatchStart() {
+    const session = getSession();
+    if (!session || reviewBatchRequestInProgress || !reviewSessionCanStartBatch(session)) return;
+    reviewBatchStartFailure = null;
+    void ensureServerReviewBatch(session, { manual: true });
+    renderHome();
   }
 
   function normalizeClientSelfStudy(value) {
@@ -6563,9 +6612,19 @@
       actionsHidden: !feedbackActions || feedbackActions.hidden
     } : null;
     const resetAnswer = reviewAnswerResetRequested;
-    const session = ensureBatch();
     let formalBatch = currentFormalReviewBatch();
-    if (formalBatch && formalBatch.date === session.date && formalBatch.id !== session.batchId && formalBatch.phase !== "completed") {
+    if (formalBatch && ["all", "word", "sentence"].includes(formalBatch.mode)) {
+      reviewMode = formalBatch.mode;
+      $$('[data-mode]').forEach(button => {
+        const active = button.dataset.mode === reviewMode;
+        button.classList.toggle("is-selected", active);
+        button.setAttribute("aria-pressed", String(active));
+      });
+    }
+    const session = ensureBatch();
+    reviewBatchStartRetryUi(session, false);
+    formalBatch = currentFormalReviewBatch();
+    if (formalBatch && formalBatch.id !== session.batchId && formalBatch.phase !== "completed") {
       session.batchId = formalBatch.id;
       session.mode = formalBatch.mode;
       session.taskIds = formalBatch.questions.map(question => question.taskId);
@@ -6573,7 +6632,7 @@
       session.currentTaskId = session.taskIds[session.index] || null;
       touchReviewSession(session);
     }
-    const batchMatchesSession = Boolean(formalBatch && formalBatch.id === session.batchId && formalBatch.date === session.date);
+    const batchMatchesSession = Boolean(formalBatch && formalBatch.id === session.batchId);
     if (batchMatchesSession && formalBatch.phase !== "completed") {
       session.index = Math.min(Math.max(Number(formalBatch.index) || 0, 0), Math.max(0, session.taskIds.length - 1));
       session.currentTaskId = session.taskIds[session.index] || null;
@@ -6642,15 +6701,16 @@
         return;
       }
       const canStartServerBatch = reviewSessionCanStartBatch(session);
+      const startFailure = canStartServerBatch ? reviewBatchStartFailureFor(session) : null;
       const missingSentenceCount = sentenceTasksMissingVariants(session).length;
       reviewVariantRetryUi(session, Boolean(baseTask.item.type === "sentence" && !session.variants[baseTask.taskId]));
       $("#promptType").textContent = "整组复习";
-      $("#promptDay").textContent = canStartServerBatch ? "正在保存题目快照" : "正在准备句子快照";
+      $("#promptDay").textContent = startFailure ? "题目快照尚未保存" : canStartServerBatch ? "正在保存题目快照" : "正在准备句子快照";
       $("#questionCount").textContent = `1 / ${session.taskIds.length}`;
-      $("#directionLabel").textContent = canStartServerBatch ? "准备本组草稿" : `还有 ${missingSentenceCount} 道句子题待固定`;
-      $("#promptText").textContent = canStartServerBatch ? "正在准备可恢复的整组作答…" : "正在从本轮句子池固定整组题目…";
+      $("#directionLabel").textContent = startFailure ? "服务器状态确认失败" : canStartServerBatch ? "准备本组草稿" : `还有 ${missingSentenceCount} 道句子题待固定`;
+      $("#promptText").textContent = startFailure ? "本组尚未进入作答，请手动重试" : canStartServerBatch ? "正在准备可恢复的整组作答…" : "正在从本轮句子池固定整组题目…";
       $("#promptSpeech").innerHTML = "";
-      $("#phoneticLine").textContent = canStartServerBatch ? "题目快照保存完成后即可作答。" : "准备完成前不会开放输入，避免草稿与最终题目错位。";
+      $("#phoneticLine").textContent = startFailure ? "系统不会自动连续请求；重试会继续使用相同批次和题目快照。" : canStartServerBatch ? "题目快照保存完成后即可作答。" : "准备完成前不会开放输入，避免草稿与最终题目错位。";
       $("#exampleLine").textContent = "";
       answerInput.value = "";
       answerInput.disabled = true;
@@ -6658,7 +6718,8 @@
       $("#previousReviewQuestion").disabled = true;
       feedback.hidden = true;
       feedbackActions.hidden = true;
-      if (canStartServerBatch) void ensureServerReviewBatch(session);
+      reviewBatchStartRetryUi(session, Boolean(startFailure));
+      if (canStartServerBatch && !startFailure) void ensureServerReviewBatch(session);
       return;
     }
     if (baseTask.item.type === "sentence" && !session.variants[baseTask.taskId]) {
@@ -7627,6 +7688,7 @@
     $("#editReviewBatch").addEventListener("click", editReviewBatch);
     $("#gradeReviewBatch").addEventListener("click", gradeReviewBatch);
     $("#finishReviewBatch").addEventListener("click", finishReviewBatch);
+    $("#reviewBatchStartRetryButton").addEventListener("click", retryReviewBatchStart);
     $("#previousAiQuestion").addEventListener("click", () => moveAiQuestion(-1));
     $("#editAiBatch").addEventListener("click", editAiBatch);
     $("#gradeAiBatch").addEventListener("click", gradeAiBatch);
@@ -7658,7 +7720,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=61", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=62", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

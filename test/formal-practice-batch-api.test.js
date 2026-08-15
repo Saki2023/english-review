@@ -202,6 +202,57 @@ test("formal review batches keep drafts private and write evidence once after wh
   }
 });
 
+test("concurrent review starts converge, stay evidence-free, and survive relogin and restart", async () => {
+  const dataDir = temporaryDataDir();
+  createAccounts(dataDir);
+  let app;
+  try {
+    app = await startApp(dataDir);
+    let cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const before = (await jsonRequest(app.baseUrl, cookie, "/api/state")).body;
+    const startBody = batchId => ({
+      method: "POST",
+      body: {
+        batchId,
+        date: "2026-08-15",
+        mode: "word",
+        taskIds: ["d1-man:en-zh", "d1-mat:zh-en"]
+      }
+    });
+    const [left, right] = await Promise.all([
+      jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", startBody("review-tab-left")),
+      jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", startBody("review-tab-right"))
+    ]);
+    assert.deepEqual([left.response.status, right.response.status].sort(), [201, 409]);
+    assert.equal(left.body.batch.id, right.body.batch.id);
+    assert.deepEqual(left.body.batch.questions, right.body.batch.questions);
+
+    const recovered = await jsonRequest(app.baseUrl, cookie, "/api/review/batches");
+    assert.equal(recovered.response.status, 200);
+    assert.equal(recovered.body.batch.id, left.body.batch.id);
+    assert.deepEqual(recovered.body.batch.questions, left.body.batch.questions);
+    const beforeRestart = (await jsonRequest(app.baseUrl, cookie, "/api/state")).body;
+    assert.deepEqual(beforeRestart.attempts, before.attempts);
+    assert.deepEqual(beforeRestart.taskStates, before.taskStates);
+    assert.deepEqual(beforeRestart.history, before.history);
+    assert.deepEqual(beforeRestart.mistakes, before.mistakes);
+
+    await stopApp(app);
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const afterRestart = await jsonRequest(app.baseUrl, cookie, "/api/review/batches");
+    assert.equal(afterRestart.body.batch.id, left.body.batch.id);
+    assert.deepEqual(afterRestart.body.batch.questions, left.body.batch.questions);
+    const retried = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", startBody(left.body.batch.id));
+    assert.equal(retried.response.status, 200);
+    assert.equal(retried.body.reused, true);
+    assert.deepEqual(retried.body.batch.questions, left.body.batch.questions);
+  } finally {
+    await stopApp(app);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("sentence-pool statistics are account-isolated, date-filtered, stable, and read-only", async () => {
   const dataDir = temporaryDataDir();
   const { owner } = createAccounts(dataDir);

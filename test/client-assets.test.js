@@ -79,7 +79,7 @@ test("formal review and AI practice use private whole-group review and account-b
   assert.match(app, /reviewBatchRequest\("\/review"/);
   assert.match(app, /reviewBatchRequest\("\/grade"/);
   assert.match(app, /reviewVariantPreparation = null;[\s\S]*?if \(activeView === "home"\) renderHome\(\)/);
-  assert.match(app, /if \(API_ENABLED && currentUser && !batchMatchesSession\)[\s\S]*?answerInput\.disabled = true[\s\S]*?if \(canStartServerBatch\) void ensureServerReviewBatch\(session\)/);
+  assert.match(app, /if \(API_ENABLED && currentUser && !batchMatchesSession\)[\s\S]*?answerInput\.disabled = true[\s\S]*?if \(canStartServerBatch && !startFailure\) void ensureServerReviewBatch\(session\)/);
   assert.match(app, /aiBatchRequest\("\/review"/);
   assert.match(app, /aiBatchRequest\("\/grade"/);
   assert.match(app, /const answer = \$\("#aiAnswerInput"\)\.value\.trim\(\);[\s\S]*?renderAiView\(\);[\s\S]*?nextIndex, answer/s);
@@ -91,6 +91,29 @@ test("formal review and AI practice use private whole-group review and account-b
   assert.match(app, /formalPractice: remote && remote\.formalPractice \? normalizeClientFormalPractice\(remote\.formalPractice\)/);
   assert.match(css, /@media \(max-width: 520px\)[\s\S]*?\.batch-review-panel, \.batch-results-panel \{ padding: 20px 14px 22px; \}/);
   assert.match(css, /@media \(max-width: 520px\)[\s\S]*?\.batch-result-list dl > div \{ grid-template-columns: 1fr/);
+});
+
+test("formal review batch start has bounded recovery and an explicit retry gate", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  const css = read("styles.css");
+  const serviceWorker = read("sw.js");
+  const server = read("server.js");
+  assert.match(html, /review-batch-client\.js\?v=62/);
+  assert.match(serviceWorker, /review-batch-client\.js\?v=62/);
+  assert.match(html, /id="reviewBatchStartRetryActions"[\s\S]*id="reviewBatchStartRetryButton"[\s\S]*重试保存题目快照/);
+  assert.match(app, /REVIEW_BATCH_START_TIMEOUT_MS = Number\(REVIEW_BATCH_CLIENT\.DEFAULT_START_TIMEOUT_MS\) \|\| 12000/);
+  assert.match(app, /REVIEW_BATCH_RECOVERY_TIMEOUT_MS = Number\(REVIEW_BATCH_CLIENT\.DEFAULT_RECOVERY_TIMEOUT_MS\) \|\| 6000/);
+  assert.match(app, /startReviewBatchWithRecovery\(\{[\s\S]*batchId: session\.batchId[\s\S]*startTimeoutMs: REVIEW_BATCH_START_TIMEOUT_MS[\s\S]*recoveryTimeoutMs: REVIEW_BATCH_RECOVERY_TIMEOUT_MS/);
+  assert.match(app, /if \(reviewBatchStartFailureFor\(session\) && !manual\) return currentFormalReviewBatch\(\)/);
+  assert.match(app, /if \(canStartServerBatch && !startFailure\) void ensureServerReviewBatch\(session\)/);
+  assert.match(app, /const batchMatchesSession = Boolean\(formalBatch && formalBatch\.id === session\.batchId\)/);
+  assert.doesNotMatch(app, /formalBatch\.id === session\.batchId && formalBatch\.date === session\.date/);
+  assert.match(app, /reviewBatchStartRetryButton"\)\.addEventListener\("click", retryReviewBatchStart\)/);
+  assert.match(css, /@media \(max-width: 520px\)[\s\S]*\.review-batch-start-retry \{ width: 100%/);
+  assert.match(server, /FORMAL_PRACTICE_LOCK_WARN_MS/);
+  assert.match(server, /JSON\.stringify\(\{ phase: "wait", operation: safeOperationName, elapsedMs: waitMs \}\)/);
+  assert.match(server, /withFormalPracticeLock\(user\.id,[\s\S]*`review-batch:\$\{suffix\}`/);
 });
 
 test("AI tutor launcher supports persistent pointer dragging", () => {
@@ -211,14 +234,14 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=61/);
+  assert.match(html, /pronunciation-data\.js\?v=62/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /phonemeSoundButtonHtml\(item\)/);
   assert.match(app, /speechButtonHtml\(item\.example, `慢速播放完整示范词/);
   assert.match(app, /data-pronunciation-sound/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=61/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=62/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -533,7 +556,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 61", () => {
+test("PWA client assets consistently use the displayed cache version 62", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -544,8 +567,8 @@ test("PWA client assets consistently use the displayed cache version 61", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "61");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v61"/);
+  assert.equal(displayedVersion[1], "62");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v62"/);
 });
 
 test("complete self-study exposes one-step teaching, recovery, questions, and explicit continuation controls", () => {
@@ -590,10 +613,10 @@ test("offline travel mode is explicit, account-bound, FIFO replayed, and never c
   assert.match(html, /id="deleteOfflinePack"/);
   assert.match(html, /id="offlinePackStatus"/);
   assert.match(html, /id="startNextOfflineAiBatch"/);
-  assert.match(html, /offline-store\.js\?v=61/);
-  assert.match(html, /offline-learning\.js\?v=61/);
-  assert.match(html, /offline-ai\.js\?v=61/);
-  assert.match(html, /offline-replay\.js\?v=61/);
+  assert.match(html, /offline-store\.js\?v=62/);
+  assert.match(html, /offline-learning\.js\?v=62/);
+  assert.match(html, /offline-ai\.js\?v=62/);
+  assert.match(html, /offline-replay\.js\?v=62/);
   assert.match(app, /function enterPreparedOfflineSession\(\)/);
   assert.match(app, /offlineStore\.activeAccountId\(\) !== accountId/);
   assert.match(app, /async function replayOfflineOutbox\(\)/);
@@ -610,8 +633,8 @@ test("offline travel mode is explicit, account-bound, FIFO replayed, and never c
   assert.doesNotMatch(`${app}\n${server}`, /\/api\/offline\/replay/);
   assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)\) return/);
   assert.doesNotMatch(serviceWorker, /\/api\/state/);
-  assert.match(serviceWorker, /offline-store\.js\?v=61/);
-  assert.match(serviceWorker, /offline-replay\.js\?v=61/);
+  assert.match(serviceWorker, /offline-store\.js\?v=62/);
+  assert.match(serviceWorker, /offline-replay\.js\?v=62/);
   assert.match(css, /@media \(max-width: 520px\)[\s\S]*\.self-study-mode-actions button:not\(\.offline-pack-delete\)/);
 });
 
@@ -645,6 +668,6 @@ test("daily study plan offers six free-choice projects and records sixty minutes
   assert.doesNotMatch(app, /String\(stage\.index \+ 1\)/);
   assert.doesNotMatch(app, /按顺序完成/);
   assert.doesNotMatch(html, /按顺序学习/);
-  assert.match(html, /study-time\.js\?v=61/);
-  assert.match(serviceWorker, /study-time\.js\?v=61/);
+  assert.match(html, /study-time\.js\?v=62/);
+  assert.match(serviceWorker, /study-time\.js\?v=62/);
 });

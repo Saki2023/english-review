@@ -120,6 +120,7 @@ const REVIEW_VARIANT_POOL_AUTOFILL = process.env.REVIEW_VARIANT_POOL_AUTOFILL !=
 const OFFLINE_PACK_SCHEMA_VERSION = 1;
 const OFFLINE_PACK_DAYS = 14;
 const OFFLINE_PACK_MAX_BYTES = 6 * 1024 * 1024;
+const FORMAL_PRACTICE_LOCK_WARN_MS = Math.max(100, Number(process.env.FORMAL_PRACTICE_LOCK_WARN_MS) || 2000);
 
 ensureDataDir();
 recoverSelfStudyTransaction();
@@ -828,9 +829,25 @@ function withSelfStudyLock(userId, operation) {
   });
 }
 
-function withFormalPracticeLock(userId, operation) {
+function withFormalPracticeLock(userId, operation, operationName = "formal-practice") {
+  const queuedAt = Date.now();
+  const safeOperationName = String(operationName || "formal-practice").replace(/[^a-z0-9:/_-]/gi, "").slice(0, 80) || "formal-practice";
   const previous = formalPracticeLocksByUserId.get(userId) || Promise.resolve();
-  const current = previous.catch(() => {}).then(operation);
+  const current = previous.catch(() => {}).then(async () => {
+    const waitMs = Date.now() - queuedAt;
+    if (waitMs >= FORMAL_PRACTICE_LOCK_WARN_MS) {
+      console.warn(`[formal-practice-lock] ${JSON.stringify({ phase: "wait", operation: safeOperationName, elapsedMs: waitMs })}`);
+    }
+    const startedAt = Date.now();
+    try {
+      return await operation();
+    } finally {
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= FORMAL_PRACTICE_LOCK_WARN_MS) {
+        console.warn(`[formal-practice-lock] ${JSON.stringify({ phase: "operation", operation: safeOperationName, elapsedMs })}`);
+      }
+    }
+  });
   formalPracticeLocksByUserId.set(userId, current);
   return current.finally(() => {
     if (formalPracticeLocksByUserId.get(userId) === current) formalPracticeLocksByUserId.delete(userId);
@@ -3053,7 +3070,7 @@ function handleReviewBatches(req, res, url, user) {
       return sendJson(res, 200, { batch: null });
     }
     return sendError(res, 404, "review batch endpoint not found");
-  })).catch(error => sendError(res, error.statusCode || 400, error.message));
+  }, `review-batch:${suffix}`)).catch(error => sendError(res, error.statusCode || 400, error.message));
 }
 
 function saveAiQuestionResult(state, setId, questionId, answer, result) {

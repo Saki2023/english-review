@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=61">
+  <link rel="stylesheet" href="styles.css?v=62">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v61">v61</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v62">v62</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -259,6 +259,10 @@
               <div class="review-variant-retry" id="reviewVariantRetryActions" hidden>
                 <button class="secondary-button" type="button" id="reviewVariantRetryButton"><i data-lucide="refresh-cw" aria-hidden="true"></i><span id="reviewVariantRetryLabel">立即重试</span></button>
                 <span class="review-variant-retry-note" id="reviewVariantRetryNote">单次生成最多等待 10 分钟；失败后每 5 分钟自动重试。</span>
+              </div>
+              <div class="review-batch-start-retry" id="reviewBatchStartRetryActions" role="alert" hidden>
+                <button class="secondary-button" type="button" id="reviewBatchStartRetryButton"><i data-lucide="refresh-cw" aria-hidden="true"></i>重试保存题目快照</button>
+                <span class="review-batch-start-retry-note" id="reviewBatchStartRetryNote"></span>
               </div>
               <div class="example-line" id="exampleLine"></div>
               <form class="answer-form" id="answerForm">
@@ -1207,17 +1211,18 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=61"></script>
-  <script src="data.js?v=61"></script>
-  <script src="pronunciation-data.js?v=61"></script>
-  <script src="review-variants.js?v=61"></script>
-  <script src="answer-utils.js?v=61"></script>
-  <script src="study-time.js?v=61"></script>
-  <script src="review-session.js?v=61"></script>
-  <script src="offline-store.js?v=61"></script>
-  <script src="offline-learning.js?v=61"></script>
-  <script src="offline-ai.js?v=61"></script>
-  <script src="offline-replay.js?v=61"></script>
+  <script src="vendor/lucide.min.js?v=62"></script>
+  <script src="data.js?v=62"></script>
+  <script src="pronunciation-data.js?v=62"></script>
+  <script src="review-variants.js?v=62"></script>
+  <script src="answer-utils.js?v=62"></script>
+  <script src="study-time.js?v=62"></script>
+  <script src="review-session.js?v=62"></script>
+  <script src="review-batch-client.js?v=62"></script>
+  <script src="offline-store.js?v=62"></script>
+  <script src="offline-learning.js?v=62"></script>
+  <script src="offline-ai.js?v=62"></script>
+  <script src="offline-replay.js?v=62"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1233,7 +1238,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=61";
+      appScript.src = "app.js?v=62";
       document.body.appendChild(appScript);
     })();
   </script>
