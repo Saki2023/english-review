@@ -563,6 +563,121 @@ test("legacy repeated batches retire empty state without evidence and protect dr
   }
 });
 
+test("completed formal evidence repairs a missing doneTaskIds index before an empty legacy batch retires", async () => {
+  const dataDir = temporaryDataDir();
+  const { owner } = createAccounts(dataDir);
+  let app;
+  const studyDate = "2026-08-16";
+  const legacyBatchId = "review-legacy-missing-completion-index";
+  try {
+    app = await startApp(dataDir);
+    let cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const started = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: { batchId: legacyBatchId, date: studyDate, mode: "word", taskIds: ["d1-man:en-zh", "d1-mat:zh-en"] }
+    });
+    for (let index = 0; index < started.body.batch.questions.length; index += 1) {
+      const question = started.body.batch.questions[index];
+      await jsonRequest(app.baseUrl, cookie, "/api/review/batches/draft", {
+        method: "PUT",
+        body: { batchId: legacyBatchId, questionId: question.id, index, nextIndex: Math.min(index + 1, 1), answer: index === 0 ? "男人" : "mat" }
+      });
+    }
+    const review = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/review", { method: "POST", body: { batchId: legacyBatchId } });
+    await jsonRequest(app.baseUrl, cookie, "/api/review/batches/grade", { method: "POST", body: { batchId: legacyBatchId, gradeRequestId: review.body.batch.gradeRequestId } });
+    await jsonRequest(app.baseUrl, cookie, "/api/review/batches/archive", { method: "POST", body: { batchId: legacyBatchId } });
+    const baseline = (await jsonRequest(app.baseUrl, cookie, "/api/state")).body;
+    const baselineAttempts = baseline.attempts.length;
+    const baselineHistory = JSON.parse(JSON.stringify(baseline.history));
+
+    await stopApp(app);
+    app = null;
+    const stateFile = path.join(dataDir, "user-states.json");
+    const disk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    const accountState = disk.users[owner.id];
+    const completed = accountState.formalPractice.review.history.find(item => item.id === legacyBatchId);
+    const duplicate = JSON.parse(JSON.stringify(completed));
+    duplicate.phase = "answering";
+    duplicate.index = 0;
+    duplicate.allowRepeat = false;
+    duplicate.completedAt = "";
+    duplicate.gradeRequestId = "";
+    duplicate.questions = duplicate.questions.map(question => ({ ...question, answer: "", draftUpdatedAt: "", result: null }));
+    accountState.formalPractice.review.current = duplicate;
+    accountState.sessions[studyDate] = {
+      ...accountState.sessions[studyDate],
+      taskIds: duplicate.questions.map(question => question.taskId),
+      index: 0,
+      doneTaskIds: [],
+      currentTaskId: duplicate.questions[0].taskId,
+      batchId: legacyBatchId,
+      batchComplete: false,
+      allowRepeat: false,
+      retiredBatchIds: [],
+      updatedAt: "2026-08-16T12:00:00.000Z"
+    };
+    fs.writeFileSync(stateFile, `${JSON.stringify(disk, null, 2)}\n`, "utf8");
+
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const beforeRead = fs.statSync(stateFile);
+    const beforeContents = fs.readFileSync(stateFile, "utf8");
+    const beforeResolve = await jsonRequest(app.baseUrl, cookie, "/api/review/batches");
+    assert.equal(beforeResolve.body.batch.id, legacyBatchId);
+    assert.deepEqual(new Set(beforeResolve.body.state.sessions[studyDate].doneTaskIds), new Set(duplicate.questions.map(question => question.taskId)));
+    const afterRead = fs.statSync(stateFile);
+    assert.equal(fs.readFileSync(stateFile, "utf8"), beforeContents, "the authoritative completion projection must remain read-only");
+    assert.equal(afterRead.mtimeMs, beforeRead.mtimeMs, "a recovery GET must not rewrite account state");
+    const retired = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: legacyBatchId, action: "discard" }
+    });
+    assert.equal(retired.response.status, 200);
+    assert.equal(retired.body.batch, null);
+    assert.deepEqual(new Set(retired.body.state.sessions[studyDate].doneTaskIds), new Set(duplicate.questions.map(question => question.taskId)));
+    assert.ok(retired.body.state.sessions[studyDate].retiredBatchIds.includes(legacyBatchId));
+    assert.equal(retired.body.state.attempts.length, baselineAttempts);
+    assert.deepEqual(retired.body.state.history, baselineHistory);
+    assert.equal(retired.body.state.mistakes.length, baseline.mistakes.length);
+
+    await stopApp(app);
+    app = null;
+    const rejectedDisk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    const rejectedState = rejectedDisk.users[owner.id];
+    const unprovenId = "review-unproven-empty";
+    const unproven = { ...JSON.parse(JSON.stringify(duplicate)), id: unprovenId };
+    rejectedState.formalPractice.review.current = unproven;
+    rejectedState.formalPractice.review.history = [];
+    rejectedState.attempts = [];
+    rejectedState.sessions[studyDate] = {
+      ...rejectedState.sessions[studyDate],
+      taskIds: unproven.questions.map(question => question.taskId),
+      index: 0,
+      doneTaskIds: unproven.questions.map(question => question.taskId),
+      currentTaskId: unproven.questions[0].taskId,
+      batchId: unprovenId,
+      batchComplete: false,
+      retiredBatchIds: [],
+      updatedAt: "2026-08-16T13:00:00.000Z"
+    };
+    fs.writeFileSync(stateFile, `${JSON.stringify(rejectedDisk, null, 2)}\n`, "utf8");
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const rejected = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: unprovenId, action: "discard" }
+    });
+    assert.equal(rejected.response.status, 409);
+    assert.equal(rejected.body.code, "review_repeat_not_confirmed");
+    assert.equal(rejected.body.batch.id, unprovenId);
+    assert.deepEqual(rejected.body.batch.questions.map(question => question.answer), ["", ""]);
+    assert.deepEqual(new Set(rejected.body.state.sessions[studyDate].doneTaskIds), new Set(unproven.questions.map(question => question.taskId)));
+  } finally {
+    await stopApp(app);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("sentence-pool statistics are account-isolated, date-filtered, stable, and read-only", async () => {
   const dataDir = temporaryDataDir();
   const { owner } = createAccounts(dataDir);

@@ -8,6 +8,8 @@
 
   const DEFAULT_START_TIMEOUT_MS = 12000;
   const DEFAULT_RECOVERY_TIMEOUT_MS = 6000;
+  const DEFAULT_REPEAT_RESOLVE_TIMEOUT_MS = 8000;
+  const DEFAULT_REPEAT_RECOVERY_TIMEOUT_MS = 6000;
 
   function requestError(message, code, details = {}) {
     const error = new Error(message);
@@ -142,10 +144,141 @@
     throw recoveryFailure(startError);
   }
 
+  function retiredBatchIdsFromState(value) {
+    const state = value && typeof value === "object" ? value : {};
+    const sessions = state.sessions && typeof state.sessions === "object" ? state.sessions : {};
+    return new Set(Object.values(sessions).flatMap(session => (
+      Array.isArray(session && session.retiredBatchIds) ? session.retiredBatchIds : []
+    )).map(item => String(item || "").trim()).filter(Boolean));
+  }
+
+  function repeatResolutionWasApplied(dataValue, requestedBatchId, action) {
+    const data = dataValue && typeof dataValue === "object" ? dataValue : {};
+    const requestedId = String(requestedBatchId || "").trim();
+    if (!requestedId) return false;
+    const retiredId = String(data.retiredBatchId || data.archivedBatchId || data.previousBatchId || "").trim();
+    const retired = retiredId === requestedId || retiredBatchIdsFromState(data.state).has(requestedId);
+    const batch = data.batch && typeof data.batch === "object" ? data.batch : null;
+    if (action === "continue") {
+      return Boolean(batch && String(batch.id || "") !== requestedId && (
+        retired || String(batch.recoveredFromBatchId || "") === requestedId
+      ));
+    }
+    return retired && (!batch || String(batch.id || "") !== requestedId);
+  }
+
+  function repeatResolutionFailure(resolveError, recoveryError = null, data = null) {
+    if (recoveryError && recoveryError.timedOut) {
+      return requestError("处理旧重复题组后无法确认服务器状态，恢复查询也已超时。请检查网络后手动重试；不会重复建组或计分。", "review-repeat-recovery-timeout", {
+        recoverable: true,
+        cause: recoveryError,
+        resolveError,
+        data
+      });
+    }
+    if (recoveryError) {
+      return requestError("处理旧重复题组后无法读取服务器状态。请检查网络或重新登录后手动重试；不会丢弃草稿或写入证据。", "review-repeat-recovery-failed", {
+        recoverable: true,
+        cause: recoveryError,
+        resolveError,
+        statusCode: recoveryError.statusCode,
+        data
+      });
+    }
+    return requestError("服务器尚未确认这组旧题已经退役。请手动重试；系统不会连续请求、换题或计分。", "review-repeat-not-confirmed", {
+      recoverable: true,
+      resolveError,
+      data
+    });
+  }
+
+  function ambiguousRepeatResolutionFailure(error) {
+    if (!error) return true;
+    if (error.recoverable || error.timedOut || error.name === "AbortError" || error instanceof TypeError) return true;
+    const status = Number(error.statusCode) || 0;
+    return status === 404 || status === 408 || status === 409 || status === 425 || status >= 500;
+  }
+
+  async function resolveRepeatedReviewBatchWithRecovery({
+    fetchImpl,
+    basePath = "/api/review/batches",
+    body,
+    resolveTimeoutMs = DEFAULT_REPEAT_RESOLVE_TIMEOUT_MS,
+    recoveryTimeoutMs = DEFAULT_REPEAT_RECOVERY_TIMEOUT_MS
+  } = {}) {
+    const requestBody = body && typeof body === "object" ? body : {};
+    const requestedBatchId = String(requestBody.batchId || "").trim();
+    const action = requestBody.action === "continue" ? "continue" : "discard";
+    let resolveError = null;
+    let responseData = null;
+    try {
+      const resolved = await fetchJsonWithTimeout(fetchImpl, `${basePath}/resolve-repeat`, {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+        timeoutLabel: "处理旧重复题组"
+      }, resolveTimeoutMs);
+      responseData = resolved.data;
+      if (resolved.ok && repeatResolutionWasApplied(responseData, requestedBatchId, action)) {
+        return { data: responseData, source: "resolve" };
+      }
+      resolveError = resolved.ok
+        ? requestError("服务器返回的旧题组处理结果不完整", "review-repeat-invalid-response", { recoverable: true, data: responseData })
+        : httpError(resolved, "旧重复题组处理失败，请稍后重试");
+      if (!ambiguousRepeatResolutionFailure(resolveError)) throw resolveError;
+    } catch (error) {
+      if (!ambiguousRepeatResolutionFailure(error)) throw error;
+      resolveError = error;
+      if (!responseData && error && error.data) responseData = error.data;
+    }
+
+    let recovered;
+    try {
+      recovered = await fetchJsonWithTimeout(fetchImpl, basePath, {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+        timeoutLabel: "核对旧题组状态"
+      }, recoveryTimeoutMs);
+    } catch (error) {
+      throw repeatResolutionFailure(resolveError, error, responseData);
+    }
+    if (!recovered.ok) {
+      throw repeatResolutionFailure(resolveError, httpError(recovered, "读取当前题组失败"), recovered.data || responseData);
+    }
+    const recoveredData = recovered.data && typeof recovered.data === "object" ? recovered.data : {};
+    if (repeatResolutionWasApplied(recoveredData, requestedBatchId, action)) {
+      return { data: recoveredData, source: "recovery", resolveErrorCode: String(resolveError && resolveError.code || "") };
+    }
+    const current = recoveredData.batch && typeof recoveredData.batch === "object" ? recoveredData.batch : null;
+    if (current && String(current.id || "") !== requestedBatchId) {
+      return {
+        data: { ...recoveredData, retiredBatchId: requestedBatchId },
+        source: "recovery-current",
+        resolveErrorCode: String(resolveError && resolveError.code || "")
+      };
+    }
+    if (current && String(current.id || "") === requestedBatchId) {
+      const originalMessage = String(resolveError && resolveError.message || "").trim();
+      throw requestError(originalMessage || "服务器仍保留这组旧题，尚未确认可以无证据退役。请手动重试。", "review-repeat-still-current", {
+        recoverable: true,
+        resolveError,
+        data: recoveredData
+      });
+    }
+    throw repeatResolutionFailure(resolveError, null, recoveredData);
+  }
+
   return {
     DEFAULT_START_TIMEOUT_MS,
     DEFAULT_RECOVERY_TIMEOUT_MS,
+    DEFAULT_REPEAT_RESOLVE_TIMEOUT_MS,
+    DEFAULT_REPEAT_RECOVERY_TIMEOUT_MS,
     fetchJsonWithTimeout,
+    repeatResolutionWasApplied,
+    resolveRepeatedReviewBatchWithRecovery,
     startReviewBatchWithRecovery
   };
 });

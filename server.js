@@ -340,7 +340,20 @@ function sanitizeState(value) {
 }
 
 function publicReviewState(value) {
-  const { aiExam, dictation, focusedPractice, teachingProfile, reviewVariantPool, selfStudy, formalPractice, aiPractice, sentencePracticeEvents, ...reviewState } = sanitizeState(value);
+  const state = sanitizeState(value);
+  const currentReviewBatch = state.formalPractice && state.formalPractice.review && state.formalPractice.review.current;
+  if (currentReviewBatch) {
+    const completedTaskIds = authoritativeCompletedReviewTaskIds(state, currentReviewBatch);
+    if (classifyRepeatedReviewBatch(currentReviewBatch, completedTaskIds)) {
+      const studyDate = reviewBatchSessionDate(currentReviewBatch);
+      state.sessions = state.sessions && typeof state.sessions === "object" ? state.sessions : {};
+      state.sessions[studyDate] = {
+        ...(state.sessions[studyDate] && typeof state.sessions[studyDate] === "object" ? state.sessions[studyDate] : { date: studyDate }),
+        doneTaskIds: completedTaskIds
+      };
+    }
+  }
+  const { aiExam, dictation, focusedPractice, teachingProfile, reviewVariantPool, selfStudy, formalPractice, aiPractice, sentencePracticeEvents, ...reviewState } = state;
   return { ...reviewState, aiPractice: publicAiPractice(aiPractice), formalPractice: publicFormalPractice(formalPractice), reviewVariantPool: publicReviewVariantPool(reviewVariantPool) };
 }
 
@@ -2772,7 +2785,10 @@ function saveFormalPracticeState(user, state, practice) {
 }
 
 function reviewBatchResponse(state) {
-  return { batch: publicReviewBatch(state.formalPractice && state.formalPractice.review && state.formalPractice.review.current) };
+  return {
+    batch: publicReviewBatch(state.formalPractice && state.formalPractice.review && state.formalPractice.review.current),
+    state: publicReviewState(state)
+  };
 }
 
 function reviewBatchSessionDate(batch) {
@@ -2783,6 +2799,24 @@ function reviewBatchSession(state, batch) {
   const studyDate = reviewBatchSessionDate(batch);
   const sessions = state.sessions && typeof state.sessions === "object" ? state.sessions : {};
   return sessions[studyDate] && typeof sessions[studyDate] === "object" ? sessions[studyDate] : { date: studyDate };
+}
+
+function authoritativeCompletedReviewTaskIds(state, batch) {
+  const studyDate = reviewBatchSessionDate(batch);
+  const completedHistoryTaskIds = sanitizeFormalPractice(state.formalPractice).review.history
+    .filter(item => item.phase === "completed" && reviewBatchSessionDate(item) === studyDate)
+    .flatMap(item => item.questions.map(question => question.taskId));
+  const attemptTaskIds = (Array.isArray(state.attempts) ? state.attempts : [])
+    .filter(item => item && item.formalEvidence === true && item.batchId && String(item.date || "").slice(0, 20) === studyDate)
+    .map(item => item.taskId);
+  return reviewSessionDoneTaskIds([...completedHistoryTaskIds, ...attemptTaskIds]);
+}
+
+function indexedCompletedReviewTaskIds(state, batch) {
+  return reviewSessionDoneTaskIds([
+    ...reviewSessionDoneTaskIds(reviewBatchSession(state, batch).doneTaskIds),
+    ...authoritativeCompletedReviewTaskIds(state, batch)
+  ]);
 }
 
 function reviewBatchWasRetired(state, batchId) {
@@ -2998,7 +3032,7 @@ function handleReviewBatches(req, res, url, user) {
       if (!taskIds.length) return sendError(res, 400, "review task IDs are required");
       const studyDate = String(body.date || today()).slice(0, 20);
       const allowRepeat = body.allowRepeat === true;
-      const completed = new Set(reviewSessionDoneTaskIds(reviewBatchSession(state, { date: studyDate }).doneTaskIds));
+      const completed = new Set(indexedCompletedReviewTaskIds(state, { date: studyDate }));
       const alreadyCompleted = taskIds.filter(taskId => completed.has(taskId));
       if (!allowRepeat && alreadyCompleted.length) {
         return sendJson(res, 409, {
@@ -3053,8 +3087,14 @@ function handleReviewBatches(req, res, url, user) {
         if (reviewBatchWasRetired(state, requestedBatchId)) return sendJson(res, 200, { batch: publicReviewBatch(batch), retiredBatchId: requestedBatchId, reused: true, state: publicReviewState(state) });
         return sendError(res, 404, "review batch not found");
       }
-      const repeated = classifyRepeatedReviewBatch(batch, reviewBatchSession(state, batch).doneTaskIds);
-      if (!repeated) return sendJson(res, 409, { error: "当前题组不是可处理的遗留重复组", batch: publicReviewBatch(batch) });
+      const completedTaskIds = authoritativeCompletedReviewTaskIds(state, batch);
+      const repeated = classifyRepeatedReviewBatch(batch, completedTaskIds);
+      if (!repeated) return sendJson(res, 409, {
+        code: "review_repeat_not_confirmed",
+        error: "服务器没有找到这组题已经正式完成的完整证据，已保留题组且未作任何改动",
+        batch: publicReviewBatch(batch),
+        state: publicReviewState(state)
+      });
       const action = String(body.action || "");
       if (action === "continue") {
         if (repeated.kind !== "draft") return sendJson(res, 409, { error: "空白重复组应直接换成新题", batch: publicReviewBatch(batch) });
@@ -3075,7 +3115,7 @@ function handleReviewBatches(req, res, url, user) {
           mode: batch.mode,
           taskIds,
           index: batch.index,
-          doneTaskIds: reviewSessionDoneTaskIds(session.doneTaskIds),
+          doneTaskIds: reviewSessionDoneTaskIds([...reviewSessionDoneTaskIds(session.doneTaskIds), ...completedTaskIds]),
           currentTaskId: taskIds[batch.index] || null,
           batchId: nextBatchId,
           batchComplete: false,

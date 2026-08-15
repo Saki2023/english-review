@@ -69,6 +69,8 @@
   const REVIEW_VARIANT_POLL_REQUEST_TIMEOUT_MS = 15000;
   const REVIEW_BATCH_START_TIMEOUT_MS = Number(REVIEW_BATCH_CLIENT.DEFAULT_START_TIMEOUT_MS) || 12000;
   const REVIEW_BATCH_RECOVERY_TIMEOUT_MS = Number(REVIEW_BATCH_CLIENT.DEFAULT_RECOVERY_TIMEOUT_MS) || 6000;
+  const REVIEW_REPEAT_RESOLVE_TIMEOUT_MS = Number(REVIEW_BATCH_CLIENT.DEFAULT_REPEAT_RESOLVE_TIMEOUT_MS) || 8000;
+  const REVIEW_REPEAT_RECOVERY_TIMEOUT_MS = Number(REVIEW_BATCH_CLIENT.DEFAULT_REPEAT_RECOVERY_TIMEOUT_MS) || 6000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
   const offlineStore = API_ENABLED && typeof OFFLINE_STORAGE.createOfflineStore === "function" ? OFFLINE_STORAGE.createOfflineStore(window) : null;
   let remoteReady = !API_ENABLED;
@@ -6069,21 +6071,28 @@
     reviewRepeatResolutionError = null;
     renderHome();
     try {
-      await reviewBatchRequest("/resolve-repeat", {
+      if (typeof REVIEW_BATCH_CLIENT.resolveRepeatedReviewBatchWithRecovery !== "function") throw new Error("旧题组恢复组件未加载，请刷新页面后重试");
+      const result = await REVIEW_BATCH_CLIENT.resolveRepeatedReviewBatchWithRecovery({
+        fetchImpl: (...args) => fetch(...args),
         body: {
           batchId: batch.id,
           action,
           confirmDiscard: action === "discard" && repeated.kind === "draft"
-        }
+        },
+        resolveTimeoutMs: REVIEW_REPEAT_RESOLVE_TIMEOUT_MS,
+        recoveryTimeoutMs: REVIEW_REPEAT_RECOVERY_TIMEOUT_MS
       });
       if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
+      applyReviewBatchResponse(result.data);
       reviewAnswerResetRequested = true;
-      if (action === "discard") startNextReviewGroup();
+      if (action === "discard" && !currentFormalReviewBatch()) startNextReviewGroup();
     } catch (error) {
       if (accountRequestContextIsCurrent(accountContext) && !error.silent) {
+        if (error && error.data && typeof error.data === "object") applyReviewBatchResponse(error.data);
         reviewRepeatResolutionError = {
           accountId: accountContext.userId,
           batchId: String(batch.id || ""),
+          code: String(error.code || "review-repeat-resolution-failed"),
           message: String(error.message || "重复题组处理失败，请稍后手动重试").slice(0, 300)
         };
         if (!automatic) showRequestError(error);
@@ -7902,7 +7911,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=63", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=64", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
