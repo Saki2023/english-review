@@ -892,6 +892,197 @@ test("legacy repeated batches retire empty state without evidence and protect dr
   }
 });
 
+test("per-question repeated drafts require explicit discard and retire without losing formal evidence", async () => {
+  const dataDir = temporaryDataDir();
+  const { owner } = createAccounts(dataDir);
+  const studyDate = "2026-08-16";
+  const originalBatchId = "review-immediate-original";
+  const legacyBatchId = "review-immediate-legacy-draft";
+  let app;
+  try {
+    app = await startApp(dataDir);
+    let cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const selected = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/mode", {
+      method: "POST",
+      body: { gradingMode: "immediate" }
+    });
+    assert.equal(selected.response.status, 200);
+    const started = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: {
+        batchId: originalBatchId,
+        date: studyDate,
+        mode: "word",
+        taskIds: ["d1-man:en-zh", "d1-mat:en-zh"]
+      }
+    });
+    assert.equal(started.response.status, 201);
+    const answers = { "d1-man:en-zh": "男人", "d1-mat:en-zh": "垫子" };
+    for (const question of started.body.batch.questions) {
+      const answered = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/answer", {
+        method: "POST",
+        body: {
+          batchId: originalBatchId,
+          questionId: question.id,
+          attemptRequestId: question.attemptRequestId,
+          answer: answers[question.taskId]
+        }
+      });
+      assert.equal(answered.response.status, 200);
+      const advanced = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/advance", {
+        method: "POST",
+        body: { batchId: originalBatchId, questionId: question.id }
+      });
+      assert.equal(advanced.response.status, 200);
+    }
+    const archived = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/archive", {
+      method: "POST",
+      body: { batchId: originalBatchId }
+    });
+    assert.equal(archived.response.status, 200);
+    const baseline = (await jsonRequest(app.baseUrl, cookie, "/api/state")).body;
+    assert.equal(baseline.attempts.length, 2);
+
+    await stopApp(app);
+    app = null;
+    const stateFile = path.join(dataDir, "user-states.json");
+    const disk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    const accountState = disk.users[owner.id];
+    const completed = accountState.formalPractice.review.history.find(item => item.id === originalBatchId);
+    assert.ok(completed, "the completed immediate batch must remain authoritative history");
+    const duplicate = JSON.parse(JSON.stringify(completed));
+    duplicate.id = legacyBatchId;
+    duplicate.phase = "answering";
+    duplicate.gradingMode = "immediate";
+    duplicate.index = 0;
+    duplicate.allowRepeat = false;
+    duplicate.completedAt = "";
+    duplicate.gradeRequestId = "";
+    duplicate.questions = duplicate.questions.map((question, index) => ({
+      ...question,
+      answer: index === 0 ? "暂存答案" : "",
+      draftUpdatedAt: index === 0 ? "2026-08-16T12:00:00.000Z" : "",
+      result: null,
+      completedAt: "",
+      attempts: [],
+      attemptRequestId: `reviewattempt-legacy-${index}`
+    }));
+    accountState.formalPractice.review.current = duplicate;
+    accountState.sessions[studyDate] = {
+      ...accountState.sessions[studyDate],
+      date: studyDate,
+      taskIds: duplicate.questions.map(question => question.taskId),
+      doneTaskIds: [],
+      index: 0,
+      currentTaskId: duplicate.questions[0].taskId,
+      batchId: legacyBatchId,
+      batchComplete: false,
+      allowRepeat: false,
+      retiredBatchIds: [],
+      updatedAt: "2026-08-16T12:00:00.000Z"
+    };
+    fs.writeFileSync(stateFile, `${JSON.stringify(disk, null, 2)}\n`, "utf8");
+
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const automatic = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: legacyBatchId, action: "discard", confirmDiscard: false }
+    });
+    assert.equal(automatic.response.status, 409);
+    assert.equal(automatic.body.code, "review_repeat_requires_explicit_choice");
+    assert.equal(automatic.body.requiresConfirmation, true);
+    assert.equal(automatic.body.batch.id, legacyBatchId);
+    assert.equal(automatic.body.batch.questions[0].answer, "", "unsubmitted immediate drafts must stay private");
+    const blockedDisk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    assert.equal(blockedDisk.users[owner.id].formalPractice.review.current.questions[0].answer, "暂存答案");
+    assert.equal(blockedDisk.users[owner.id].attempts.length, baseline.attempts.length);
+
+    const continued = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: legacyBatchId, action: "continue" }
+    });
+    assert.equal(continued.response.status, 200);
+    assert.notEqual(continued.body.batch.id, legacyBatchId);
+    assert.equal(continued.body.batch.recoveredFromBatchId, legacyBatchId);
+    assert.equal(continued.body.state.attempts.length, baseline.attempts.length);
+    assert.deepEqual(continued.body.state.history, baseline.history);
+    const continuedBatchId = continued.body.batch.id;
+    const continuedDisk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    assert.equal(continuedDisk.users[owner.id].formalPractice.review.current.id, continuedBatchId);
+    assert.equal(continuedDisk.users[owner.id].formalPractice.review.current.questions[0].answer, "暂存答案");
+
+    const continuedAgain = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: legacyBatchId, action: "continue" }
+    });
+    assert.equal(continuedAgain.response.status, 200);
+    assert.equal(continuedAgain.body.reused, true);
+    assert.equal(continuedAgain.body.batch.id, continuedBatchId);
+
+    await stopApp(app);
+    app = null;
+    const discardBatchId = "review-immediate-legacy-discard";
+    const discardDisk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    const discardState = discardDisk.users[owner.id];
+    discardState.formalPractice.review.current.id = discardBatchId;
+    discardState.formalPractice.review.current.allowRepeat = false;
+    discardState.formalPractice.review.current.recoveredFromBatchId = "";
+    discardState.sessions[studyDate] = {
+      ...discardState.sessions[studyDate],
+      batchId: discardBatchId,
+      allowRepeat: false,
+      batchComplete: false,
+      currentTaskId: discardState.formalPractice.review.current.questions[0].taskId,
+      updatedAt: "2026-08-16T12:05:00.000Z"
+    };
+    fs.writeFileSync(stateFile, `${JSON.stringify(discardDisk, null, 2)}\n`, "utf8");
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+
+    const discarded = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: discardBatchId, action: "discard", confirmDiscard: true }
+    });
+    assert.equal(discarded.response.status, 200);
+    assert.equal(discarded.body.batch, null);
+    assert.equal(discarded.body.state.attempts.length, baseline.attempts.length);
+    assert.deepEqual(discarded.body.state.history, baseline.history);
+    assert.ok(discarded.body.state.sessions[studyDate].retiredBatchIds.includes(discardBatchId));
+    assert.deepEqual(new Set(discarded.body.state.sessions[studyDate].doneTaskIds), new Set(["d1-man:en-zh", "d1-mat:en-zh"]));
+
+    const retried = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/resolve-repeat", {
+      method: "POST",
+      body: { batchId: discardBatchId, action: "discard", confirmDiscard: true }
+    });
+    assert.equal(retried.response.status, 200);
+    assert.equal(retried.body.reused, true);
+    assert.equal(retried.body.batch, null);
+
+    await stopApp(app);
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const restored = await jsonRequest(app.baseUrl, cookie, "/api/review/batches");
+    assert.equal(restored.body.batch, null);
+    assert.ok(restored.body.state.sessions[studyDate].retiredBatchIds.includes(discardBatchId));
+    assert.equal(restored.body.state.attempts.length, baseline.attempts.length);
+
+    const nextTask = learnedWordReviewTasks(8).find(item => !["d1-man:en-zh", "d1-mat:en-zh"].includes(item.taskId));
+    assert.ok(nextTask, "a non-completed task is required for the replacement batch");
+    const replacement = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: { batchId: "review-immediate-replacement", date: studyDate, mode: "word", taskIds: [nextTask.taskId] }
+    });
+    assert.equal(replacement.response.status, 201);
+    assert.notEqual(replacement.body.batch.id, legacyBatchId);
+    assert.notEqual(replacement.body.batch.id, discardBatchId);
+    assert.equal(new Set(["d1-man:en-zh", "d1-mat:en-zh"]).has(replacement.body.batch.questions[0].taskId), false);
+  } finally {
+    await stopApp(app);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("completed formal evidence repairs a missing doneTaskIds index before an empty legacy batch retires", async () => {
   const dataDir = temporaryDataDir();
   const { owner } = createAccounts(dataDir);

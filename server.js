@@ -3044,13 +3044,16 @@ function reviewBatchWasRetired(state, batchId) {
   ));
 }
 
-function retireReviewBatchState(state, batch, updatedAt) {
+function retireReviewBatchState(state, batch, updatedAt, completedTaskIds = null) {
   const studyDate = reviewBatchSessionDate(batch);
   state.sessions = state.sessions && typeof state.sessions === "object" ? state.sessions : {};
+  const retainedTaskIds = completedTaskIds === null
+    ? (Array.isArray(batch && batch.questions) ? batch.questions : []).map(question => question && question.taskId)
+    : completedTaskIds;
   state.sessions[studyDate] = retireReviewSession(
     reviewBatchSession(state, batch),
     batch && batch.id,
-    (Array.isArray(batch && batch.questions) ? batch.questions : []).map(question => question && question.taskId),
+    retainedTaskIds,
     updatedAt
   );
   return state.sessions[studyDate];
@@ -3550,9 +3553,14 @@ function handleReviewBatches(req, res, url, user) {
         if (reviewBatchWasRetired(state, requestedBatchId)) return sendJson(res, 200, { batch: publicReviewBatch(batch), retiredBatchId: requestedBatchId, reused: true, state: publicFormalEvidenceState(state) });
         return sendError(res, 404, "review batch not found");
       }
-      if (batch.gradingMode === "immediate") return sendJson(res, 409, {
-        code: "review_repeat_not_confirmed",
-        error: "逐题批改题组包含独立正式尝试，不能按旧版空草稿自动处理",
+      const action = String(body.action || "");
+      if (!["continue", "discard"].includes(action)) return sendError(res, 400, "repeat resolution action is required");
+      const explicitDiscard = action === "discard" && body.confirmDiscard === true;
+      const explicitChoice = action === "continue" || explicitDiscard;
+      if (batch.gradingMode === "immediate" && !explicitChoice) return sendJson(res, 409, {
+        code: "review_repeat_requires_explicit_choice",
+        error: "逐题批改题组包含独立正式尝试，请明确选择继续当前草稿或放弃草稿并换新题",
+        requiresConfirmation: true,
         batch: publicReviewBatch(batch),
         state: publicFormalEvidenceState(state)
       });
@@ -3564,7 +3572,6 @@ function handleReviewBatches(req, res, url, user) {
         batch: publicReviewBatch(batch),
         state: publicFormalEvidenceState(state)
       });
-      const action = String(body.action || "");
       if (action === "continue") {
         if (repeated.kind !== "draft") return sendJson(res, 409, { error: "空白重复组应直接换成新题", batch: publicReviewBatch(batch) });
         const previousBatchId = batch.id;
@@ -3603,7 +3610,7 @@ function handleReviewBatches(req, res, url, user) {
       }
       practice.review.current = null;
       practice.updatedAt = now;
-      retireReviewBatchState(state, batch, now);
+      retireReviewBatchState(state, batch, now, completedTaskIds);
       saveFormalPracticeState(user, state, practice);
       const saved = getUserState(user);
       return sendJson(res, 200, { batch: null, retiredBatchId: requestedBatchId, reused: false, state: publicFormalEvidenceState(saved) });
