@@ -1,6 +1,8 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const {
+  EVIDENCE_REPAIR_VERSION,
   NATURAL_DEEP_EXPLANATION,
   NATURAL_PERSON_MEASURE_EXPLANATION,
   OPTIONAL_MEASURE_OMISSION_EXPLANATION,
@@ -21,6 +23,34 @@ const {
   repairReviewEvidence
 } = require("../answer-utils");
 const { expandRegisteredChineseAnswers, naturalizePlainDeepChinese } = require("../review-variants");
+
+const LEARNING_EVIDENCE_REPAIR_VERSION = 1;
+
+function repairContentItemSignature(value) {
+  const item = value && typeof value === "object" ? value : {};
+  return {
+    id: String(item.id || ""),
+    day: Number(item.day) || 0,
+    english: String(item.english || ""),
+    chinese: String(item.chinese || ""),
+    acceptedEnglish: Array.isArray(item.acceptedEnglish) ? item.acceptedEnglish.map(String) : [],
+    acceptedChinese: Array.isArray(item.acceptedChinese) ? item.acceptedChinese.map(String) : [],
+    directions: Array.isArray(item.directions) ? item.directions.map(String) : [],
+    learned: String(item.learned || ""),
+    preview: item.preview === true
+  };
+}
+
+function learningEvidenceRepairSignature(content = {}) {
+  const byId = (left, right) => String(left && left.id || "").localeCompare(String(right && right.id || ""));
+  const payload = {
+    version: LEARNING_EVIDENCE_REPAIR_VERSION,
+    reviewVersion: EVIDENCE_REPAIR_VERSION,
+    words: (Array.isArray(content.words) ? content.words : []).map(repairContentItemSignature).sort(byId),
+    sentences: (Array.isArray(content.sentences) ? content.sentences : []).map(repairContentItemSignature).sort(byId)
+  };
+  return `learning-evidence-v${LEARNING_EVIDENCE_REPAIR_VERSION}-${crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex")}`;
+}
 
 function correctedAiHistoryItem(value, content = {}) {
   const item = value && typeof value === "object" ? value : {};
@@ -266,8 +296,10 @@ function repairLearningEvidence(content, stateValue) {
 }
 
 module.exports = {
+  LEARNING_EVIDENCE_REPAIR_VERSION,
   correctedAiHistoryItem,
   isKnownSemanticPromptIssue,
+  learningEvidenceRepairSignature,
   repairAiExam,
   repairAiPractice,
   repairLearningEvidence

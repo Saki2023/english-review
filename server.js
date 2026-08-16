@@ -5,7 +5,7 @@ const vm = require("vm");
 const crypto = require("crypto");
 const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
-const { NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults, mistakeIsResolved } = require("./answer-utils");
+const { NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults, mistakeIsResolved, repairReviewEvidence } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
 const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, offlineAiPractice, publicAiPractice, publicQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { createReviewBatch, publicFormalPractice, publicReviewBatch, sanitizeFormalPractice, sanitizeReviewBatch, sanitizeReviewResult } = require("./server/formal-practice");
@@ -30,8 +30,8 @@ const {
   storeReviewVariantPoolResults
 } = require("./server/review-variant-pool");
 const { expandPreviewAcceptedChinese, normalizePreviewSchoolSentence, sanitizePreviewPractice, sanitizePreviewPracticeHistory } = require("./server/preview-practice");
-const { repairLearningEvidence } = require("./server/evidence-repair");
-const { normalizeStudyTime } = require("./study-time");
+const { learningEvidenceRepairSignature, repairLearningEvidence } = require("./server/evidence-repair");
+const { mergeStudyTime, normalizeStudyTime } = require("./study-time");
 const {
   addTutorQuestion,
   continueSelfStudyStep,
@@ -139,7 +139,7 @@ const reviewVariantPoolJobsByUserId = new Map();
 const reviewVariantPoolRetryTimersByUserId = new Map();
 const selfStudyLocksByUserId = new Map();
 const formalPracticeLocksByUserId = new Map();
-const legacyState = repairLearningEvidence(content, sanitizeState(readJson(LEGACY_STATE_FILE, {}))).state;
+const legacyState = markLearningEvidenceRepaired(repairLearningEvidence(content, sanitizeState(readJson(LEGACY_STATE_FILE, {}))).state);
 repairStoredUserStates();
 
 function ensureDataDir() { fs.mkdirSync(DATA_DIR, { recursive: true }); }
@@ -148,9 +148,9 @@ function readJson(filePath, fallback) {
   try { return JSON.parse(fs.readFileSync(filePath, "utf8")); } catch (_) { return fallback; }
 }
 
-function writeJson(filePath, value) {
+function writeJson(filePath, value, { pretty = true } = {}) {
   const temporary = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  fs.writeFileSync(temporary, `${JSON.stringify(value, null, pretty ? 2 : 0)}\n`, "utf8");
   fs.renameSync(temporary, filePath);
 }
 
@@ -165,7 +165,7 @@ function recoverSelfStudyTransaction() {
 function persistSelfStudyTransaction(nextContent, nextUserStates) {
   writeJson(SELF_STUDY_TRANSACTION_FILE, { schema: 1, createdAt: new Date().toISOString(), content: nextContent, userStates: nextUserStates });
   writeJson(CONTENT_FILE, nextContent);
-  writeJson(USER_STATES_FILE, nextUserStates);
+  writeJson(USER_STATES_FILE, nextUserStates, { pretty: false });
   fs.rmSync(SELF_STUDY_TRANSACTION_FILE, { force: true });
 }
 
@@ -370,11 +370,29 @@ function mergeReviewSessionStates(existingValue, incomingValue) {
   return Object.fromEntries(Array.from(dates).map(date => [date, mergeReviewSessionState(existing[date], incoming[date])]));
 }
 
+function currentLearningEvidenceRepairSignature() {
+  return learningEvidenceRepairSignature(content);
+}
+
+function markLearningEvidenceRepaired(state, signature = currentLearningEvidenceRepairSignature()) {
+  state.repairSignature = signature;
+  return state;
+}
+
+function migrateAccountState(value, signature = currentLearningEvidenceRepairSignature()) {
+  const normalized = sanitizeState(value);
+  const repaired = repairLearningEvidence(content, normalized);
+  const repairedWordMeanings = repairStoredPracticeWordMeanings(repaired.state);
+  markLearningEvidenceRepaired(repaired.state, signature);
+  return { state: repaired.state, changed: repaired.changed || repairedWordMeanings || normalized.repairSignature !== signature };
+}
+
 function sanitizeState(value) {
   const source = value && typeof value === "object" ? value : {};
   return {
     schema: 1,
     evidenceRepairVersion: Math.max(0, Number(source.evidenceRepairVersion) || 0),
+    repairSignature: String(source.repairSignature || "").trim().slice(0, 120),
     taskStates: source.taskStates && typeof source.taskStates === "object" ? source.taskStates : {},
     history: source.history && typeof source.history === "object" ? source.history : {},
     attempts: Array.isArray(source.attempts) ? source.attempts.slice(-120) : [],
@@ -395,25 +413,63 @@ function sanitizeState(value) {
   };
 }
 
-function publicReviewState(value) {
-  const state = sanitizeState(value);
+function publicReviewSessions(state) {
+  let sessions = state.sessions && typeof state.sessions === "object" ? state.sessions : {};
   const currentReviewBatch = state.formalPractice && state.formalPractice.review && state.formalPractice.review.current;
   if (currentReviewBatch) {
     const completedTaskIds = authoritativeCompletedReviewTaskIds(state, currentReviewBatch);
     if (classifyRepeatedReviewBatch(currentReviewBatch, completedTaskIds)) {
       const studyDate = reviewBatchSessionDate(currentReviewBatch);
-      state.sessions = state.sessions && typeof state.sessions === "object" ? state.sessions : {};
-      state.sessions[studyDate] = {
-        ...(state.sessions[studyDate] && typeof state.sessions[studyDate] === "object" ? state.sessions[studyDate] : { date: studyDate }),
+      sessions = {
+        ...sessions,
+        [studyDate]: {
+        ...(sessions[studyDate] && typeof sessions[studyDate] === "object" ? sessions[studyDate] : { date: studyDate }),
         doneTaskIds: completedTaskIds
+        }
       };
     }
   }
-  const { aiExam, dictation, focusedPractice, teachingProfile, reviewVariantPool, selfStudy, formalPractice, aiPractice, sentencePracticeEvents, ...reviewState } = state;
-  return { ...reviewState, aiPractice: publicAiPractice(aiPractice), formalPractice: publicFormalPractice(formalPractice), reviewVariantPool: publicReviewVariantPool(reviewVariantPool) };
+  return sessions;
 }
 
-function defaultState() { return repairLearningEvidence(content, sanitizeState({})).state; }
+function publicReviewState(value) {
+  const state = value && typeof value === "object" ? value : defaultState();
+  return {
+    schema: 1,
+    evidenceRepairVersion: Math.max(0, Number(state.evidenceRepairVersion) || 0),
+    taskStates: state.taskStates && typeof state.taskStates === "object" ? state.taskStates : {},
+    history: state.history && typeof state.history === "object" ? state.history : {},
+    attempts: Array.isArray(state.attempts) ? state.attempts : [],
+    sessions: publicReviewSessions(state),
+    mistakes: Array.isArray(state.mistakes) ? state.mistakes : [],
+    studyTime: state.studyTime,
+    previewPractice: state.previewPractice,
+    previewPracticeHistory: state.previewPracticeHistory,
+    aiPractice: publicAiPractice(state.aiPractice),
+    formalPractice: publicFormalPractice(state.formalPractice),
+    reviewVariantPool: publicReviewVariantPool(state.reviewVariantPool)
+  };
+}
+
+function publicFormalEvidenceState(value) {
+  const state = value && typeof value === "object" ? value : defaultState();
+  return {
+    schema: 1,
+    evidenceRepairVersion: Math.max(0, Number(state.evidenceRepairVersion) || 0),
+    taskStates: state.taskStates && typeof state.taskStates === "object" ? state.taskStates : {},
+    history: state.history && typeof state.history === "object" ? state.history : {},
+    attempts: Array.isArray(state.attempts) ? state.attempts : [],
+    sessions: publicReviewSessions(state),
+    mistakes: Array.isArray(state.mistakes) ? state.mistakes : [],
+    studyTime: state.studyTime,
+    previewPractice: state.previewPractice,
+    previewPracticeHistory: state.previewPracticeHistory
+  };
+}
+
+function defaultState() {
+  return markLearningEvidenceRepaired(repairLearningEvidence(content, sanitizeState({})).state);
+}
 function isEmptyState(value) {
   const studyTime = normalizeStudyTime(value && value.studyTime);
   return !value || (!Object.keys(value.taskStates || {}).length
@@ -435,7 +491,7 @@ function loadUserStates() {
 }
 
 function persistSessions() { writeJson(SESSIONS_FILE, sessions); }
-function persistUserStates() { writeJson(USER_STATES_FILE, userStates); }
+function persistUserStates() { writeJson(USER_STATES_FILE, userStates, { pretty: false }); }
 function persistContent() { writeJson(CONTENT_FILE, content); }
 function refreshUsers() { users = loadUsers(DATA_DIR); }
 function refreshAiSettings() {
@@ -485,21 +541,21 @@ function recoverInterruptedFormalWork(state) {
 
 function repairStoredUserStates() {
   let changed = false;
+  const signature = currentLearningEvidenceRepairSignature();
   Object.entries(userStates.users).forEach(([userId, value]) => {
-    const normalized = sanitizeState(value);
+    const migrated = migrateAccountState(value, signature);
+    const normalized = migrated.state;
     const interrupted = recoverInterruptedFormalWork(normalized);
-    const repaired = repairLearningEvidence(content, normalized);
-    const repairedWordMeanings = repairStoredPracticeWordMeanings(repaired.state);
-    const ensuredPool = ensureReviewVariantPool(repaired.state.reviewVariantPool, {
+    const ensuredPool = ensureReviewVariantPool(normalized.reviewVariantPool, {
       date: today(),
       syncKey: reviewVariantSyncKey(content),
       contentSignature: reviewVariantContentSignature(content),
       content,
       targetCount: REVIEW_VARIANT_POOL_TARGET
     });
-    repaired.state.reviewVariantPool = ensuredPool.pool;
-    userStates.users[userId] = repaired.state;
-    if (interrupted || repaired.changed || repairedWordMeanings || ensuredPool.changed || JSON.stringify(repaired.state) !== JSON.stringify(value)) changed = true;
+    normalized.reviewVariantPool = ensuredPool.pool;
+    userStates.users[userId] = normalized;
+    if (interrupted || migrated.changed || ensuredPool.changed || JSON.stringify(normalized) !== JSON.stringify(value)) changed = true;
   });
   if (changed) persistUserStates();
 }
@@ -586,14 +642,13 @@ function getUserState(user) {
   let changed = false;
   if (!userStates.users[user.id]) {
     const canMigrate = user.role === "admin" && users.users.length === 1 && !isEmptyState(legacyState);
-    userStates.users[user.id] = canMigrate ? legacyState : defaultState();
+    userStates.users[user.id] = canMigrate ? markLearningEvidenceRepaired(legacyState) : defaultState();
     changed = true;
-  } else {
-    const repaired = repairLearningEvidence(content, sanitizeState(userStates.users[user.id]));
-    userStates.users[user.id] = repaired.state;
-    if (repaired.changed) changed = true;
+  } else if (userStates.users[user.id].repairSignature !== currentLearningEvidenceRepairSignature()) {
+    const migrated = migrateAccountState(userStates.users[user.id]);
+    userStates.users[user.id] = migrated.state;
+    changed = true;
   }
-  if (repairStoredPracticeWordMeanings(userStates.users[user.id])) changed = true;
   const ensured = ensureReviewVariantPool(userStates.users[user.id].reviewVariantPool, {
     date: today(),
     syncKey: reviewVariantSyncKey(content),
@@ -839,25 +894,66 @@ function handleContent(req, res, url, user) {
   return sendError(res, 404, "content endpoint not found");
 }
 
+function jsonValuesEqual(left, right) {
+  if (left === right) return true;
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function mergeClientWritableState(existingValue, bodyValue) {
+  const existing = existingValue && typeof existingValue === "object" ? existingValue : defaultState();
+  const body = bodyValue && typeof bodyValue === "object" ? bodyValue : {};
+  const next = { ...existing };
+  let changed = false;
+  let evidenceChanged = false;
+  const replace = (key, value, evidence = false) => {
+    if (jsonValuesEqual(existing[key], value)) return;
+    next[key] = value;
+    changed = true;
+    if (evidence) evidenceChanged = true;
+  };
+
+  if (Object.hasOwn(body, "taskStates")) replace("taskStates", body.taskStates && typeof body.taskStates === "object" ? body.taskStates : {}, true);
+  if (Object.hasOwn(body, "history")) replace("history", body.history && typeof body.history === "object" ? body.history : {}, true);
+  if (Object.hasOwn(body, "attempts")) replace("attempts", Array.isArray(body.attempts) ? body.attempts.slice(-120) : [], true);
+  if (Object.hasOwn(body, "sessions")) replace("sessions", mergeReviewSessionStates(existing.sessions, body.sessions));
+  if (Object.hasOwn(body, "mistakes")) replace("mistakes", Array.isArray(body.mistakes) ? body.mistakes.slice(-80) : [], true);
+  if (Object.hasOwn(body, "studyTime")) replace("studyTime", mergeStudyTime(body.studyTime, existing.studyTime));
+  if (Object.hasOwn(body, "previewPractice")) replace("previewPractice", sanitizePreviewPractice(body.previewPractice, content));
+  if (Object.hasOwn(body, "previewPracticeHistory")) replace("previewPracticeHistory", sanitizePreviewPracticeHistory(body.previewPracticeHistory, content));
+
+  if (evidenceChanged) {
+    const repaired = repairReviewEvidence(content, next);
+    if (repaired.changed || repaired.state !== next) {
+      Object.assign(next, repaired.state);
+      changed = true;
+    }
+  }
+  markLearningEvidenceRepaired(next);
+  return { state: next, changed };
+}
+
+function handleStudyTimeState(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "PUT") return sendError(res, 404, "study time endpoint not found");
+  return readBody(req).then(body => withFormalPracticeLock(user.id, async () => {
+    const existing = getUserState(user);
+    const studyTime = mergeStudyTime(body && body.studyTime, existing.studyTime);
+    if (!jsonValuesEqual(studyTime, existing.studyTime)) {
+      userStates.users[user.id] = { ...existing, studyTime };
+      persistUserStates();
+    }
+    sendJson(res, 200, { ok: true, studyTime });
+  }, "state:study-time")).catch(error => sendError(res, error.statusCode || 400, error.message));
+}
+
 function handleState(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method === "GET") return sendJson(res, 200, publicReviewState(getUserState(user)));
   if (req.method === "PUT") return readBody(req).then(body => withFormalPracticeLock(user.id, async () => {
     const existing = getUserState(user);
-    userStates.users[user.id] = repairLearningEvidence(content, sanitizeState({
-      ...body,
-      sessions: mergeReviewSessionStates(existing.sessions, body.sessions),
-      aiPractice: existing.aiPractice,
-      formalPractice: existing.formalPractice,
-      sentencePracticeEvents: existing.sentencePracticeEvents,
-      aiExam: existing.aiExam,
-      dictation: existing.dictation,
-      focusedPractice: existing.focusedPractice,
-      teachingProfile: existing.teachingProfile,
-      reviewVariantPool: existing.reviewVariantPool,
-      selfStudy: existing.selfStudy
-    })).state;
-    persistUserStates();
+    const merged = mergeClientWritableState(existing, body);
+    userStates.users[user.id] = merged.state;
+    if (merged.changed) persistUserStates();
     sendJson(res, 200, publicReviewState(userStates.users[user.id]));
   })).catch(error => sendError(res, error.statusCode || 400, error.message));
   return sendError(res, 404, "state endpoint not found");
@@ -2848,9 +2944,28 @@ function reviewQuestionSnapshot(user, taskId, variantId = "") {
   };
 }
 
+function cloneFormalPractice(value) {
+  return deepClone(value && typeof value === "object" ? value : sanitizeFormalPractice(null));
+}
+
+function cloneFormalMutationState(value) {
+  const state = value && typeof value === "object" ? value : defaultState();
+  return {
+    ...state,
+    taskStates: { ...(state.taskStates && typeof state.taskStates === "object" ? state.taskStates : {}) },
+    history: { ...(state.history && typeof state.history === "object" ? state.history : {}) },
+    attempts: Array.isArray(state.attempts) ? [...state.attempts] : [],
+    sessions: { ...(state.sessions && typeof state.sessions === "object" ? state.sessions : {}) },
+    mistakes: Array.isArray(state.mistakes) ? [...state.mistakes] : [],
+    sentencePracticeEvents: Array.isArray(state.sentencePracticeEvents) ? [...state.sentencePracticeEvents] : [],
+    formalPractice: cloneFormalPractice(state.formalPractice)
+  };
+}
+
 function saveFormalPracticeState(user, state, practice) {
-  state.formalPractice = sanitizeFormalPractice(practice);
-  userStates.users[user.id] = sanitizeState(state);
+  state.formalPractice = practice;
+  markLearningEvidenceRepaired(state);
+  userStates.users[user.id] = state;
   persistUserStates();
   return userStates.users[user.id].formalPractice;
 }
@@ -2858,7 +2973,7 @@ function saveFormalPracticeState(user, state, practice) {
 function reviewBatchResponse(state) {
   return {
     batch: publicReviewBatch(state.formalPractice && state.formalPractice.review && state.formalPractice.review.current),
-    state: publicReviewState(state)
+    state: publicFormalEvidenceState(state)
   };
 }
 
@@ -2874,7 +2989,8 @@ function reviewBatchSession(state, batch) {
 
 function authoritativeCompletedReviewTaskIds(state, batch) {
   const studyDate = reviewBatchSessionDate(batch);
-  const completedHistoryTaskIds = sanitizeFormalPractice(state.formalPractice).review.history
+  const formalPractice = state.formalPractice && state.formalPractice.review ? state.formalPractice : sanitizeFormalPractice(null);
+  const completedHistoryTaskIds = formalPractice.review.history
     .filter(item => item.phase === "completed" && reviewBatchSessionDate(item) === studyDate)
     .flatMap(item => item.questions.map(question => question.taskId));
   const attemptTaskIds = (Array.isArray(state.attempts) ? state.attempts : [])
@@ -3015,14 +3131,14 @@ function updateFormalSchedule(state, question, result, studyDate) {
 
 function applyCompletedReviewBatch(user, expectedBatch, results) {
   const latest = getUserState(user);
-  const practice = sanitizeFormalPractice(latest.formalPractice);
+  const practice = latest.formalPractice;
   const current = practice.review.current;
   if (!current || current.id !== expectedBatch.id) throw Object.assign(new Error("review batch changed while grading"), { statusCode: 409 });
   if (current.phase === "completed") return latest;
   if (current.gradeRequestId !== expectedBatch.gradeRequestId) throw Object.assign(new Error("review grading request changed"), { statusCode: 409 });
 
-  const next = sanitizeState(JSON.parse(JSON.stringify(latest)));
-  const nextPractice = sanitizeFormalPractice(next.formalPractice);
+  const next = cloneFormalMutationState(latest);
+  const nextPractice = next.formalPractice;
   const batch = nextPractice.review.current;
   const studyDate = batch.date || today();
   const completedAt = new Date().toISOString();
@@ -3086,7 +3202,7 @@ function applyCompletedReviewBatch(user, expectedBatch, results) {
     correct: item.correct === true && item.gradingStatus !== "partial" && Number(item.score) >= 1,
     source: "review"
   })));
-  const history = next.history[studyDate] && typeof next.history[studyDate] === "object" ? next.history[studyDate] : { reviewed: 0, correct: 0 };
+  const history = next.history[studyDate] && typeof next.history[studyDate] === "object" ? { ...next.history[studyDate] } : { reviewed: 0, correct: 0 };
   history.reviewed = (Number(history.reviewed) || 0) + newAttempts.length;
   history.correct = Math.round(((Number(history.correct) || 0) + results.reduce((sum, result) => sum + result.score, 0)) * 100) / 100;
   next.history[studyDate] = history;
@@ -3119,7 +3235,8 @@ function applyCompletedReviewBatch(user, expectedBatch, results) {
   batch.lastError = "";
   nextPractice.updatedAt = completedAt;
   next.formalPractice = nextPractice;
-  userStates.users[user.id] = sanitizeState(next);
+  markLearningEvidenceRepaired(next);
+  userStates.users[user.id] = next;
   persistUserStates();
   return userStates.users[user.id];
 }
@@ -3177,7 +3294,7 @@ function findImmediateAttempt(batch, attemptId) {
 
 function applyImmediateReviewAttempt(user, expectedBatch, questionId, attemptId, answer, rawResult) {
   const latest = getUserState(user);
-  const practice = sanitizeFormalPractice(latest.formalPractice);
+  const practice = latest.formalPractice;
   const current = practice.review.current;
   if (!current || current.id !== expectedBatch.id) throw Object.assign(new Error("review batch changed while grading"), { statusCode: 409 });
   const existing = findImmediateAttempt(current, attemptId);
@@ -3194,8 +3311,8 @@ function applyImmediateReviewAttempt(user, expectedBatch, questionId, attemptId,
 
   const result = sanitizeReviewResult(rawResult);
   if (!result) throw Object.assign(new Error("review grade is invalid"), { statusCode: 503 });
-  const next = sanitizeState(JSON.parse(JSON.stringify(latest)));
-  const nextPractice = sanitizeFormalPractice(next.formalPractice);
+  const next = cloneFormalMutationState(latest);
+  const nextPractice = next.formalPractice;
   const batch = nextPractice.review.current;
   const question = batch.questions[batch.index];
   const submittedAt = new Date().toISOString();
@@ -3238,7 +3355,7 @@ function applyImmediateReviewAttempt(user, expectedBatch, questionId, attemptId,
     correct: result.correct === true && result.gradingStatus !== "partial" && Number(result.score) >= 1,
     source: "review"
   }]);
-  const history = next.history[studyDate] && typeof next.history[studyDate] === "object" ? next.history[studyDate] : { reviewed: 0, correct: 0 };
+  const history = next.history[studyDate] && typeof next.history[studyDate] === "object" ? { ...next.history[studyDate] } : { reviewed: 0, correct: 0 };
   history.reviewed = (Number(history.reviewed) || 0) + 1;
   history.correct = Math.round(((Number(history.correct) || 0) + Number(result.score || 0)) * 100) / 100;
   next.history[studyDate] = history;
@@ -3278,14 +3395,15 @@ function applyImmediateReviewAttempt(user, expectedBatch, questionId, attemptId,
   batch.lastError = "";
   nextPractice.updatedAt = submittedAt;
   next.formalPractice = nextPractice;
-  userStates.users[user.id] = sanitizeState(next);
+  markLearningEvidenceRepaired(next);
+  userStates.users[user.id] = next;
   persistUserStates();
   return { state: userStates.users[user.id], reused: false };
 }
 
 function advanceImmediateReviewQuestion(user, expectedBatchId, questionId) {
   const latest = getUserState(user);
-  const practice = sanitizeFormalPractice(latest.formalPractice);
+  const practice = latest.formalPractice;
   const current = practice.review.current;
   if (!current || current.id !== expectedBatchId) throw Object.assign(new Error("review batch not found"), { statusCode: 404 });
   if (current.gradingMode !== "immediate") throw Object.assign(new Error("当前题组不是逐题批改模式"), { statusCode: 409 });
@@ -3295,8 +3413,8 @@ function advanceImmediateReviewQuestion(user, expectedBatchId, questionId) {
   if (current.phase !== "answering" || requestedIndex !== current.index) throw Object.assign(new Error("review question changed"), { statusCode: 409 });
   if (!immediateQuestionCompleted(current.questions[requestedIndex])) throw Object.assign(new Error("本题尚未完全答对，请先完成订正"), { statusCode: 409 });
 
-  const next = sanitizeState(JSON.parse(JSON.stringify(latest)));
-  const nextPractice = sanitizeFormalPractice(next.formalPractice);
+  const next = cloneFormalMutationState(latest);
+  const nextPractice = next.formalPractice;
   const batch = nextPractice.review.current;
   const question = batch.questions[requestedIndex];
   const now = new Date().toISOString();
@@ -3332,7 +3450,8 @@ function advanceImmediateReviewQuestion(user, expectedBatchId, questionId) {
   };
   nextPractice.updatedAt = now;
   next.formalPractice = nextPractice;
-  userStates.users[user.id] = sanitizeState(next);
+  markLearningEvidenceRepaired(next);
+  userStates.users[user.id] = next;
   persistUserStates();
   return { state: userStates.users[user.id], reused: false };
 }
@@ -3343,7 +3462,7 @@ function handleReviewBatches(req, res, url, user) {
   if (req.method === "GET" && suffix === "/") return sendJson(res, 200, reviewBatchResponse(getUserState(user)));
   return readBody(req).then(body => withFormalPracticeLock(user.id, async () => {
     const state = getUserState(user);
-    const practice = sanitizeFormalPractice(state.formalPractice);
+    const practice = cloneFormalPractice(state.formalPractice);
     const now = new Date().toISOString();
     if (suffix === "/mode" && req.method === "POST") {
       const gradingMode = ["group", "immediate"].includes(body.gradingMode) ? body.gradingMode : "";
@@ -3382,7 +3501,7 @@ function handleReviewBatches(req, res, url, user) {
           code: "review_tasks_already_completed",
           error: "这组题包含今天已经完成的内容，已阻止重复建组",
           completedTaskIds: alreadyCompleted,
-          state: publicReviewState(state)
+          state: publicFormalEvidenceState(state)
         });
       }
       refreshContent();
@@ -3407,13 +3526,13 @@ function handleReviewBatches(req, res, url, user) {
     if (suffix === "/archive" && req.method === "POST") {
       const current = practice.review.current;
       if (!current) {
-        if (reviewBatchWasRetired(state, requestedBatchId)) return sendJson(res, 200, { batch: null, archivedBatchId: requestedBatchId, reused: true, state: publicReviewState(state) });
+        if (reviewBatchWasRetired(state, requestedBatchId)) return sendJson(res, 200, { batch: null, archivedBatchId: requestedBatchId, reused: true, state: publicFormalEvidenceState(state) });
         const archived = practice.review.history.find(item => item.id === requestedBatchId && item.phase === "completed");
         if (!archived) return sendError(res, 404, "review batch not found");
         retireReviewBatchState(state, archived, now);
         saveFormalPracticeState(user, state, practice);
         const saved = getUserState(user);
-        return sendJson(res, 200, { batch: null, archivedBatchId: requestedBatchId, reused: true, state: publicReviewState(saved) });
+        return sendJson(res, 200, { batch: null, archivedBatchId: requestedBatchId, reused: true, state: publicFormalEvidenceState(saved) });
       }
       if (current.id !== requestedBatchId) return sendJson(res, 409, { error: "另一个复习题组正在进行", batch: publicReviewBatch(current) });
       if (current.phase !== "completed") return sendJson(res, 409, { error: "题组尚未完成", batch: publicReviewBatch(current) });
@@ -3423,19 +3542,19 @@ function handleReviewBatches(req, res, url, user) {
       practice.updatedAt = now;
       saveFormalPracticeState(user, state, practice);
       const saved = getUserState(user);
-      return sendJson(res, 200, { batch: null, archivedBatchId: requestedBatchId, reused: false, state: publicReviewState(saved) });
+      return sendJson(res, 200, { batch: null, archivedBatchId: requestedBatchId, reused: false, state: publicFormalEvidenceState(saved) });
     }
     if (suffix === "/resolve-repeat" && req.method === "POST") {
       const batch = practice.review.current;
       if (!batch || batch.id !== requestedBatchId) {
-        if (reviewBatchWasRetired(state, requestedBatchId)) return sendJson(res, 200, { batch: publicReviewBatch(batch), retiredBatchId: requestedBatchId, reused: true, state: publicReviewState(state) });
+        if (reviewBatchWasRetired(state, requestedBatchId)) return sendJson(res, 200, { batch: publicReviewBatch(batch), retiredBatchId: requestedBatchId, reused: true, state: publicFormalEvidenceState(state) });
         return sendError(res, 404, "review batch not found");
       }
       if (batch.gradingMode === "immediate") return sendJson(res, 409, {
         code: "review_repeat_not_confirmed",
         error: "逐题批改题组包含独立正式尝试，不能按旧版空草稿自动处理",
         batch: publicReviewBatch(batch),
-        state: publicReviewState(state)
+        state: publicFormalEvidenceState(state)
       });
       const completedTaskIds = authoritativeCompletedReviewTaskIds(state, batch);
       const repeated = classifyRepeatedReviewBatch(batch, completedTaskIds);
@@ -3443,7 +3562,7 @@ function handleReviewBatches(req, res, url, user) {
         code: "review_repeat_not_confirmed",
         error: "服务器没有找到这组题已经正式完成的完整证据，已保留题组且未作任何改动",
         batch: publicReviewBatch(batch),
-        state: publicReviewState(state)
+        state: publicFormalEvidenceState(state)
       });
       const action = String(body.action || "");
       if (action === "continue") {
@@ -3476,7 +3595,7 @@ function handleReviewBatches(req, res, url, user) {
         };
         saveFormalPracticeState(user, state, practice);
         const saved = getUserState(user);
-        return sendJson(res, 200, { batch: publicReviewBatch(saved.formalPractice.review.current), previousBatchId, reused: false, state: publicReviewState(saved) });
+        return sendJson(res, 200, { batch: publicReviewBatch(saved.formalPractice.review.current), previousBatchId, reused: false, state: publicFormalEvidenceState(saved) });
       }
       if (action !== "discard") return sendError(res, 400, "repeat resolution action is required");
       if (repeated.kind === "draft" && body.confirmDiscard !== true) {
@@ -3487,7 +3606,7 @@ function handleReviewBatches(req, res, url, user) {
       retireReviewBatchState(state, batch, now);
       saveFormalPracticeState(user, state, practice);
       const saved = getUserState(user);
-      return sendJson(res, 200, { batch: null, retiredBatchId: requestedBatchId, reused: false, state: publicReviewState(saved) });
+      return sendJson(res, 200, { batch: null, retiredBatchId: requestedBatchId, reused: false, state: publicFormalEvidenceState(saved) });
     }
     const batch = practice.review.current;
     if (!batch || batch.id !== String(body.batchId || "")) return sendError(res, 404, "review batch not found");
@@ -3500,7 +3619,7 @@ function handleReviewBatches(req, res, url, user) {
       const duplicate = findImmediateAttempt(batch, attemptId);
       if (duplicate) {
         if (duplicate.question.id !== questionId || duplicate.attempt.answer !== answer) return sendJson(res, 409, { error: "同一提交标识不能改写为另一份答案", batch: publicReviewBatch(batch) });
-        return sendJson(res, 200, { batch: publicReviewBatch(batch), reused: true, state: publicReviewState(state) });
+        return sendJson(res, 200, { batch: publicReviewBatch(batch), reused: true, state: publicFormalEvidenceState(state) });
       }
       if (!answer) return sendJson(res, 400, { error: "请先填写本题答案", batch: publicReviewBatch(batch) });
       if (batch.phase !== "answering" || !batch.questions[batch.index] || batch.questions[batch.index].id !== questionId) return sendJson(res, 409, { error: "当前题目已经变化，请按恢复后的题目继续", batch: publicReviewBatch(batch) });
@@ -3511,11 +3630,11 @@ function handleReviewBatches(req, res, url, user) {
         return sendJson(res, 200, {
           batch: publicReviewBatch(applied.state.formalPractice.review.current),
           reused: applied.reused,
-          state: publicReviewState(applied.state)
+          state: publicFormalEvidenceState(applied.state)
         });
       } catch (error) {
         const latest = getUserState(user);
-        const failedPractice = sanitizeFormalPractice(latest.formalPractice);
+        const failedPractice = cloneFormalPractice(latest.formalPractice);
         const failedBatch = failedPractice.review.current;
         if (failedBatch && failedBatch.id === batch.id && failedBatch.phase === "answering") {
           failedBatch.lastError = String(error && error.message || "本题批改暂不可用，答案尚未记分，请稍后重试").slice(0, 300);
@@ -3536,7 +3655,7 @@ function handleReviewBatches(req, res, url, user) {
       return sendJson(res, 200, {
         batch: publicReviewBatch(advanced.state.formalPractice.review.current),
         reused: advanced.reused,
-        state: publicReviewState(advanced.state)
+        state: publicFormalEvidenceState(advanced.state)
       });
     }
     if (suffix === "/draft" && req.method === "PUT") {
@@ -3590,7 +3709,7 @@ function handleReviewBatches(req, res, url, user) {
     }
     if (suffix === "/grade" && req.method === "POST") {
       if (batch.gradingMode !== "group") return sendJson(res, 409, { error: "逐题批改不能调用整组批改", batch: publicReviewBatch(batch) });
-      if (batch.phase === "completed") return sendJson(res, 200, { batch: publicReviewBatch(batch), reused: true, state: publicReviewState(state) });
+      if (batch.phase === "completed") return sendJson(res, 200, { batch: publicReviewBatch(batch), reused: true, state: publicFormalEvidenceState(state) });
       if (!["review", "grading"].includes(batch.phase)) return sendJson(res, 409, { error: "请先核对整组答案", batch: publicReviewBatch(batch) });
       const requestId = String(body.gradeRequestId || batch.gradeRequestId || "").trim();
       if (!requestId || (batch.gradeRequestId && batch.gradeRequestId !== requestId)) return sendJson(res, 409, { error: "批改请求标识不一致", batch: publicReviewBatch(batch) });
@@ -3604,10 +3723,10 @@ function handleReviewBatches(req, res, url, user) {
       try {
         const results = await gradeReviewBatchQuestions(user, batch);
         const saved = applyCompletedReviewBatch(user, batch, results);
-        return sendJson(res, 200, { batch: publicReviewBatch(saved.formalPractice.review.current), reused: false, state: publicReviewState(saved) });
+        return sendJson(res, 200, { batch: publicReviewBatch(saved.formalPractice.review.current), reused: false, state: publicFormalEvidenceState(saved) });
       } catch (error) {
         const latest = getUserState(user);
-        const failedPractice = sanitizeFormalPractice(latest.formalPractice);
+        const failedPractice = cloneFormalPractice(latest.formalPractice);
         if (failedPractice.review.current && failedPractice.review.current.id === batch.id && failedPractice.review.current.phase !== "completed") {
           failedPractice.review.current.phase = "review";
           failedPractice.review.current.lastError = String(error && error.message || "AI 批改暂不可用，整组答案已保留，请稍后重试").slice(0, 300);
@@ -4828,7 +4947,7 @@ function serveStatic(req, res, url) {
   let relative = decodeURIComponent(url.pathname); if (relative === "/") relative = "/index.html";
   if (relative.includes("\0") || relative.includes("..") || relative.startsWith("/server/")) return sendError(res, 404, "not found");
   const filePath = path.resolve(ROOT, `.${relative}`); if (!filePath.startsWith(ROOT + path.sep)) return sendError(res, 404, "not found");
-  fs.stat(filePath, (error, stats) => { if (error || !stats.isFile()) return sendError(res, 404, "not found"); setCommonHeaders(res, mimeType(filePath)); res.setHeader("Cache-Control", ["index.html", "styles.css", "data.js", "pronunciation-data.js", "review-variants.js", "answer-utils.js", "study-time.js", "review-session.js", "offline-store.js", "offline-learning.js", "offline-ai.js", "offline-replay.js", "app.js", "sw.js"].some(name => filePath.endsWith(name)) ? "no-cache" : "public, max-age=3600"); res.writeHead(200); fs.createReadStream(filePath).pipe(res); });
+  fs.stat(filePath, (error, stats) => { if (error || !stats.isFile()) return sendError(res, 404, "not found"); setCommonHeaders(res, mimeType(filePath)); res.setHeader("Cache-Control", ["index.html", "styles.css", "data.js", "pronunciation-data.js", "review-variants.js", "answer-utils.js", "study-time.js", "review-session.js", "review-batch-client.js", "state-sync-client.js", "offline-store.js", "offline-learning.js", "offline-ai.js", "offline-replay.js", "app.js", "sw.js"].some(name => filePath.endsWith(name)) ? "no-cache" : "public, max-age=3600"); res.writeHead(200); fs.createReadStream(filePath).pipe(res); });
 }
 
 const server = http.createServer((req, res) => {
@@ -4865,6 +4984,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/sync/self-study-lessons") return handleSelfStudyLessonSync(req, res, url);
   if (url.pathname === "/api/self-study" || url.pathname.startsWith("/api/self-study/")) return handleSelfStudy(req, res, url, user);
   if (url.pathname === "/api/export" && req.method === "GET") return user ? sendJson(res, 200, { content, state: publicReviewState(getUserState(user)), user: publicUser(user) }) : sendError(res, 401, "login required");
+  if (url.pathname === "/api/state/study-time") return handleStudyTimeState(req, res, user);
   if (url.pathname === "/api/state") return handleState(req, res, user);
   if (url.pathname === "/api/content" || url.pathname.startsWith("/api/content/")) return handleContent(req, res, url, user);
   return serveStatic(req, res, url);

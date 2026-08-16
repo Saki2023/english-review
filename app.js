@@ -7,6 +7,7 @@
   const STUDY_TIME = window.ENGLISH_REVIEW_STUDY_TIME || {};
   const REVIEW_SESSION = window.ENGLISH_REVIEW_SESSION || {};
   const REVIEW_BATCH_CLIENT = window.ENGLISH_REVIEW_BATCH_CLIENT || {};
+  const STATE_SYNC = window.ENGLISH_REVIEW_STATE_SYNC || {};
   const OFFLINE_STORAGE = window.ENGLISH_REVIEW_OFFLINE || {};
   const OFFLINE_LEARNING = window.ENGLISH_REVIEW_OFFLINE_LEARNING || {};
   const OFFLINE_AI = window.ENGLISH_REVIEW_OFFLINE_AI || {};
@@ -75,7 +76,6 @@
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
   const offlineStore = API_ENABLED && typeof OFFLINE_STORAGE.createOfflineStore === "function" ? OFFLINE_STORAGE.createOfflineStore(window) : null;
   let remoteReady = !API_ENABLED;
-  let remoteSaveTimer;
   const allItems = [
     ...DATA.words.map(item => ({ ...item, type: "word" })),
     ...DATA.sentences.map(item => {
@@ -106,6 +106,15 @@
   let appEventsBound = false;
   let authEventsBound = false;
   let model = loadModel();
+  const remoteStateQueue = API_ENABLED && typeof STATE_SYNC.createStateSaveQueue === "function"
+    ? STATE_SYNC.createStateSaveQueue({
+      fetchImpl: window.fetch.bind(window),
+      onUnauthorized: () => {
+        remoteReady = false;
+        showAuthView();
+      }
+    })
+    : null;
   let toastTimer;
   let gradingInProgress = false;
   let reviewBatchRequestInProgress = false;
@@ -1745,14 +1754,11 @@
     return repairReviewEvidence(DATA, next).state;
   }
 
-  function saveModel() {
+  function saveModel(options = {}) {
     try { localStorage.setItem(storageKey(), JSON.stringify(model)); } catch (_) { showToast("浏览器没有保存本机记录的权限"); }
     if (offlineSession) persistOfflinePackSnapshot();
-    if (API_ENABLED && remoteReady && !offlineSession) {
-      clearTimeout(remoteSaveTimer);
-      remoteSaveTimer = setTimeout(() => {
-        fetch("/api/state", { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(model) }).catch(() => {});
-      }, 240);
+    if (options.remote !== false && API_ENABLED && remoteReady && !offlineSession && remoteStateQueue) {
+      void remoteStateQueue.scheduleState(model, { immediate: options.immediate === true });
     }
   }
 
@@ -1941,6 +1947,7 @@
       if (!response.ok) throw new Error("state request failed");
       const remote = await response.json();
       if (remote && remote.reviewVariantPool) updateReviewVariantPoolStatus(remote.reviewVariantPool);
+      remoteStateQueue?.markServerState(remote);
       model = mergeModels(model, remote);
       remoteReady = true;
       saveModel();
@@ -1970,6 +1977,7 @@
   function setAccountContext(user) {
     accountRequestEpoch += 1;
     currentUser = user;
+    remoteStateQueue?.setAccountId(user && user.id);
     reviewBatchRequestInProgress = false;
     reviewBatchStartFailure = null;
     reviewRepeatResolutionInProgress = false;
@@ -2100,6 +2108,7 @@
 
   async function logout() {
     stopStudyClock("退出账号", false);
+    await remoteStateQueue?.flush();
     clearReviewVariantPoolStatusPolling();
     reviewVariantPoolStatus = null;
     resetReviewVariantPoolViewer();
@@ -3229,7 +3238,7 @@
       reviewCompletedConflictRecoveryKey = "";
       projectReviewBatchToSession(batch);
     } else applyRetiredReviewBatchResponse(data);
-    saveModel();
+    saveModel({ remote: false });
     return batch;
   }
 
@@ -3258,7 +3267,7 @@
 
   function applyAiPracticeResponse(data) {
     if (data && data.practice) model.aiPractice = normalizeClientAiPractice(data.practice);
-    saveModel();
+    saveModel({ remote: false });
     return model.aiPractice;
   }
 
@@ -5288,7 +5297,8 @@
     if (force) {
       clearTimeout(studyClockPersistTimer);
       studyClockPersistTimer = null;
-      saveModel();
+      saveModel({ remote: false });
+      if (API_ENABLED && remoteReady && !offlineSession && remoteStateQueue) void remoteStateQueue.scheduleStudyTime(state, { immediate: true });
       return;
     }
     if (studyClockPersistTimer) return;
@@ -8133,7 +8143,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=67", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=68", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
