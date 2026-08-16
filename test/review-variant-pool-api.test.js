@@ -373,6 +373,41 @@ test("review immediately reuses a stored learned sentence even before its matchi
     const grade = await gradeResponse.json();
     assert.equal(grade.correct, true);
     assert.equal(grade.source, "local");
+
+    const disabled = await fetch(`${baseUrl}/api/admin/ai-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({
+        mode: "manual",
+        manualProviderId: "legacy-primary",
+        providers: [{
+          id: "legacy-primary",
+          name: "disabled test provider",
+          enabled: false,
+          baseUrl: `http://127.0.0.1:${providerPort}/v1`,
+          apiKey: "pool-test-key",
+          models: ["test-model"],
+          timeoutMs: 10000
+        }],
+        defaultModel: "test-model",
+        rateLimitPerMinute: 60
+      })
+    });
+    assert.equal(disabled.status, 200);
+    assert.equal((await disabled.json()).configured, false);
+
+    const callsBeforeForcedReuse = providerInfo.calls.length;
+    const forcedReuseResponse = await fetch(`${baseUrl}/api/review/sentence-variants`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Cookie": cookie },
+      body: JSON.stringify({ taskIds: ["d4-s3:en-zh"], model: "test-model", reasoningEffort: "high", force: true })
+    });
+    assert.equal(forcedReuseResponse.status, 200, "manual retry must use the saved pool even while AI is unavailable");
+    const forcedReuse = await forcedReuseResponse.json();
+    assert.equal(forcedReuse.status, "completed");
+    assert.equal(forcedReuse.cached, true);
+    assert.equal(forcedReuse.variants.length, 1);
+    assert.equal(providerInfo.calls.length, callsBeforeForcedReuse, "cached force retry must not call the upstream provider");
   } finally {
     if (app && app.exitCode === null) app.kill();
     await new Promise(resolve => providerInfo.provider.close(resolve));

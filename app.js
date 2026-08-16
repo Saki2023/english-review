@@ -66,6 +66,7 @@
   const REVIEW_VARIANT_POOL_STATUS_POLL_MS = 2000;
   const REVIEW_VARIANT_POOL_PAGE_SIZES = [10, 20, 50];
   const REVIEW_VARIANT_WAIT_TIMEOUT_MS = 12 * 60 * 1000;
+  const REVIEW_VARIANT_START_REQUEST_TIMEOUT_MS = 15000;
   const REVIEW_VARIANT_POLL_REQUEST_TIMEOUT_MS = 15000;
   const REVIEW_BATCH_START_TIMEOUT_MS = Number(REVIEW_BATCH_CLIENT.DEFAULT_START_TIMEOUT_MS) || 12000;
   const REVIEW_BATCH_RECOVERY_TIMEOUT_MS = Number(REVIEW_BATCH_CLIENT.DEFAULT_RECOVERY_TIMEOUT_MS) || 6000;
@@ -5725,12 +5726,34 @@
       : "今日复习优先抽取本轮已保存句子；池为空或暂时不可用时可立即再试，网络失败每 5 分钟自动重试。";
   }
 
+  function reviewSentencePreparationState(session) {
+    if (REVIEW_SESSION && typeof REVIEW_SESSION.reviewSentenceVariantState === "function") {
+      return REVIEW_SESSION.reviewSentenceVariantState(session, taskById, { apiEnabled: API_ENABLED, offlineSession });
+    }
+    const missingTaskIds = session.taskIds.filter(taskId => {
+      const task = taskById.get(taskId);
+      return task && task.item.type === "sentence" && !session.variants[taskId];
+    });
+    return {
+      missingTaskIds,
+      hasMissing: missingTaskIds.length > 0,
+      shouldRequest: missingTaskIds.length > 0 && API_ENABLED && !offlineSession,
+      retryVisible: missingTaskIds.length > 0 && API_ENABLED && !offlineSession
+    };
+  }
+
   function sentenceTasksMissingVariants(session) {
-    return session.taskIds.map(taskId => taskById.get(taskId)).filter(task => task && task.item.type === "sentence" && !session.variants[task.taskId]);
+    return reviewSentencePreparationState(session).missingTaskIds.map(taskId => taskById.get(taskId)).filter(Boolean);
   }
 
   function reviewVariantBatchKey(session) {
-    return `${session.date}|${session.mode}|${session.taskIds.join(",")}`;
+    if (REVIEW_SESSION && typeof REVIEW_SESSION.reviewSentenceVariantKey === "function") return REVIEW_SESSION.reviewSentenceVariantKey(session);
+    return `${session.date}|${session.mode}|${session.batchId || ""}|${session.taskIds.join(",")}`;
+  }
+
+  function activeReviewVariantSession(key) {
+    const current = getSession();
+    return reviewVariantBatchKey(current) === key ? current : null;
   }
 
   function cancelReviewVariantRetry(key = "") {
@@ -5829,7 +5852,8 @@
   }
 
   async function prepareReviewSentenceVariants(session, force = false) {
-    const missing = sentenceTasksMissingVariants(session);
+    const preparation = reviewSentencePreparationState(session);
+    const missing = preparation.missingTaskIds.map(taskId => taskById.get(taskId)).filter(Boolean);
     const key = reviewVariantBatchKey(session);
     if (!missing.length) {
       cancelReviewVariantRetry(key);
@@ -5837,32 +5861,37 @@
       return;
     }
     if (reviewVariantPreparation && reviewVariantPreparation.key === key) return reviewVariantPreparation.promise;
-    if (offlineSession) {
+    if (!preparation.shouldRequest) {
       cancelReviewVariantRetry(key);
-      reviewVariantStatusMessage = "正式复习句子快照将在恢复联网后准备。";
-      return;
-    }
-    if (!API_ENABLED || !aiOptionsLoaded) {
-      return;
-    }
-    if (!aiOptions.configured) {
-      reviewVariantStatusMessage = "AI 尚未配置，句子变式将每 5 分钟自动重试。";
-      scheduleReviewVariantRetry(session, key);
+      reviewVariantStatusMessage = offlineSession
+        ? "正式复习句子快照将在恢复联网后准备。"
+        : "需要连接网站服务器后才能读取本轮句子池。";
       return;
     }
     if (!force && reviewVariantRetryKey === key && reviewVariantRetryTimer) return;
     cancelReviewVariantRetry(key);
-    reviewVariantStatusMessage = "AI 正在根据学习进度准备新句子…";
+    reviewVariantStatusMessage = "正在从本轮已保存句子池固定整组题目；池不足时才请求 AI…";
     const promise = (async () => {
       try {
         const settings = selectedAiSettings();
-        let data = await responseJson(await fetch("/api/review/sentence-variants", {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ date: session.date, taskIds: missing.map(task => task.taskId), model: settings.model, reasoningEffort: settings.reasoningEffort, force: Boolean(force) })
-        }));
-        let added = applyReviewVariantResults(session, missing, data);
+        const requestController = new AbortController();
+        const requestTimeout = setTimeout(() => requestController.abort(), REVIEW_VARIANT_START_REQUEST_TIMEOUT_MS);
+        let data;
+        try {
+          data = await responseJson(await fetch("/api/review/sentence-variants", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ date: session.date, taskIds: missing.map(task => task.taskId), model: settings.model, reasoningEffort: settings.reasoningEffort, force: Boolean(force) }),
+            signal: requestController.signal
+          }));
+        } finally {
+          clearTimeout(requestTimeout);
+        }
+        let targetSession = activeReviewVariantSession(key);
+        if (!targetSession) return;
+        let targetMissing = sentenceTasksMissingVariants(targetSession);
+        let added = applyReviewVariantResults(targetSession, targetMissing, data);
         if (added) {
           saveModel();
           if (activeView === "home") renderHome();
@@ -5871,8 +5900,11 @@
         if (!data) return;
         if (data.source !== "ai") throw Object.assign(new Error("AI 未返回可固定的句子变式"), { statusCode: 503 });
         if (data.pool) updateReviewVariantPoolStatus(data.pool);
-        added += applyReviewVariantResults(session, missing, data);
-        const unresolved = sentenceTasksMissingVariants(session);
+        targetSession = activeReviewVariantSession(key);
+        if (!targetSession) return;
+        targetMissing = sentenceTasksMissingVariants(targetSession);
+        added += applyReviewVariantResults(targetSession, targetMissing, data);
+        const unresolved = sentenceTasksMissingVariants(targetSession);
         if (added) saveModel();
         if (unresolved.length) {
           reviewVariantStatusMessage = String(data.message || `仍有 ${unresolved.length} 条句子连续 3 轮未通过校验，已停止自动重试。`).slice(0, 180);
@@ -5886,6 +5918,8 @@
       } catch (error) {
         reviewVariantStatusMessage = error && error.statusCode === 401
           ? "登录状态已失效，请重新登录。"
+          : error && error.name === "AbortError"
+            ? "读取本轮句子池超时，请点击立即重试；系统不会自动连续请求。"
           : (error && typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, 180) : "AI 暂不可用，将每 5 分钟自动重试。");
         if (!error || error.statusCode !== 401) scheduleReviewVariantRetry(session, key);
         if (error && error.statusCode !== 401) showToast(reviewVariantStatusMessage);
@@ -5903,13 +5937,12 @@
 
   async function retryReviewSentenceVariants() {
     const session = getSession();
-    const task = currentBaseTask();
-    if (!session || !task || task.item.type !== "sentence" || session.variants[task.taskId]) return;
+    if (!session || !reviewSentencePreparationState(session).shouldRequest) return;
     const key = reviewVariantBatchKey(session);
     if (reviewVariantPreparation && reviewVariantPreparation.key === key) return;
     const promise = prepareReviewSentenceVariants(session, true);
     if (reviewVariantPreparation && reviewVariantPreparation.key === key) {
-      reviewVariantStatusMessage = "AI 正在手动重试句子变式…";
+      reviewVariantStatusMessage = "正在重新从本轮句子池固定整组题目…";
     }
     renderHome();
     if (promise && typeof promise.then === "function") await promise;
@@ -6727,7 +6760,8 @@
     const target = pool.targetCount;
     const remaining = pool.remainingCount;
     const percent = Math.max(0, Math.min(100, Math.round((generated / target) * 100)));
-    const waitingForCurrent = Boolean(baseTask && baseTask.item && baseTask.item.type === "sentence" && session && !session.variants[baseTask.taskId]);
+    const missingSentenceCount = session ? sentenceTasksMissingVariants(session).length : 0;
+    const waitingForBatch = missingSentenceCount > 0;
     card.hidden = false;
     count.textContent = `已保存 ${generated} / ${target} 条`;
     progress.style.width = `${percent}%`;
@@ -6738,8 +6772,8 @@
     if (pool.status === "ready" || generated >= target) {
       message = `本轮句子池已生成完成；会一直保留到下一次学习同步。`;
     } else if (pool.status === "pending") {
-      message = waitingForCurrent
-        ? `已保存 ${generated} 条；当前题暂时没有可抽取的已保存句子，剩余 ${remaining} 条正在后台生成。`
+      message = waitingForBatch
+        ? `已保存 ${generated} 条；本组仍有 ${missingSentenceCount} 道句子题待固定，剩余 ${remaining} 条正在后台生成。`
         : `学习同步后已自动开始生成，剩余 ${remaining} 条正在后台准备；已保存的句子不会丢失。`;
     } else if (pool.status === "failed") {
       message = `已保存 ${generated} 条；本轮生成暂时失败，${remaining} 条将在 5 分钟后自动重试，下一次学习同步前不会清空。`;
@@ -6748,9 +6782,9 @@
     } else {
       message = `已保存 ${generated} 条，目标 ${target} 条；下一次学习同步成功后才会更换。`;
     }
-    if (waitingForCurrent && reviewVariantStatusMessage) {
+    if (waitingForBatch && reviewVariantStatusMessage) {
       const detail = reviewVariantStatusMessage.trim().slice(0, 180);
-      if (detail && !message.includes(detail)) message += ` 当前题：${detail}`;
+      if (detail && !message.includes(detail)) message += ` 本组：${detail}`;
     }
     status.textContent = message;
     renderReviewVariantPoolBrowser(session, baseTask, pool);
@@ -6914,12 +6948,16 @@
       const canStartServerBatch = reviewSessionCanStartBatch(session);
       const startFailure = canStartServerBatch ? reviewBatchStartFailureFor(session) : null;
       const missingSentenceCount = sentenceTasksMissingVariants(session).length;
-      reviewVariantRetryUi(session, Boolean(baseTask.item.type === "sentence" && !session.variants[baseTask.taskId]));
+      reviewVariantRetryUi(session, Boolean(missingSentenceCount));
       $("#promptType").textContent = "整组复习";
       $("#promptDay").textContent = startFailure ? "题目快照尚未保存" : canStartServerBatch ? "正在保存题目快照" : "正在准备句子快照";
       $("#questionCount").textContent = `1 / ${session.taskIds.length}`;
       $("#directionLabel").textContent = startFailure ? "服务器状态确认失败" : canStartServerBatch ? "准备本组草稿" : `还有 ${missingSentenceCount} 道句子题待固定`;
-      $("#promptText").textContent = startFailure ? "本组尚未进入作答，请手动重试" : canStartServerBatch ? "正在准备可恢复的整组作答…" : "正在从本轮句子池固定整组题目…";
+      $("#promptText").textContent = startFailure
+        ? "本组尚未进入作答，请手动重试"
+        : canStartServerBatch
+          ? "正在准备可恢复的整组作答…"
+          : (reviewVariantStatusMessage || "正在从本轮句子池固定整组题目…");
       $("#promptSpeech").innerHTML = "";
       $("#phoneticLine").textContent = startFailure ? "系统不会自动连续请求；重试会继续使用相同批次和题目快照。" : canStartServerBatch ? "题目快照保存完成后即可作答。" : "准备完成前不会开放输入，避免草稿与最终题目错位。";
       $("#exampleLine").textContent = "";
@@ -7934,7 +7972,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=65", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=66", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

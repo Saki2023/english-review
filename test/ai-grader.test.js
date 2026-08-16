@@ -416,8 +416,15 @@ test("AI rate limiter isolates callers and returns a retry delay", () => {
 test("admin configures AI on the web and progress-based questions use the selected capability", async () => {
   const dataDir = temporaryDataDir();
   const store = loadUsers(dataDir);
+  const reviewEfforts = ["low", "medium", "high", "xhigh", "max"];
+  const reviewVariantAccounts = [
+    ...reviewEfforts.map(reasoningEffort => ({ key: reasoningEffort, username: `review-${reasoningEffort}` })),
+    { key: "repair", username: "review-repair" },
+    { key: "reject", username: "review-reject" }
+  ];
   createUser(store, { username: "owner", password: "strong-ai-password" });
   createUser(store, { username: "member", password: "strong-member-password" });
+  reviewVariantAccounts.forEach(account => createUser(store, { username: account.username, password: "strong-review-password" }));
   saveUsers(dataDir, store);
 
   const providerRequests = [];
@@ -537,6 +544,17 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(Object.hasOwn(visibleConfig, "apiKey"), false);
     assert.equal(JSON.stringify(visibleConfig).includes("private-test-key"), false);
     assert.equal((await (await fetch(`${baseUrl}/api/health`)).json()).aiGrading, true);
+
+    const reviewVariantCookies = new Map();
+    for (const account of reviewVariantAccounts) {
+      const response = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: account.username, password: "strong-review-password" })
+      });
+      assert.equal(response.status, 200);
+      reviewVariantCookies.set(account.key, response.headers.get("set-cookie").split(";")[0]);
+    }
 
     const connectionTest = await fetch(`${baseUrl}/api/admin/ai-config/test`, {
       method: "POST",
@@ -792,9 +810,8 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(unavailableGeneration.status, 502);
     assert.deepEqual(await unavailableGeneration.json(), { error: "AI 上游不支持该模型的生成接口，请更换模型", providerStatus: 404 });
 
-    const reviewEfforts = ["low", "medium", "high", "xhigh", "max"];
     for (const reasoningEffort of reviewEfforts) {
-      const { response: reviewVariants, body: reviewBody, startStatus } = await requestReviewVariants(baseUrl, cookie, { taskIds: ["d4-s5:en-zh"], model: "strong-model", reasoningEffort, force: true });
+      const { response: reviewVariants, body: reviewBody, startStatus } = await requestReviewVariants(baseUrl, reviewVariantCookies.get(reasoningEffort), { taskIds: ["d4-s5:en-zh"], model: "strong-model", reasoningEffort, force: true });
       assert.equal(startStatus, 202);
       assert.equal(reviewVariants.status, 200);
       assert.equal(reviewBody.source, "ai");
@@ -806,7 +823,7 @@ test("admin configures AI on the web and progress-based questions use the select
     }
 
     const repairStart = providerRequests.length;
-    const repairedReview = await requestReviewVariants(baseUrl, cookie, {
+    const repairedReview = await requestReviewVariants(baseUrl, reviewVariantCookies.get("repair"), {
       taskIds: ["d4-s5:en-zh", "d2-s3:en-zh"],
       model: "strong-model",
       reasoningEffort: "max",
@@ -825,7 +842,7 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(repairRequests[1].validationFeedback[0].reasonCode, "unlearned-word");
 
     const rejectedStart = providerRequests.length;
-    const rejectedReview = await requestReviewVariants(baseUrl, cookie, {
+    const rejectedReview = await requestReviewVariants(baseUrl, reviewVariantCookies.get("reject"), {
       taskIds: ["d2-s2:en-zh"],
       model: "strong-model",
       reasoningEffort: "max",

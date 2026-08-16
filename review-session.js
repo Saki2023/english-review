@@ -137,6 +137,39 @@
     return uniqueTaskIds(selected, requested);
   }
 
+  function reviewSentenceVariantState(sessionValue, tasksById, options = {}) {
+    const session = sessionValue && typeof sessionValue === "object" ? sessionValue : {};
+    const variants = session.variants && typeof session.variants === "object" ? session.variants : {};
+    const findTask = taskId => {
+      if (tasksById && typeof tasksById.get === "function") return tasksById.get(taskId);
+      if (typeof tasksById === "function") return tasksById(taskId);
+      if (tasksById && typeof tasksById === "object") return tasksById[taskId];
+      return null;
+    };
+    const missingTaskIds = uniqueTaskIds(session.taskIds).filter(taskId => {
+      const task = findTask(taskId);
+      return task && task.item && task.item.type === "sentence" && !variants[taskId];
+    });
+    const hasMissing = missingTaskIds.length > 0;
+    const onlineApi = options.apiEnabled !== false && options.offlineSession !== true;
+    return {
+      missingTaskIds,
+      hasMissing,
+      shouldRequest: hasMissing && onlineApi,
+      retryVisible: hasMissing && onlineApi
+    };
+  }
+
+  function reviewSentenceVariantKey(sessionValue) {
+    const session = sessionValue && typeof sessionValue === "object" ? sessionValue : {};
+    return [
+      String(session.date || "").slice(0, 20),
+      ["all", "word", "sentence"].includes(session.mode) ? session.mode : "all",
+      String(session.batchId || "").slice(0, 180),
+      uniqueTaskIds(session.taskIds).join(",")
+    ].join("|");
+  }
+
   return {
     MAX_COMPLETED_TASKS_PER_DAY,
     MAX_RETIRED_BATCHES_PER_DAY,
@@ -146,6 +179,8 @@
     mergeReviewSession,
     retireReviewSession,
     reviewBatchTaskIds,
+    reviewSentenceVariantKey,
+    reviewSentenceVariantState,
     selectGuidedTaskIds,
     uniqueBatchIds,
     uniqueTaskIds

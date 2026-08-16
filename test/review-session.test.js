@@ -7,6 +7,8 @@ const {
   classifyRepeatedReviewBatch,
   mergeReviewSession,
   retireReviewSession,
+  reviewSentenceVariantKey,
+  reviewSentenceVariantState,
   selectGuidedTaskIds
 } = require("../review-session");
 
@@ -29,6 +31,44 @@ test("guided review consumes stable daily candidates without repeating completed
   assert.deepEqual(first.filter(taskId => second.includes(taskId)), []);
   assert.equal(afterSecond.doneTaskIds.length, 20);
   assert.deepEqual(third, []);
+});
+
+test("word-first review groups still prepare and expose retry for later missing sentence snapshots", () => {
+  const tasks = new Map([
+    ["word-1", { taskId: "word-1", item: { type: "word" } }],
+    ["sentence-1", { taskId: "sentence-1", item: { type: "sentence" } }],
+    ["sentence-2", { taskId: "sentence-2", item: { type: "sentence" } }]
+  ]);
+  const session = {
+    taskIds: ["word-1", "sentence-1", "sentence-2"],
+    index: 0,
+    variants: { "sentence-2": { id: "saved-variant" } }
+  };
+  const online = reviewSentenceVariantState(session, tasks, {
+    apiEnabled: true,
+    offlineSession: false,
+    aiOptionsLoaded: false,
+    aiConfigured: false
+  });
+  assert.deepEqual(online.missingTaskIds, ["sentence-1"]);
+  assert.equal(online.shouldRequest, true, "persisted-pool lookup must not depend on AI option loading");
+  assert.equal(online.retryVisible, true, "a later missing sentence must expose retry while the word is current");
+
+  const offline = reviewSentenceVariantState(session, tasks, { apiEnabled: true, offlineSession: true });
+  assert.equal(offline.shouldRequest, false);
+  assert.equal(offline.retryVisible, false);
+});
+
+test("sentence variant responses follow a replaced session object only for the same batch snapshot", () => {
+  const original = {
+    date: "2026-08-16",
+    mode: "all",
+    batchId: "batch-current",
+    taskIds: ["word-1", "sentence-1"]
+  };
+  assert.equal(reviewSentenceVariantKey({ ...original, variants: { "sentence-1": { id: "remote-copy" } } }), reviewSentenceVariantKey(original));
+  assert.notEqual(reviewSentenceVariantKey({ ...original, batchId: "batch-replacement" }), reviewSentenceVariantKey(original));
+  assert.notEqual(reviewSentenceVariantKey({ ...original, taskIds: ["word-1", "sentence-2"] }), reviewSentenceVariantKey(original));
 });
 
 test("review session merge cannot lose completed IDs to a newer stale client snapshot", () => {

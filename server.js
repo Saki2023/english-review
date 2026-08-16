@@ -2416,10 +2416,10 @@ async function handleReviewSentenceVariants(req, res, user) {
 
     let assigned = { pool, variants: [] };
     let pendingTasks = tasks;
-    if (body.prefetch !== true && body.force !== true) {
+    if (body.prefetch !== true) {
       // Use every compatible sentence already saved in this sync cycle first.
-      // The remaining tasks can be generated in the background; the learner
-      // should never wait for the full 50-sentence pool when one is ready.
+      // Manual retries must follow the same path: force only replaces a failed
+      // AI job for tasks that the persisted pool still cannot satisfy.
       assigned = assignReviewVariantPoolTasks(pool, tasks, content);
       state.reviewVariantPool = assigned.pool;
       persistUserStates();
