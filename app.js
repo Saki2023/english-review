@@ -6034,6 +6034,8 @@
     if (!panel) return;
     panel.hidden = !repeated;
     if (!repeated) return;
+    panel.dataset.reviewBatchId = String(batch && batch.id || "");
+    panel.dataset.reviewRepeatKind = String(repeated.kind || "");
     const error = reviewRepeatResolutionErrorFor(batch);
     const draft = repeated.kind === "draft";
     $("#reviewRepeatResolutionTitle").textContent = draft ? "发现上一版本保留的重复草稿" : "正在整理上一版本的重复题组";
@@ -6060,11 +6062,22 @@
     refreshIcons();
   }
 
-  async function resolveRepeatedReviewBatch(action, { automatic = false } = {}) {
+  async function resolveRepeatedReviewBatch(action, { automatic = false, expectedBatchId = "", expectedKind = "" } = {}) {
     const batch = currentFormalReviewBatch();
     const session = getSession();
-    const repeated = repeatedReviewBatchState(batch, session);
-    if (!batch || !repeated || reviewRepeatResolutionInProgress) return;
+    const classified = repeatedReviewBatchState(batch, session);
+    const expected = String(expectedBatchId || "").trim();
+    const fallbackKind = ["empty", "draft"].includes(String(expectedKind || ""))
+      ? String(expectedKind)
+      : automatic ? "" : action === "continue" ? "draft" : "empty";
+    const repeated = classified || (batch && (!expected || String(batch.id || "") === expected) && fallbackKind
+      ? { kind: fallbackKind, taskIds: [], answeredCount: 0, questionCount: 0 }
+      : null);
+    if (reviewRepeatResolutionInProgress) return;
+    if (!batch || (expected && String(batch.id || "") !== expected) || !repeated) {
+      if (!automatic) renderHome();
+      return;
+    }
     if (action === "continue" && repeated.kind !== "draft") return;
     const accountContext = captureAccountRequestContext();
     reviewRepeatResolutionInProgress = true;
@@ -6110,7 +6123,7 @@
     const key = `${String(currentUser && currentUser.id || "")}:${String(batch.id || "")}`;
     if (!key || reviewRepeatAutoAttemptKey === key) return;
     reviewRepeatAutoAttemptKey = key;
-    queueMicrotask(() => { void resolveRepeatedReviewBatch("discard", { automatic: true }); });
+    queueMicrotask(() => { void resolveRepeatedReviewBatch("discard", { automatic: true, expectedBatchId: batch.id, expectedKind: repeated.kind }); });
   }
 
   function normalizeClientSelfStudy(value) {
@@ -7570,6 +7583,18 @@
   function bindAppEvents() {
     if (appEventsBound) return;
     appEventsBound = true;
+    // Recovery controls are redrawn while remote state is merged. Delegate at
+    // the stable app root so a replaced button cannot lose its action handler.
+    $("#appBody").addEventListener("click", event => {
+      const button = event.target.closest("#continueRepeatedReviewBatch, #discardRepeatedReviewBatch");
+      if (!button || button.disabled) return;
+      const action = button.id === "continueRepeatedReviewBatch" ? "continue" : "discard";
+      const panel = button.closest("#reviewRepeatResolution");
+      void resolveRepeatedReviewBatch(action, {
+        expectedBatchId: panel && panel.dataset.reviewBatchId || "",
+        expectedKind: panel && panel.dataset.reviewRepeatKind || ""
+      });
+    });
     $("#studyTimerButton").addEventListener("click", () => {
       if (studyClockRunning) stopStudyClock("手动暂停");
       else openCurrentStudyStage();
@@ -7881,8 +7906,6 @@
     $("#gradeReviewBatch").addEventListener("click", gradeReviewBatch);
     $("#finishReviewBatch").addEventListener("click", finishReviewBatch);
     $("#reviewBatchStartRetryButton").addEventListener("click", retryReviewBatchStart);
-    $("#continueRepeatedReviewBatch").addEventListener("click", () => resolveRepeatedReviewBatch("continue"));
-    $("#discardRepeatedReviewBatch").addEventListener("click", () => resolveRepeatedReviewBatch("discard"));
     $("#previousAiQuestion").addEventListener("click", () => moveAiQuestion(-1));
     $("#editAiBatch").addEventListener("click", editAiBatch);
     $("#gradeAiBatch").addEventListener("click", gradeAiBatch);
@@ -7911,7 +7934,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=64", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=65", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
