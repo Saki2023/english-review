@@ -19,9 +19,37 @@ const QUESTIONS = [
   { direction: "zh-en", english: "It is a big pig.", chinese: "它是一头大猪。", acceptedEnglish: ["it is a big pig"], acceptedChinese: ["它是一头大猪"], focus: "pig" },
   { direction: "en-zh", english: "She is a mom.", chinese: "她是一位妈妈。", acceptedEnglish: ["she is a mom"], acceptedChinese: ["她是一位妈妈", "她是一个妈妈"], focus: "mom" }
 ];
+const POOL_WORD_BANK_QUESTIONS = [
+  { direction: "en-zh", english: "A snake is in a pool.", chinese: "一条蛇在一个池塘里。", acceptedEnglish: ["a snake is in a pool"], acceptedChinese: ["一条蛇在一个池塘里"], focus: "inside" },
+  { direction: "en-zh", english: "A cat is in a pool.", chinese: "一只猫在一个池塘里。", acceptedEnglish: ["a cat is in a pool"], acceptedChinese: ["一只猫在一个池塘里"], focus: "inside" },
+  { direction: "en-zh", english: "A big snake is in a pool.", chinese: "一条大蛇在一个池塘里。", acceptedEnglish: ["a big snake is in a pool"], acceptedChinese: ["一条大蛇在一个池塘里"], focus: "inside" },
+  { direction: "en-zh", english: "A red snake is in a pool.", chinese: "一条红色的蛇在一个池塘里。", acceptedEnglish: ["a red snake is in a pool"], acceptedChinese: ["一条红色的蛇在一个池塘里"], focus: "inside" },
+  { direction: "en-zh", english: "A big cat is in a pool.", chinese: "一只大猫在一个池塘里。", acceptedEnglish: ["a big cat is in a pool"], acceptedChinese: ["一只大猫在一个池塘里"], focus: "inside" }
+];
 
 function temporaryDataDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "english-review-ai-batch-"));
+}
+
+function writePoolWordBankContent(dataDir) {
+  fs.writeFileSync(path.join(dataDir, "content-store.json"), `${JSON.stringify({
+    version: 2,
+    updatedAt: "2026-08-16",
+    currentDay: 10,
+    words: [
+      { id: "word-a", day: 1, learned: "2026-08-01", english: "a", chinese: "一个", acceptedChinese: ["一个", "一"] },
+      { id: "word-is", day: 1, learned: "2026-08-01", english: "is", chinese: "是", acceptedChinese: ["是"] },
+      { id: "word-in", day: 1, learned: "2026-08-01", english: "in", chinese: "在里面", acceptedChinese: ["在里面", "在"] },
+      { id: "word-big", day: 1, learned: "2026-08-01", english: "big", chinese: "大的", acceptedChinese: ["大的", "大"] },
+      { id: "word-red", day: 1, learned: "2026-08-01", english: "red", chinese: "红色的", acceptedChinese: ["红色的", "红色"] },
+      { id: "word-cat", day: 1, learned: "2026-08-01", english: "cat", chinese: "猫", acceptedChinese: ["猫"] },
+      { id: "word-snake", day: 10, learned: "2026-08-16", english: "snake", chinese: "蛇", acceptedChinese: ["蛇"] },
+      { id: "word-pool", day: 10, learned: "2026-08-16", english: "pool", chinese: "水池；游泳池", acceptedChinese: ["水池", "游泳池", "泳池"] }
+    ],
+    sentences: [],
+    notes: [],
+    deletedIds: []
+  }, null, 2)}\n`, "utf8");
 }
 
 function freePort() {
@@ -49,6 +77,8 @@ function requestBody(req) {
 function createProvider() {
   const control = {
     calls: [],
+    questions: QUESTIONS,
+    gradingResult: { correct: false, score: 0, gradingStatus: "incorrect", explanation: "答案与题意不一致。", problemWords: ["it"] },
     failGrading: false,
     failNextGeneration: false,
     holdNextGeneration: false,
@@ -83,10 +113,10 @@ function createProvider() {
     if (generation) {
       const groupCount = Number(system.match(/Return exactly (\d+) independent groups/)?.[1] || 1);
       content = groupCount > 1
-        ? JSON.stringify({ groups: Array.from({ length: groupCount }, () => ({ questions: QUESTIONS })) })
-        : JSON.stringify({ questions: QUESTIONS });
+        ? JSON.stringify({ groups: Array.from({ length: groupCount }, () => ({ questions: control.questions })) })
+        : JSON.stringify({ questions: control.questions });
     } else {
-      content = JSON.stringify({ correct: false, score: 0, gradingStatus: "incorrect", explanation: "答案与题意不一致。", problemWords: ["it"] });
+      content = JSON.stringify(control.gradingResult);
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ choices: [{ message: { content } }] }));
@@ -181,6 +211,71 @@ async function gradeSet(baseUrl, cookie, set) {
     body: { setId: set.id, gradeRequestId: set.gradeRequestId }
   });
 }
+
+test("AI practice uses formal word-bank meanings for generation and blocks a conflicting sense before AI can accept it", async () => {
+  const dataDir = temporaryDataDir();
+  const store = loadUsers(dataDir);
+  const owner = createUser(store, { username: "word-bank-owner", password: "word-bank-owner-password" });
+  saveUsers(dataDir, store);
+  writePoolWordBankContent(dataDir);
+  const { provider, control } = createProvider();
+  control.questions = POOL_WORD_BANK_QUESTIONS;
+  control.gradingResult = { correct: true, score: 1, gradingStatus: "correct", explanation: "语义可以接受。", problemWords: [] };
+  let app;
+  try {
+    await new Promise((resolve, reject) => provider.listen(0, "127.0.0.1", error => error ? reject(error) : resolve()));
+    const providerPort = provider.address().port;
+    app = await startApp(dataDir);
+    const cookie = await login(app.baseUrl, "word-bank-owner", "word-bank-owner-password");
+    const configured = await request(app.baseUrl, cookie, "/api/admin/ai-config", {
+      method: "PUT",
+      body: { baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "word-bank-test-key", models: ["test-model"], defaultModel: "test-model", timeoutMs: 10000, rateLimitPerMinute: 60 }
+    });
+    assert.equal(configured.response.status, 200);
+
+    const generated = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "word-bank-generation", model: "test-model", reasoningEffort: "high", count: 5, groupCount: 1 }
+    });
+    assert.equal(generated.response.status, 201, JSON.stringify(generated.body));
+    const generationCall = control.calls.find(item => item.generation);
+    const generationProfile = JSON.parse(generationCall.body.messages[1].content);
+    assert.deepEqual(generationProfile.wordMeanings.pool, ["水池", "游泳池", "泳池"]);
+    assert.match(generationCall.body.messages[0].content, /meanings listed in wordMeanings.*binding/i);
+
+    const stateFile = path.join(dataDir, "user-states.json");
+    const disk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    const storedQuestions = disk.users[owner.id].aiPractice.currentSet.questions;
+    assert.equal(storedQuestions.length, 5);
+    assert.equal(storedQuestions.every(question => !JSON.stringify(question).includes("池塘")), true);
+    assert.equal(storedQuestions.every(question => question.chinese.includes("水池")), true);
+
+    const answers = [
+      "一条蛇在一个池塘里",
+      "有一只猫在一个水池里",
+      "一条大蛇在一个水池里",
+      "一条红色的蛇在一个水池里",
+      "一只大猫在一个水池里"
+    ];
+    const reviewed = await fillAndReview(app.baseUrl, cookie, generated.body.practice.currentSet, answers, "word-bank-grade-request");
+    const graded = await gradeSet(app.baseUrl, cookie, reviewed);
+    assert.equal(graded.response.status, 200, JSON.stringify(graded.body));
+    assert.equal(graded.body.practice.currentSet.questions[0].gradingStatus, "incorrect");
+    assert.equal(graded.body.practice.currentSet.questions[0].score, 0);
+    assert.match(graded.body.practice.currentSet.questions[0].explanation, /pool.*水池.*池塘/);
+    assert.equal(graded.body.practice.currentSet.questions[1].gradingStatus, "correct", "the mocked AI still grades a non-conflicting natural answer");
+
+    const gradingCalls = control.calls.filter(item => !item.generation);
+    assert.equal(gradingCalls.length, 1, "the word-bank conflict must not be sent to AI for a possible override");
+    const gradingPayload = JSON.parse(gradingCalls[0].body.messages[1].content);
+    assert.deepEqual(gradingPayload.wordMeanings.pool, ["水池", "游泳池", "泳池"]);
+    assert.match(gradingCalls[0].body.messages[0].content, /registered Chinese meanings are binding/i);
+  } finally {
+    await stopApp(app);
+    await new Promise(resolve => provider.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
 
 test("AI batches grade atomically while generation requests append idempotently without blocking drafts", async () => {
   const dataDir = temporaryDataDir();

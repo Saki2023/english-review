@@ -18,7 +18,10 @@ test("learning sync profile combines review and AI evidence without account secr
     taskStates: { "cat:en-zh": { level: 1, lastResult: false, reviewCount: 2 } },
     history: { "2026-08-01": { reviewed: 2, correct: 1 } },
     studyTime: { daily: { "2026-08-01": 3600 } },
-    attempts: [{ taskId: "cat:en-zh", correct: false }, { taskId: "cat:zh-en", correct: true }],
+    attempts: [
+      { id: "reviewattempt-first", batchId: "reviewbatch-immediate", taskId: "cat:en-zh", date: "2026-08-01", submittedAt: "2026-08-01T09:00:00.000Z", direction: "en-zh", prompt: "cat", answer: "狗", expected: "猫", correct: false, score: 0, gradingStatus: "incorrect", explanation: "cat 应译为猫。", formalEvidence: true },
+      { id: "reviewattempt-correction", batchId: "reviewbatch-immediate", taskId: "cat:en-zh", date: "2026-08-01", submittedAt: "2026-08-01T09:01:00.000Z", direction: "en-zh", prompt: "cat", answer: "猫", expected: "猫", correct: true, score: 1, gradingStatus: "correct", explanation: "订正正确。", formalEvidence: true }
+    ],
     mistakes: [{ id: "m1", taskId: "cat:en-zh", prompt: "cat", userAnswer: "狗", correctAnswer: "猫" }],
     aiPractice: { history: [{
       id: "aiset-1:aiq-1",
@@ -64,6 +67,10 @@ test("learning sync profile combines review and AI evidence without account secr
 
   assert.equal(profile.summary.reviewQuestions, 2);
   assert.equal(profile.summary.reviewAccuracy, 50);
+  assert.deepEqual(profile.formalReviewAttempts.map(item => [item.id, item.learnerAnswer, item.attemptNumber, item.isCorrection]), [
+    ["reviewattempt-first", "狗", 1, false],
+    ["reviewattempt-correction", "猫", 2, true]
+  ]);
   assert.equal(profile.summary.aiQuestions, 1);
   assert.equal(profile.summary.aiAccuracy, 0);
   assert.equal(profile.summary.tutorQuestions, 1);

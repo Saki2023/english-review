@@ -654,12 +654,19 @@
     const normalizeBatch = batch => batch && Array.isArray(batch.questions) ? {
       ...batch,
       id: String(batch.id || ""),
+      gradingMode: ["group", "immediate"].includes(batch.gradingMode) ? batch.gradingMode : "group",
       phase: ["answering", "review", "grading", "completed"].includes(batch.phase) ? batch.phase : "answering",
       index: Math.max(0, Number(batch.index) || 0),
-      questions: batch.questions.map(question => ({ ...question, answer: String(question && question.answer || "") }))
+      questions: batch.questions.map(question => ({
+        ...question,
+        answer: String(question && question.answer || ""),
+        attemptRequestId: String(question && question.attemptRequestId || ""),
+        attempts: Array.isArray(question && question.attempts) ? question.attempts.map(attempt => ({ ...attempt, answer: String(attempt && attempt.answer || "") })) : []
+      }))
     } : null;
     return {
       review: {
+        gradingMode: ["group", "immediate"].includes(review.gradingMode) ? review.gradingMode : "group",
         current: normalizeBatch(review.current),
         history: (Array.isArray(review.history) ? review.history : []).map(normalizeBatch).filter(Boolean).slice(-40)
       },
@@ -3126,6 +3133,49 @@
   function currentFormalReviewBatch() {
     model.formalPractice = normalizeClientFormalPractice(model.formalPractice);
     return model.formalPractice.review.current;
+  }
+
+  function reviewGradingModePreference() {
+    model.formalPractice = normalizeClientFormalPractice(model.formalPractice);
+    return model.formalPractice.review.gradingMode;
+  }
+
+  function renderReviewGradingModeControl(batch = currentFormalReviewBatch()) {
+    const preferred = reviewGradingModePreference();
+    $$('[data-review-grading-mode]').forEach(button => {
+      const active = button.dataset.reviewGradingMode === preferred;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.disabled = reviewBatchRequestInProgress || offlineSession || !currentUser;
+    });
+    const note = $("#reviewGradingModeNote");
+    if (!note) return;
+    const currentMode = batch && ["group", "immediate"].includes(batch.gradingMode) ? batch.gradingMode : "";
+    const pending = Boolean(currentMode && currentMode !== preferred);
+    note.hidden = !pending;
+    note.textContent = pending
+      ? `当前题组继续使用${currentMode === "immediate" ? "逐题批改" : "整组批改"}；下一组将使用${preferred === "immediate" ? "逐题批改" : "整组批改"}，现有答案不会被清除。`
+      : "";
+  }
+
+  async function setReviewGradingMode(gradingMode) {
+    if (!["group", "immediate"].includes(gradingMode) || reviewBatchRequestInProgress || offlineSession || !currentUser) return;
+    if (gradingMode === reviewGradingModePreference()) return;
+    const accountContext = captureAccountRequestContext();
+    reviewBatchRequestInProgress = true;
+    renderReviewGradingModeControl();
+    try {
+      const data = await reviewBatchRequest("/mode", { body: { gradingMode } });
+      if (data.appliesTo === "next") showToast(`已保存：下一组使用${gradingMode === "immediate" ? "逐题批改" : "整组批改"}`);
+    } catch (error) {
+      showRequestError(error);
+    } finally {
+      if (accountRequestContextIsCurrent(accountContext)) {
+        reviewBatchRequestInProgress = false;
+        reviewAnswerResetRequested = true;
+        renderHome();
+      }
+    }
   }
 
   function projectReviewBatchToSession(batch) {
@@ -5996,6 +6046,7 @@
           batchId: session.batchId,
           date: session.date || localDate(),
           mode: session.mode,
+          gradingMode: reviewGradingModePreference(),
           taskIds: session.taskIds,
           allowRepeat: session.allowRepeat === true,
           variantIds: Object.fromEntries(Object.entries(session.variants || {}).map(([taskId, variant]) => [taskId, variant && variant.id || ""])),
@@ -6866,6 +6917,7 @@
     if (formalBatch && formalBatch.id !== session.batchId) {
       session = projectReviewBatchToSession(formalBatch) || session;
     }
+    renderReviewGradingModeControl(formalBatch);
     const batchMatchesSession = Boolean(formalBatch && formalBatch.id === session.batchId);
     if (batchMatchesSession && typeof REVIEW_SESSION.applyReviewBatchToSession === "function") {
       Object.assign(session, normalizeClientReviewSession(REVIEW_SESSION.applyReviewBatchToSession(session, formalBatch)));
@@ -6949,14 +7001,15 @@
       const startFailure = canStartServerBatch ? reviewBatchStartFailureFor(session) : null;
       const missingSentenceCount = sentenceTasksMissingVariants(session).length;
       reviewVariantRetryUi(session, Boolean(missingSentenceCount));
-      $("#promptType").textContent = "整组复习";
+      const preparingImmediate = reviewGradingModePreference() === "immediate";
+      $("#promptType").textContent = preparingImmediate ? "逐题批改" : "整组批改";
       $("#promptDay").textContent = startFailure ? "题目快照尚未保存" : canStartServerBatch ? "正在保存题目快照" : "正在准备句子快照";
       $("#questionCount").textContent = `1 / ${session.taskIds.length}`;
-      $("#directionLabel").textContent = startFailure ? "服务器状态确认失败" : canStartServerBatch ? "准备本组草稿" : `还有 ${missingSentenceCount} 道句子题待固定`;
+      $("#directionLabel").textContent = startFailure ? "服务器状态确认失败" : canStartServerBatch ? (preparingImmediate ? "准备逐题批改" : "准备本组草稿") : `还有 ${missingSentenceCount} 道句子题待固定`;
       $("#promptText").textContent = startFailure
         ? "本组尚未进入作答，请手动重试"
         : canStartServerBatch
-          ? "正在准备可恢复的整组作答…"
+          ? `正在准备可恢复的${preparingImmediate ? "逐题批改" : "整组作答"}…`
           : (reviewVariantStatusMessage || "正在从本轮句子池固定整组题目…");
       $("#promptSpeech").innerHTML = "";
       $("#phoneticLine").textContent = startFailure ? "系统不会自动连续请求；重试会继续使用相同批次和题目快照。" : canStartServerBatch ? "题目快照保存完成后即可作答。" : "准备完成前不会开放输入，避免草稿与最终题目错位。";
@@ -7001,13 +7054,16 @@
     reviewVariantRetryUi(session, false);
     formalBatch = currentFormalReviewBatch();
     const draftQuestion = batchMatchesSession ? formalBatch.questions[formalBatch.index] : null;
-    const taskKey = `${task.taskId}|${task.reviewVariant?.id || "base"}`;
+    const immediateMode = Boolean(batchMatchesSession && formalBatch.gradingMode === "immediate");
+    const immediateResult = immediateMode && draftQuestion ? draftQuestion.result : null;
+    const immediateCorrect = Boolean(immediateResult && immediateResult.correct === true && immediateResult.gradingStatus === "correct" && Number(immediateResult.score) >= 1 && draftQuestion.completedAt);
+    const taskKey = `${task.taskId}|${task.reviewVariant?.id || "base"}|${immediateMode ? (draftQuestion?.attemptRequestId || "completed") : "group"}`;
     const preserveReviewUi = !resetAnswer && previousReviewUi && previousReviewUi.taskKey === taskKey;
     $("#promptType").textContent = task.item.type === "word" ? "单词" : "句子变式";
     $("#promptDay").textContent = `第 ${task.item.day} 天`;
     $("#questionCount").textContent = `${session.index + 1} / ${session.taskIds.length}`;
     $("#directionLabel").textContent = formatDirection(task.direction);
-    const prompt = task.direction === "en-zh" ? task.item.english : task.item.chinese;
+    const prompt = draftQuestion && draftQuestion.prompt ? draftQuestion.prompt : (task.direction === "en-zh" ? task.item.english : task.item.chinese);
     $("#promptText").textContent = prompt;
     $("#promptSpeech").innerHTML = task.direction === "en-zh" ? speechButtonHtml(task.item.english, "播放题目发音") : "";
     $("#phoneticLine").textContent = task.item.type === "word" && task.direction === "en-zh" ? task.item.phonetic : "";
@@ -7015,20 +7071,57 @@
     if (answerInput) {
       answerInput.dataset.reviewTaskKey = taskKey;
       answerInput.placeholder = task.direction === "en-zh" ? "输入中文答案" : "输入英文答案";
-      answerInput.value = preserveReviewUi ? previousReviewUi.value : (draftQuestion ? draftQuestion.answer : "");
-      answerInput.disabled = reviewBatchRequestInProgress;
+      answerInput.value = preserveReviewUi
+        ? previousReviewUi.value
+        : immediateMode
+          ? (immediateCorrect ? String(draftQuestion.answer || "") : "")
+          : (draftQuestion ? draftQuestion.answer : "");
+      answerInput.disabled = reviewBatchRequestInProgress || immediateCorrect;
     }
     if (submitButton) {
-      submitButton.disabled = reviewBatchRequestInProgress;
+      submitButton.disabled = reviewBatchRequestInProgress || immediateCorrect;
       const last = formalBatch && formalBatch.index >= formalBatch.questions.length - 1;
-      submitButton.innerHTML = last ? '提交<i data-lucide="check" aria-hidden="true"></i>' : '下一题<i data-lucide="arrow-right" aria-hidden="true"></i>';
+      submitButton.innerHTML = immediateMode
+        ? `${draftQuestion && draftQuestion.attemptCount ? "提交订正" : "提交答案"}<i data-lucide="check" aria-hidden="true"></i>`
+        : last ? '提交<i data-lucide="check" aria-hidden="true"></i>' : '下一题<i data-lucide="arrow-right" aria-hidden="true"></i>';
     }
-    $("#previousReviewQuestion").disabled = reviewBatchRequestInProgress || !formalBatch || formalBatch.index <= 0;
-    $("#reviewDraftStatus").textContent = reviewBatchRequestInProgress ? "正在保存…" : "答案会保存到当前账号";
-    if (feedback) feedback.hidden = true;
-    if (feedbackActions) feedbackActions.hidden = true;
+    $("#previousReviewQuestion").hidden = immediateMode;
+    $("#previousReviewQuestion").disabled = reviewBatchRequestInProgress || immediateMode || !formalBatch || formalBatch.index <= 0;
+    $("#reviewDraftStatus").textContent = reviewBatchRequestInProgress
+      ? (immediateMode ? "正在批改本题…" : "正在保存…")
+      : immediateMode
+        ? immediateCorrect ? "本题已记录，点击下一题继续" : immediateResult ? "本次结果已记录，请在原题完成订正" : "提交后立即批改"
+        : "答案会保存到当前账号";
+    if (immediateMode && immediateResult && feedback) {
+      const partial = immediateResult.gradingStatus === "partial";
+      feedback.hidden = false;
+      feedback.className = `feedback ${partial ? "is-partial" : immediateCorrect ? "is-correct" : "is-wrong"}`;
+      const attempts = Array.isArray(draftQuestion.attempts) ? draftQuestion.attempts : [];
+      const attemptHistory = attempts.length > 1
+        ? `<details class="feedback-attempt-history"><summary>查看 ${attempts.length} 次作答记录</summary><ol>${attempts.map((attempt, index) => `<li><span>第 ${index + 1} 次</span><strong>${escapeHtml(attempt.answer || "（未填写）")}</strong><em>${attempt.result && attempt.result.gradingStatus === "correct" ? "正确" : attempt.result && attempt.result.gradingStatus === "partial" ? "部分正确" : "错误"}</em></li>`).join("")}</ol></details>`
+        : "";
+      feedback.innerHTML = gradingFeedbackHtml({
+        answer: draftQuestion.answer,
+        referenceAnswer: draftQuestion.referenceAnswer,
+        correct: immediateCorrect,
+        gradingStatus: immediateResult.gradingStatus,
+        score: immediateResult.score,
+        explanation: immediateResult.explanation,
+        detailedExplanation: immediateResult.detailedExplanation
+      }) + attemptHistory;
+      if (feedbackActions) feedbackActions.hidden = !immediateCorrect;
+      $("#retryButton").hidden = true;
+      const last = formalBatch.index >= formalBatch.questions.length - 1;
+      $("#nextButton").innerHTML = last ? '完成本组<i data-lucide="arrow-right" aria-hidden="true"></i>' : '下一题<i data-lucide="arrow-right" aria-hidden="true"></i>';
+    } else {
+      if (feedback) feedback.hidden = true;
+      if (feedbackActions) feedbackActions.hidden = true;
+      $("#retryButton").hidden = false;
+      $("#nextButton").innerHTML = '下一题<i data-lucide="arrow-right" aria-hidden="true"></i>';
+    }
     reviewAnswerResetRequested = false;
     if (!preserveReviewUi && answerInput && !answerInput.disabled) requestAnimationFrame(() => answerInput.focus());
+    refreshIcons();
   }
 
   function answerMatches(task, answer) {
@@ -7117,6 +7210,43 @@
     const question = batch.questions[batch.index];
     if (!question) return;
     const answer = $("#answerInput").value.trim();
+    if (batch.gradingMode === "immediate") {
+      if (!answer) {
+        showToast("请先填写本题答案");
+        $("#answerInput").focus();
+        return;
+      }
+      if (!question.attemptRequestId) {
+        showToast("本题已经完成，请点击下一题");
+        return;
+      }
+      let succeeded = false;
+      reviewBatchRequestInProgress = true;
+      renderHome();
+      try {
+        await reviewBatchRequest("/answer", {
+          body: {
+            batchId: batch.id,
+            questionId: question.id,
+            attemptRequestId: question.attemptRequestId,
+            answer
+          }
+        });
+        succeeded = true;
+        invalidateReviewVariantStats();
+        abilityReport = null;
+        await loadAbilities(true);
+      } catch (error) {
+        showRequestError(error);
+      } finally {
+        if (accountRequestContextIsCurrent(accountContext)) {
+          reviewBatchRequestInProgress = false;
+          reviewAnswerResetRequested = succeeded;
+          renderHome();
+        }
+      }
+      return;
+    }
     const last = batch.index >= batch.questions.length - 1;
     reviewBatchRequestInProgress = true;
     renderHome();
@@ -7194,6 +7324,36 @@
     try { await reviewBatchRequest("/archive", { body: { batchId: batch.id } }); }
     catch (error) { showRequestError(error); }
     finally { if (accountRequestContextIsCurrent(accountContext)) { reviewBatchRequestInProgress = false; renderHome(); } }
+  }
+
+  async function advanceImmediateReviewQuestion() {
+    const batch = currentFormalReviewBatch();
+    if (!batch || batch.gradingMode !== "immediate" || batch.phase !== "answering" || reviewBatchRequestInProgress) return;
+    const question = batch.questions[batch.index];
+    if (!question || !question.completedAt) return;
+    const accountContext = captureAccountRequestContext();
+    reviewBatchRequestInProgress = true;
+    renderHome();
+    try {
+      await reviewBatchRequest("/advance", { body: { batchId: batch.id, questionId: question.id } });
+      reviewAnswerResetRequested = true;
+    } catch (error) {
+      showRequestError(error);
+    } finally {
+      if (accountRequestContextIsCurrent(accountContext)) {
+        reviewBatchRequestInProgress = false;
+        renderHome();
+      }
+    }
+  }
+
+  function handleReviewFeedbackNext() {
+    const batch = currentFormalReviewBatch();
+    if (batch && batch.gradingMode === "immediate") {
+      void advanceImmediateReviewQuestion();
+      return;
+    }
+    advance(false);
   }
 
   function showFeedback(task, correct, answer, grading = {}) {
@@ -7938,6 +8098,7 @@
     });
     $("#testAiConfigButton").addEventListener("click", testAiConfiguration);
     $("#retryAiConnection").addEventListener("click", retryAiConnection);
+    $$('[data-review-grading-mode]').forEach(button => button.addEventListener("click", () => setReviewGradingMode(button.dataset.reviewGradingMode)));
     $("#answerForm").addEventListener("submit", submitAnswer);
     $("#previousReviewQuestion").addEventListener("click", () => moveReviewBatchQuestion(-1));
     $("#editReviewBatch").addEventListener("click", editReviewBatch);
@@ -7948,7 +8109,7 @@
     $("#editAiBatch").addEventListener("click", editAiBatch);
     $("#gradeAiBatch").addEventListener("click", gradeAiBatch);
     $("#reviewVariantRetryButton").addEventListener("click", retryReviewSentenceVariants);
-    $("#nextButton").addEventListener("click", () => advance(false));
+    $("#nextButton").addEventListener("click", handleReviewFeedbackNext);
     $("#retryButton").addEventListener("click", () => advance(true));
     $("#moreReviewButton").addEventListener("click", () => {
       startNextReviewGroup();
@@ -7972,7 +8133,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=66", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=67", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

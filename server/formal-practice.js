@@ -4,7 +4,9 @@ const crypto = require("node:crypto");
 
 const MAX_REVIEW_QUESTIONS = 100;
 const MAX_REVIEW_HISTORY = 40;
+const MAX_QUESTION_ATTEMPTS = 20;
 const PHASES = new Set(["answering", "review", "grading", "completed"]);
+const GRADING_MODES = new Set(["group", "immediate"]);
 
 function cleanText(value, maximum = 500) {
   return Array.from(String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()).slice(0, maximum).join("");
@@ -36,6 +38,20 @@ function sanitizeReviewResult(value) {
   };
 }
 
+function sanitizeQuestionAttempt(value) {
+  if (!value || typeof value !== "object") return null;
+  const id = cleanText(value.id, 180);
+  const answer = cleanText(value.answer, 500);
+  const result = sanitizeReviewResult(value.result);
+  if (!id || !answer || !result) return null;
+  return {
+    id,
+    answer,
+    result,
+    submittedAt: cleanText(value.submittedAt, 40)
+  };
+}
+
 function sanitizeReviewQuestion(value) {
   if (!value || typeof value !== "object") return null;
   const taskId = cleanText(value.taskId, 180);
@@ -44,6 +60,10 @@ function sanitizeReviewQuestion(value) {
   const chinese = cleanText(value.chinese, 300);
   if (!taskId || !english || !chinese) return null;
   const itemType = value.itemType === "sentence" ? "sentence" : "word";
+  const attempts = (Array.isArray(value.attempts) ? value.attempts : [])
+    .map(sanitizeQuestionAttempt)
+    .filter(Boolean)
+    .slice(-MAX_QUESTION_ATTEMPTS);
   return {
     id: cleanText(value.id, 180) || `reviewq-${crypto.randomUUID()}`,
     taskId,
@@ -59,7 +79,10 @@ function sanitizeReviewQuestion(value) {
     reviewVariant: value.reviewVariant && typeof value.reviewVariant === "object" ? JSON.parse(JSON.stringify(value.reviewVariant)) : null,
     answer: cleanText(value.answer, 500),
     draftUpdatedAt: cleanText(value.draftUpdatedAt, 40),
-    result: sanitizeReviewResult(value.result)
+    result: sanitizeReviewResult(value.result),
+    attemptRequestId: cleanText(value.attemptRequestId, 180),
+    attempts,
+    completedAt: cleanText(value.completedAt, 40)
   };
 }
 
@@ -72,6 +95,7 @@ function sanitizeReviewBatch(value) {
     id: cleanText(value.id, 180) || `reviewbatch-${crypto.randomUUID()}`,
     date: cleanText(value.date, 20),
     mode: ["all", "word", "sentence"].includes(value.mode) ? value.mode : "all",
+    gradingMode: GRADING_MODES.has(value.gradingMode) ? value.gradingMode : "group",
     allowRepeat: value.allowRepeat === true,
     recoveredFromBatchId: cleanText(value.recoveredFromBatchId, 180),
     phase,
@@ -94,6 +118,7 @@ function sanitizeFormalPractice(value) {
   const review = source.review && typeof source.review === "object" ? source.review : {};
   return {
     review: {
+      gradingMode: GRADING_MODES.has(review.gradingMode) ? review.gradingMode : "group",
       current: sanitizeReviewBatch(review.current),
       history: (Array.isArray(review.history) ? review.history : []).map(sanitizeReviewBatch).filter(Boolean).slice(-MAX_REVIEW_HISTORY)
     },
@@ -101,9 +126,23 @@ function sanitizeFormalPractice(value) {
   };
 }
 
-function publicReviewQuestion(question, completed) {
+function publicQuestionAttempt(value) {
+  const attempt = sanitizeQuestionAttempt(value);
+  return attempt ? {
+    id: attempt.id,
+    answer: attempt.answer,
+    result: attempt.result,
+    submittedAt: attempt.submittedAt
+  } : null;
+}
+
+function publicReviewQuestion(question, batch) {
+  const completed = batch.phase === "completed";
+  const immediate = batch.gradingMode === "immediate";
+  const attempted = immediate && question.attempts.length > 0;
+  const reveal = completed || attempted;
   const prompt = question.direction === "en-zh" ? question.english : question.chinese;
-  const result = completed ? sanitizeReviewResult(question.result) : null;
+  const result = reveal ? sanitizeReviewResult(question.result) : null;
   return {
     id: question.id,
     taskId: question.taskId,
@@ -113,13 +152,19 @@ function publicReviewQuestion(question, completed) {
     day: question.day,
     phonetic: question.direction === "en-zh" ? question.phonetic : "",
     prompt,
-    answer: question.answer,
+    answer: immediate && !attempted ? "" : question.answer,
     draftUpdatedAt: question.draftUpdatedAt,
-    ...(completed ? {
+    ...(immediate ? {
+      attemptRequestId: question.attemptRequestId,
+      attemptCount: question.attempts.length,
+      completedAt: question.completedAt
+    } : {}),
+    ...(reveal ? {
       english: question.english,
       chinese: question.chinese,
       referenceAnswer: question.direction === "zh-en" ? question.english : question.chinese,
-      result
+      result,
+      ...(immediate ? { attempts: question.attempts.map(publicQuestionAttempt).filter(Boolean) } : {})
     } : {})
   };
 }
@@ -127,16 +172,16 @@ function publicReviewQuestion(question, completed) {
 function publicReviewBatch(value) {
   const batch = sanitizeReviewBatch(value);
   if (!batch) return null;
-  const completed = batch.phase === "completed";
   return {
     id: batch.id,
     date: batch.date,
     mode: batch.mode,
+    gradingMode: batch.gradingMode,
     allowRepeat: batch.allowRepeat,
     recoveredFromBatchId: batch.recoveredFromBatchId,
     phase: batch.phase,
     index: batch.index,
-    questions: batch.questions.map(question => publicReviewQuestion(question, completed)),
+    questions: batch.questions.map(question => publicReviewQuestion(question, batch)),
     model: batch.model,
     reasoningEffort: batch.reasoningEffort,
     gradeRequestId: batch.gradeRequestId,
@@ -153,6 +198,7 @@ function publicFormalPractice(value) {
   const practice = sanitizeFormalPractice(value);
   return {
     review: {
+      gradingMode: practice.review.gradingMode,
       current: publicReviewBatch(practice.review.current),
       history: practice.review.history.map(publicReviewBatch).filter(Boolean)
     },
@@ -162,14 +208,19 @@ function publicFormalPractice(value) {
 
 function createReviewBatch(questions, options = {}) {
   const now = new Date().toISOString();
+  const gradingMode = GRADING_MODES.has(options.gradingMode) ? options.gradingMode : "group";
   return sanitizeReviewBatch({
     id: options.id || `reviewbatch-${crypto.randomUUID()}`,
     date: options.date,
     mode: options.mode,
+    gradingMode,
     allowRepeat: options.allowRepeat === true,
     phase: "answering",
     index: 0,
-    questions,
+    questions: (Array.isArray(questions) ? questions : []).map(question => ({
+      ...question,
+      attemptRequestId: cleanText(question && question.attemptRequestId, 180) || `reviewattempt-${crypto.randomUUID()}`
+    })),
     model: options.model,
     reasoningEffort: options.reasoningEffort,
     createdAt: now,
@@ -184,6 +235,7 @@ function formalPracticeSummary(value) {
     id: batch.id,
     date: batch.date,
     mode: batch.mode,
+    gradingMode: batch.gradingMode,
     phase: batch.phase,
     questionCount: batch.questions.length,
     answeredCount: batch.questions.filter(question => question.answer).length,

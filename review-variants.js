@@ -184,9 +184,10 @@
     const item = (Array.isArray(content && content.words) ? content.words : [])
       .find(candidate => normalizeEnglish(candidate && candidate.english) === token);
     if (!item || SENTENCE_MEANING_EXPANSION_BLOCKLIST.has(token)) return [];
-    const primary = cleanText(item.chinese, 80);
+    const primaryParts = String(item.chinese || "").split(/[；;、]/u).map(value => cleanText(value, 80)).filter(Boolean);
+    const primary = primaryParts[0] || "";
     if (!primary || /的$/u.test(primary) || /^[一二三四五六七八九十百千万亿两零〇]+$/u.test(primary)) return [];
-    return Array.from(new Set([item.chinese, ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])]
+    return Array.from(new Set([...primaryParts, ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])]
       .map(value => cleanText(value, 80))
       .filter(value => value && /[\u3400-\u9fff]/u.test(value) && !/[（）()；;…]/u.test(value))))
       .sort((left, right) => Array.from(right).length - Array.from(left).length);
@@ -224,8 +225,43 @@
     top: ["陀螺"],
     run: ["经营", "运行"],
     look: ["外观", "看起来"],
-    good: ["好处", "善良"]
+    good: ["好处", "善良"],
+    pool: ["池塘"]
   });
+
+  function preferredRegisteredChineseMeaning(content, token) {
+    const item = (Array.isArray(content && content.words) ? content.words : [])
+      .find(candidate => normalizeEnglish(candidate && candidate.english) === token);
+    if (!item) return "";
+    const allowed = registeredChineseMeanings(content, token);
+    if (!allowed.length) return "";
+    const ordered = [
+      ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : []),
+      ...String(item.chinese || "").split(/[；;、]/u)
+    ].map(value => cleanText(value, 80)).filter(Boolean);
+    return ordered.find(value => allowed.includes(value)) || allowed[0];
+  }
+
+  function registeredChineseMeaningConflicts(content, english, chinese) {
+    const text = cleanText(chinese, 180);
+    if (!text) return [];
+    return Array.from(new Set(englishTokens(english))).flatMap(token => {
+      const allowed = registeredChineseMeanings(content, token);
+      if (!allowed.length) return [];
+      return (OUT_OF_SCOPE_SENSE_HINTS[token] || [])
+        .filter(hint => text.includes(hint) && !allowed.some(meaning => meaning.includes(hint)))
+        .map(hint => ({ token, hint, preferred: preferredRegisteredChineseMeaning(content, token) }));
+    });
+  }
+
+  function prioritizeRegisteredChineseMeanings(content, english, chinese) {
+    let text = cleanText(chinese, 180);
+    if (!text) return text;
+    registeredChineseMeaningConflicts(content, english, text).forEach(conflict => {
+      if (conflict.preferred) text = text.replace(conflict.hint, conflict.preferred);
+    });
+    return naturalizePlainDeepChinese(english, text);
+  }
 
   function outOfScopeMeaning(content, english, chinese) {
     const known = knownWordSet(content);
@@ -288,7 +324,7 @@
     if (!value || typeof value !== "object") return invalidGeneratedVariant("invalid-object");
     const english = cleanText(value.english, 180);
     const sourceChinese = cleanText(value.chinese, 180);
-    const chinese = naturalizePlainDeepChinese(english, sourceChinese);
+    const chinese = prioritizeRegisteredChineseMeanings(content, english, sourceChinese);
     const family = sentenceFamily(baseItem);
     if (!english) return invalidGeneratedVariant("missing-english");
     if (!chinese) return invalidGeneratedVariant("missing-chinese", { english });
@@ -301,13 +337,13 @@
     if (!tokens.length) return invalidGeneratedVariant("no-english-words", { english });
     const unlearnedWords = Array.from(new Set(tokens.filter(token => !known.has(token))));
     if (unlearnedWords.length) return invalidGeneratedVariant("unlearned-word", { english, unlearnedWords });
-    const outOfScope = outOfScopeMeaning(content, english, chinese);
+    const outOfScope = outOfScopeMeaning(content, english, sourceChinese);
     if (outOfScope) return invalidGeneratedVariant("unlearned-word-sense", { english, unlearnedWords: [outOfScope.token], outOfScopeMeaning: outOfScope.hint });
     const normalized = normalizeEnglish(english);
     const acceptedChinese = [];
     [chinese, sourceChinese, ...(Array.isArray(value.acceptedChinese) ? value.acceptedChinese : [])].forEach(answer => {
-      const text = cleanText(answer, 180);
-      if (text && chineseSubjectMatchesEnglish(english, text) && !acceptedChinese.includes(text) && acceptedChinese.length < 16) acceptedChinese.push(text);
+      const text = prioritizeRegisteredChineseMeanings(content, english, answer);
+      if (text && !registeredChineseMeaningConflicts(content, english, text).length && chineseSubjectMatchesEnglish(english, text) && !acceptedChinese.includes(text) && acceptedChinese.length < 16) acceptedChinese.push(text);
     });
     const expandedAcceptedChinese = expandRegisteredChineseAnswers(content, english, acceptedChinese, 16);
     return { valid: true, reasonCode: "ok", english, normalizedEnglish: normalized, unlearnedWords: [], variant: {
@@ -359,6 +395,8 @@
     naturalizePlainDeepChinese,
     normalizeEnglish,
     outOfScopeMeaning,
+    prioritizeRegisteredChineseMeanings,
+    registeredChineseMeaningConflicts,
     sanitizeGeneratedSentenceVariant,
     sentenceFamily,
     sentenceVariantById,

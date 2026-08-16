@@ -86,6 +86,33 @@ function createAccounts(dataDir) {
   return { owner, other };
 }
 
+function writeWordBankContent(dataDir) {
+  const taskIds = Array.from({ length: 4 }, (_, index) => `word-bank-pool-${index + 1}:en-zh`);
+  fs.writeFileSync(path.join(dataDir, "content-store.json"), `${JSON.stringify({
+    version: 2,
+    updatedAt: "2026-08-16",
+    currentDay: 10,
+    words: [
+      { id: "d8-pool", day: 8, learned: "2026-08-07", english: "pool", chinese: "水池；游泳池", acceptedChinese: ["水池", "游泳池", "泳池"], directions: ["en-zh", "zh-en"] },
+      { id: "d10-snake", day: 10, learned: "2026-08-16", english: "snake", chinese: "蛇", acceptedChinese: ["蛇"], directions: ["en-zh", "zh-en"] }
+    ],
+    sentences: taskIds.map((taskId, index) => ({
+      id: taskId.slice(0, taskId.lastIndexOf(":")),
+      day: 10,
+      learned: "2026-08-16",
+      english: "A snake is in a pool.",
+      chinese: "一条蛇在一个池塘里。",
+      acceptedChinese: ["一条蛇在一个池塘里。"],
+      acceptedEnglish: ["a snake is in a pool"],
+      directions: ["en-zh"],
+      order: index + 1
+    })),
+    notes: [],
+    deletedIds: []
+  }, null, 2)}\n`, "utf8");
+  return taskIds;
+}
+
 function learnedWordReviewTasks(limit = 20) {
   const sandbox = { window: {} };
   vm.runInNewContext(fs.readFileSync(path.join(ROOT, "data.js"), "utf8"), sandbox, { filename: "data.js" });
@@ -127,6 +154,308 @@ async function completeReviewBatch(baseUrl, cookie, batchId, date, tasks) {
   assert.equal(graded.body.batch.phase, "completed");
   return graded;
 }
+
+test("per-question grading persists by account and records corrections idempotently", async () => {
+  const dataDir = temporaryDataDir();
+  createAccounts(dataDir);
+  let app;
+  try {
+    app = await startApp(dataDir);
+    let cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const otherCookie = await login(app.baseUrl, "formal-other", "formal-other-password");
+    const initialState = (await jsonRequest(app.baseUrl, cookie, "/api/state")).body;
+    assert.equal(initialState.formalPractice.review.gradingMode, "group");
+
+    const selected = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/mode", {
+      method: "POST",
+      body: { gradingMode: "immediate" }
+    });
+    assert.equal(selected.response.status, 200);
+    assert.equal(selected.body.appliesTo, "next");
+    assert.equal(selected.body.state.formalPractice.review.gradingMode, "immediate");
+
+    const started = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: { batchId: "review-immediate-fixed", date: "2026-08-16", mode: "word", taskIds: ["d1-man:en-zh", "d1-mat:en-zh"] }
+    });
+    assert.equal(started.response.status, 201);
+    assert.equal(started.body.batch.gradingMode, "immediate");
+    assert.equal(started.body.batch.questions[0].answer, "");
+    assert.ok(started.body.batch.questions[0].attemptRequestId);
+    assert.doesNotMatch(JSON.stringify(started.body.batch.questions), /referenceAnswer|acceptedChinese|男人|垫子/);
+
+    const switchedPristine = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/mode", {
+      method: "POST",
+      body: { gradingMode: "group" }
+    });
+    assert.equal(switchedPristine.body.appliesTo, "current");
+    assert.equal(switchedPristine.body.batch.gradingMode, "group");
+    const switchedBack = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/mode", {
+      method: "POST",
+      body: { gradingMode: "immediate" }
+    });
+    assert.equal(switchedBack.body.appliesTo, "current");
+    assert.equal(switchedBack.body.batch.gradingMode, "immediate");
+
+    const firstQuestion = switchedBack.body.batch.questions[0];
+    const wrongRequest = {
+      method: "POST",
+      body: {
+        batchId: switchedBack.body.batch.id,
+        questionId: firstQuestion.id,
+        attemptRequestId: firstQuestion.attemptRequestId,
+        answer: "错误"
+      }
+    };
+    const duplicateResponses = await Promise.all([
+      jsonRequest(app.baseUrl, cookie, "/api/review/batches/answer", wrongRequest),
+      jsonRequest(app.baseUrl, cookie, "/api/review/batches/answer", wrongRequest)
+    ]);
+    assert.deepEqual(duplicateResponses.map(item => item.response.status), [200, 200]);
+    assert.deepEqual(duplicateResponses.map(item => item.body.reused).sort(), [false, true]);
+    const afterWrong = duplicateResponses.find(item => item.body.reused === false).body.batch;
+    assert.equal(afterWrong.index, 0);
+    assert.equal(afterWrong.questions[0].result.gradingStatus, "incorrect");
+    assert.equal(afterWrong.questions[0].referenceAnswer, "男人");
+    assert.equal(afterWrong.questions[0].attemptCount, 1);
+    assert.equal(afterWrong.questions[0].completedAt, "");
+    assert.notEqual(afterWrong.questions[0].attemptRequestId, firstQuestion.attemptRequestId);
+    const afterWrongState = (await jsonRequest(app.baseUrl, cookie, "/api/state")).body;
+    assert.equal(afterWrongState.attempts.length - initialState.attempts.length, 1);
+    assert.equal(afterWrongState.history["2026-08-16"].reviewed, 1);
+
+    const conflictingRetry = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/answer", {
+      method: "POST",
+      body: { ...wrongRequest.body, answer: "男人" }
+    });
+    assert.equal(conflictingRetry.response.status, 409);
+    assert.match(conflictingRetry.body.error, /同一提交标识不能改写/);
+
+    const nextMode = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/mode", {
+      method: "POST",
+      body: { gradingMode: "group" }
+    });
+    assert.equal(nextMode.body.appliesTo, "next");
+    assert.equal(nextMode.body.batch.gradingMode, "immediate");
+    assert.equal(nextMode.body.state.formalPractice.review.gradingMode, "group");
+    const isolated = await jsonRequest(app.baseUrl, otherCookie, "/api/state");
+    assert.equal(isolated.body.formalPractice.review.gradingMode, "group");
+    assert.equal(isolated.body.formalPractice.review.current, null);
+
+    const corrected = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/answer", {
+      method: "POST",
+      body: {
+        batchId: afterWrong.id,
+        questionId: afterWrong.questions[0].id,
+        attemptRequestId: afterWrong.questions[0].attemptRequestId,
+        answer: "男人"
+      }
+    });
+    assert.equal(corrected.response.status, 200);
+    assert.equal(corrected.body.batch.questions[0].result.gradingStatus, "correct");
+    assert.equal(corrected.body.batch.questions[0].attemptCount, 2);
+    assert.ok(corrected.body.batch.questions[0].completedAt);
+    assert.equal(corrected.body.batch.index, 0, "a correct answer still requires an explicit next action");
+
+    await stopApp(app);
+    app = null;
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const restored = await jsonRequest(app.baseUrl, cookie, "/api/review/batches");
+    assert.equal(restored.body.batch.id, "review-immediate-fixed");
+    assert.equal(restored.body.batch.index, 0);
+    assert.equal(restored.body.batch.questions[0].attemptCount, 2);
+    assert.ok(restored.body.batch.questions[0].completedAt);
+
+    const advanced = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/advance", {
+      method: "POST",
+      body: { batchId: restored.body.batch.id, questionId: restored.body.batch.questions[0].id }
+    });
+    assert.equal(advanced.response.status, 200);
+    assert.equal(advanced.body.batch.index, 1);
+    assert.equal(advanced.body.batch.questions[1].answer, "");
+    assert.doesNotMatch(JSON.stringify(advanced.body.batch.questions[1]), /referenceAnswer|垫子/);
+    const secondQuestion = advanced.body.batch.questions[1];
+    const secondAnswer = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/answer", {
+      method: "POST",
+      body: {
+        batchId: advanced.body.batch.id,
+        questionId: secondQuestion.id,
+        attemptRequestId: secondQuestion.attemptRequestId,
+        answer: "垫子"
+      }
+    });
+    assert.equal(secondAnswer.response.status, 200);
+    assert.equal(secondAnswer.body.batch.questions[1].result.gradingStatus, "correct");
+    const completed = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/advance", {
+      method: "POST",
+      body: { batchId: secondAnswer.body.batch.id, questionId: secondAnswer.body.batch.questions[1].id }
+    });
+    assert.equal(completed.response.status, 200);
+    assert.equal(completed.body.batch.phase, "completed");
+    const completedState = completed.body.state;
+    assert.equal(completedState.attempts.length - initialState.attempts.length, 3);
+    assert.equal(completedState.history["2026-08-16"].reviewed, 3);
+    assert.equal(completedState.history["2026-08-16"].correct, 2);
+    assert.deepEqual(new Set(completedState.sessions["2026-08-16"].doneTaskIds), new Set(["d1-man:en-zh", "d1-mat:en-zh"]));
+
+    const advanceRetry = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/advance", {
+      method: "POST",
+      body: { batchId: completed.body.batch.id, questionId: completed.body.batch.questions[1].id }
+    });
+    assert.equal(advanceRetry.response.status, 200);
+    assert.equal(advanceRetry.body.reused, true);
+    assert.equal(advanceRetry.body.state.attempts.length, completedState.attempts.length);
+
+    const archived = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/archive", {
+      method: "POST",
+      body: { batchId: completed.body.batch.id }
+    });
+    assert.equal(archived.response.status, 200);
+    const nextGroup = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: { batchId: "review-group-after-immediate", date: "2026-08-16", mode: "word", taskIds: ["d1-sat:en-zh"] }
+    });
+    assert.equal(nextGroup.response.status, 201);
+    assert.equal(nextGroup.body.batch.gradingMode, "group");
+    assert.notEqual(nextGroup.body.batch.id, completed.body.batch.id);
+    assert.equal(nextGroup.body.batch.questions.some(question => completed.body.batch.questions.some(oldQuestion => oldQuestion.taskId === question.taskId)), false);
+  } finally {
+    await stopApp(app);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("per-question AI failure keeps the current sentence and writes zero formal evidence", async () => {
+  const dataDir = temporaryDataDir();
+  createAccounts(dataDir);
+  let app;
+  try {
+    app = await startApp(dataDir);
+    const cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const baseline = (await jsonRequest(app.baseUrl, cookie, "/api/state")).body;
+    await jsonRequest(app.baseUrl, cookie, "/api/review/batches/mode", { method: "POST", body: { gradingMode: "immediate" } });
+    const started = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: { batchId: "review-immediate-ai-failure", date: "2026-08-16", mode: "sentence", taskIds: ["d1-s1:en-zh"] }
+    });
+    const question = started.body.batch.questions[0];
+    const failed = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/answer", {
+      method: "POST",
+      body: { batchId: started.body.batch.id, questionId: question.id, attemptRequestId: question.attemptRequestId, answer: "完全不相关" }
+    });
+    assert.equal(failed.response.status, 503);
+    assert.match(failed.body.error, /尚未记分|not configured/);
+    assert.equal(failed.body.batch.index, 0);
+    assert.equal(failed.body.batch.questions[0].answer, "");
+    assert.equal(failed.body.batch.questions[0].attemptRequestId, question.attemptRequestId);
+    assert.doesNotMatch(JSON.stringify(failed.body.batch.questions[0]), /referenceAnswer/);
+    const after = (await jsonRequest(app.baseUrl, cookie, "/api/state")).body;
+    assert.deepEqual(after.attempts, baseline.attempts);
+    assert.deepEqual(after.mistakes, baseline.mistakes);
+    assert.deepEqual(after.history, baseline.history);
+    assert.deepEqual(after.taskStates, baseline.taskStates);
+  } finally {
+    await stopApp(app);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("formal grading repairs persisted pool meanings and rejects conflicting AI senses", async () => {
+  const dataDir = temporaryDataDir();
+  const { owner } = createAccounts(dataDir);
+  const taskIds = writeWordBankContent(dataDir);
+  let app;
+  try {
+    app = await startApp(dataDir);
+    let cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const otherCookie = await login(app.baseUrl, "formal-other", "formal-other-password");
+    await jsonRequest(app.baseUrl, cookie, "/api/state");
+    await jsonRequest(app.baseUrl, otherCookie, "/api/state");
+    await stopApp(app);
+    app = null;
+
+    const stateFile = path.join(dataDir, "user-states.json");
+    const disk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    const pool = disk.users[owner.id].reviewVariantPool;
+    pool.variants = [{
+      id: "legacy-pool-pond",
+      family: "inside",
+      english: "A snake is in a pool.",
+      chinese: "一条蛇在一个池塘里。",
+      acceptedEnglish: ["a snake is in a pool"],
+      acceptedChinese: ["一条蛇在一个池塘里。"],
+      requiredWords: ["a", "snake", "is", "in", "pool"],
+      source: "ai"
+    }];
+    pool.assignments = Object.fromEntries(taskIds.map(taskId => [taskId, "legacy-pool-pond"]));
+    pool.status = "idle";
+    fs.writeFileSync(stateFile, `${JSON.stringify(disk, null, 2)}\n`, "utf8");
+
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "formal-owner", "formal-owner-password");
+    const migrated = await jsonRequest(app.baseUrl, cookie, "/api/state");
+    const migratedSentence = migrated.body.reviewVariantPool.sentences.find(item => item.id === "legacy-pool-pond");
+    assert.equal(migratedSentence.chinese, "一条蛇在一个水池里。");
+    assert.doesNotMatch(JSON.stringify(migratedSentence), /池塘/);
+    const isolatedAfterRestart = await jsonRequest(app.baseUrl, await login(app.baseUrl, "formal-other", "formal-other-password"), "/api/state");
+    assert.equal(isolatedAfterRestart.body.reviewVariantPool.sentences.some(item => item.id === "legacy-pool-pond"), false);
+    const migratedDisk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    const storedVariant = migratedDisk.users[owner.id].reviewVariantPool.variants.find(item => item.id === "legacy-pool-pond");
+    assert.equal(storedVariant.chinese, "一条蛇在一个水池里。");
+    assert.ok(storedVariant.acceptedChinese.includes("一条蛇在一个游泳池里。"));
+    assert.ok(storedVariant.acceptedChinese.includes("一条蛇在一个泳池里。"));
+    assert.doesNotMatch(JSON.stringify(storedVariant), /池塘/);
+    const stableContents = fs.readFileSync(stateFile, "utf8");
+    const stableMtime = fs.statSync(stateFile).mtimeMs;
+    await jsonRequest(app.baseUrl, cookie, "/api/state");
+    assert.equal(fs.readFileSync(stateFile, "utf8"), stableContents);
+    assert.equal(fs.statSync(stateFile).mtimeMs, stableMtime);
+
+    const started = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/start", {
+      method: "POST",
+      body: {
+        batchId: "review-word-bank-meanings",
+        date: "2026-08-16",
+        mode: "sentence",
+        taskIds,
+        variantIds: Object.fromEntries(taskIds.map(taskId => [taskId, "legacy-pool-pond"]))
+      }
+    });
+    assert.equal(started.response.status, 201);
+    assert.deepEqual(started.body.batch.questions.map(question => question.prompt), taskIds.map(() => "A snake is in a pool."));
+    assert.doesNotMatch(JSON.stringify(started.body.batch.questions), /池塘|referenceAnswer|acceptedChinese/);
+    const answers = ["一条蛇在一个水池里", "一条蛇在一个游泳池里", "一条蛇在一个泳池里", "一条蛇在一个池塘里"];
+    for (let index = 0; index < started.body.batch.questions.length; index += 1) {
+      const drafted = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/draft", {
+        method: "PUT",
+        body: {
+          batchId: started.body.batch.id,
+          questionId: started.body.batch.questions[index].id,
+          index,
+          nextIndex: Math.min(index + 1, started.body.batch.questions.length - 1),
+          answer: answers[index]
+        }
+      });
+      assert.equal(drafted.response.status, 200);
+    }
+    const review = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/review", { method: "POST", body: { batchId: started.body.batch.id } });
+    const graded = await jsonRequest(app.baseUrl, cookie, "/api/review/batches/grade", {
+      method: "POST",
+      body: { batchId: started.body.batch.id, gradeRequestId: review.body.batch.gradeRequestId }
+    });
+    assert.equal(graded.response.status, 200, "the word-bank conflict must be graded locally instead of waiting for AI");
+    assert.deepEqual(graded.body.batch.questions.map(question => question.result.gradingStatus), ["correct", "correct", "correct", "incorrect"]);
+    assert.deepEqual(graded.body.batch.questions.map(question => question.result.score), [1, 1, 1, 0]);
+    assert.equal(graded.body.batch.questions[3].result.source, "word-bank");
+    assert.match(graded.body.batch.questions[3].result.explanation, /pool.*水池.*池塘/);
+    assert.equal(graded.body.batch.questions.every(question => !question.referenceAnswer.includes("池塘")), true);
+    assert.equal(graded.body.state.attempts.slice(-4).every(item => item.formalEvidence === true), true);
+  } finally {
+    await stopApp(app);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
 
 test("formal review batches keep drafts private and write evidence once after whole-group grading", async () => {
   const dataDir = temporaryDataDir();

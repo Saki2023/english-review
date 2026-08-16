@@ -484,6 +484,13 @@ function englishTokens(value) {
   return String(value || "").toLocaleLowerCase().match(/[a-z]+(?:'[a-z]+)?/g) || [];
 }
 
+function wordChineseMeanings(item) {
+  return Array.from(new Set([
+    ...String(item && item.chinese || "").split(/[；;、]/u),
+    ...(Array.isArray(item && item.acceptedChinese) ? item.acceptedChinese : [])
+  ].map(value => cleanText(value, 80)).filter(Boolean)));
+}
+
 function buildLearningProfile(content, state, studyDate = "") {
   const taskStates = state.taskStates && typeof state.taskStates === "object" ? state.taskStates : {};
   const learnedWords = content.words.filter(item => !item.preview && (!studyDate || !item.learned || String(item.learned) <= studyDate));
@@ -495,6 +502,11 @@ function buildLearningProfile(content, state, studyDate = "") {
   }).slice(0, 120);
   const allowedWords = Array.from(new Set(rankedWords.flatMap(item => englishTokens(item.english))));
   const allowedSet = new Set(allowedWords);
+  const wordMeanings = Object.fromEntries(rankedWords.flatMap(item => {
+    const tokens = englishTokens(item.english);
+    const meanings = wordChineseMeanings(item);
+    return tokens.length === 1 && meanings.length ? [[tokens[0], meanings]] : [];
+  }));
   const rankedSentences = [...learnedSentences].sort((a, b) => {
     const weakA = itemWeakness(a, taskStates);
     const weakB = itemWeakness(b, taskStates);
@@ -544,6 +556,7 @@ function buildLearningProfile(content, state, studyDate = "") {
   return {
     currentDay: Number(content.currentDay) || 1,
     allowedWords,
+    wordMeanings,
     learnedWords: rankedWords.map(item => ({ english: item.english, chinese: item.chinese, day: item.day })),
     learnedSentences: rankedSentences.map(item => ({ english: item.english, chinese: item.chinese, day: item.day })),
     weakItems,

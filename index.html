@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=66">
+  <link rel="stylesheet" href="styles.css?v=67">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v66">v66</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v67">v67</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -183,13 +183,26 @@
           </section>
 
           <div class="review-toolbar">
-            <div class="segmented-control" role="group" aria-label="复习范围">
-              <button type="button" class="segment is-selected" data-mode="all" aria-pressed="true">全部</button>
-              <button type="button" class="segment" data-mode="word" aria-pressed="false">单词</button>
-              <button type="button" class="segment" data-mode="sentence" aria-pressed="false">句子</button>
+            <div class="review-toolbar-controls">
+              <div class="review-control-group">
+                <span class="review-control-label">复习范围</span>
+                <div class="segmented-control" role="group" aria-label="复习范围">
+                  <button type="button" class="segment is-selected" data-mode="all" aria-pressed="true">全部</button>
+                  <button type="button" class="segment" data-mode="word" aria-pressed="false">单词</button>
+                  <button type="button" class="segment" data-mode="sentence" aria-pressed="false">句子</button>
+                </div>
+              </div>
+              <div class="review-control-group review-grading-control">
+                <span class="review-control-label">批改方式</span>
+                <div class="segmented-control" id="reviewGradingModeControl" role="group" aria-label="批改方式">
+                  <button type="button" class="segment" data-review-grading-mode="immediate" aria-pressed="false">逐题批改</button>
+                  <button type="button" class="segment is-selected" data-review-grading-mode="group" aria-pressed="true">整组批改</button>
+                </div>
+              </div>
             </div>
             <span class="review-source" id="reviewSource"><i data-lucide="list-checks" aria-hidden="true"></i>间隔复习</span>
           </div>
+          <p class="review-grading-mode-note" id="reviewGradingModeNote" role="status" aria-live="polite" hidden></p>
 
           <section class="review-pool-status-card" id="reviewVariantPoolStatusCard" hidden>
             <div class="review-pool-status-head">
@@ -1223,18 +1236,18 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=66"></script>
-  <script src="data.js?v=66"></script>
-  <script src="pronunciation-data.js?v=66"></script>
-  <script src="review-variants.js?v=66"></script>
-  <script src="answer-utils.js?v=66"></script>
-  <script src="study-time.js?v=66"></script>
-  <script src="review-session.js?v=66"></script>
-  <script src="review-batch-client.js?v=66"></script>
-  <script src="offline-store.js?v=66"></script>
-  <script src="offline-learning.js?v=66"></script>
-  <script src="offline-ai.js?v=66"></script>
-  <script src="offline-replay.js?v=66"></script>
+  <script src="vendor/lucide.min.js?v=67"></script>
+  <script src="data.js?v=67"></script>
+  <script src="pronunciation-data.js?v=67"></script>
+  <script src="review-variants.js?v=67"></script>
+  <script src="answer-utils.js?v=67"></script>
+  <script src="study-time.js?v=67"></script>
+  <script src="review-session.js?v=67"></script>
+  <script src="review-batch-client.js?v=67"></script>
+  <script src="offline-store.js?v=67"></script>
+  <script src="offline-learning.js?v=67"></script>
+  <script src="offline-ai.js?v=67"></script>
+  <script src="offline-replay.js?v=67"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1250,7 +1263,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=66";
+      appScript.src = "app.js?v=67";
       document.body.appendChild(appScript);
     })();
   </script>

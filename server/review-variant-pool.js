@@ -1,7 +1,14 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { eligibleSentenceVariants, expandRegisteredChineseAnswers, normalizeEnglish, sentenceFamily } = require("../review-variants");
+const {
+  eligibleSentenceVariants,
+  expandRegisteredChineseAnswers,
+  normalizeEnglish,
+  prioritizeRegisteredChineseMeanings,
+  registeredChineseMeaningConflicts,
+  sentenceFamily
+} = require("../review-variants");
 
 const REVIEW_VARIANT_POOL_SCHEMA = 2;
 const REVIEW_VARIANT_POOL_TARGET = 50;
@@ -125,7 +132,20 @@ function sanitizeReviewVariantPool(value) {
   };
 }
 
-function ensureReviewVariantPool(value, { date, syncKey, contentSignature, targetCount = REVIEW_VARIANT_POOL_TARGET, now = new Date().toISOString() } = {}) {
+function repairPoolVariantMeanings(pool, content) {
+  if (!content || typeof content !== "object") return pool;
+  pool.variants = pool.variants.map(variant => {
+    const chinese = prioritizeRegisteredChineseMeanings(content, variant.english, variant.chinese);
+    const acceptedChinese = expandRegisteredChineseAnswers(content, variant.english, [
+      chinese,
+      ...variant.acceptedChinese.map(answer => prioritizeRegisteredChineseMeanings(content, variant.english, answer))
+    ].filter(answer => answer && !registeredChineseMeaningConflicts(content, variant.english, answer).length), 16);
+    return { ...variant, chinese, acceptedChinese: acceptedChinese.length ? acceptedChinese : [chinese] };
+  });
+  return pool;
+}
+
+function ensureReviewVariantPool(value, { date, syncKey, contentSignature, content = null, targetCount = REVIEW_VARIANT_POOL_TARGET, now = new Date().toISOString() } = {}) {
   const expectedDate = cleanText(date, 10);
   const expectedSyncKey = cleanText(syncKey, 80);
   const expectedSignature = cleanText(contentSignature, 80);
@@ -134,6 +154,7 @@ function ensureReviewVariantPool(value, { date, syncKey, contentSignature, targe
   if (!expectedDate || normalized.contentSignature !== expectedSignature || syncCycleChanged) {
     return { pool: createReviewVariantPool({ date: expectedDate, syncKey: expectedSyncKey, contentSignature: expectedSignature, targetCount, now }), changed: true, replaced: true };
   }
+  repairPoolVariantMeanings(normalized, content);
   // Pools created before schema 2 have no syncKey. Attach the current course
   // sync cycle without deleting already generated sentences or assignments.
   // Once migrated, a later learning sync changes syncKey and replaces the pool.
@@ -281,7 +302,7 @@ function stableIndex(value, length) {
 }
 
 function assignReviewVariantPoolTasks(value, tasks, content = null) {
-  const pool = sanitizeReviewVariantPool(value);
+  const pool = repairPoolVariantMeanings(sanitizeReviewVariantPool(value), content);
   const byId = new Map(pool.variants.map(item => [item.id, item]));
   const used = new Set(Object.values(pool.assignments));
   const variants = [];
@@ -308,7 +329,7 @@ function assignReviewVariantPoolTasks(value, tasks, content = null) {
       used.add(variant.id);
     }
     const acceptedChinese = content
-      ? expandRegisteredChineseAnswers(content, variant.english, variant.acceptedChinese, 16)
+      ? expandRegisteredChineseAnswers(content, variant.english, [variant.chinese, ...variant.acceptedChinese], 16)
       : variant.acceptedChinese;
     variants.push({ ...variant, acceptedChinese, taskId });
   });

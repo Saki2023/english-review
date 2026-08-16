@@ -223,3 +223,44 @@ test("persisted pool variants regain formal word-bank Chinese alternatives when 
   assert.ok(result.variants[0].acceptedChinese.includes("一支大笔在一个箱子上。"));
   assert.ok(result.variants[0].acceptedChinese.includes("一支大笔在一个盒子上。"));
 });
+
+test("legacy pool meanings migrate to the registered word bank and stay idempotent", () => {
+  const learnedContent = {
+    words: [
+      { english: "pool", chinese: "水池；游泳池", acceptedChinese: ["水池", "游泳池", "泳池"] },
+      { english: "snake", chinese: "蛇", acceptedChinese: ["蛇"] }
+    ]
+  };
+  const signature = "pool-word-bank-signature";
+  let pool = createReviewVariantPool({ date: "2026-08-16", syncKey: "sync-pool-word-bank", contentSignature: signature });
+  pool = storeReviewVariantPoolResults(pool, [{
+    id: "legacy-pool-pond",
+    family: "inside",
+    english: "A snake is in a pool.",
+    chinese: "一条蛇在一个池塘里。",
+    acceptedEnglish: ["a snake is in a pool"],
+    acceptedChinese: ["一条蛇在一个池塘里。"]
+  }]).pool;
+
+  const migrated = ensureReviewVariantPool(pool, {
+    date: "2026-08-16",
+    syncKey: "sync-pool-word-bank",
+    contentSignature: signature,
+    content: learnedContent
+  });
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.pool.variants[0].chinese, "一条蛇在一个水池里。");
+  assert.doesNotMatch(JSON.stringify(migrated.pool.variants[0]), /池塘/);
+  assert.ok(migrated.pool.variants[0].acceptedChinese.includes("一条蛇在一个水池里。"));
+  assert.ok(migrated.pool.variants[0].acceptedChinese.includes("一条蛇在一个游泳池里。"));
+  assert.ok(migrated.pool.variants[0].acceptedChinese.includes("一条蛇在一个泳池里。"));
+
+  const repeated = ensureReviewVariantPool(JSON.parse(JSON.stringify(migrated.pool)), {
+    date: "2026-08-16",
+    syncKey: "sync-pool-word-bank",
+    contentSignature: signature,
+    content: learnedContent
+  });
+  assert.equal(repeated.changed, false);
+  assert.deepEqual(repeated.pool, migrated.pool);
+});

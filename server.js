@@ -8,13 +8,13 @@ const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredent
 const { NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults, mistakeIsResolved } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
 const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, offlineAiPractice, publicAiPractice, publicQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
-const { createReviewBatch, publicFormalPractice, publicReviewBatch, sanitizeFormalPractice, sanitizeReviewBatch } = require("./server/formal-practice");
+const { createReviewBatch, publicFormalPractice, publicReviewBatch, sanitizeFormalPractice, sanitizeReviewBatch, sanitizeReviewResult } = require("./server/formal-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
 const { buildLearningSyncProfile } = require("./server/learning-sync");
 const { validLearningSyncToken, validTeachingProfileWriteToken } = require("./server/learning-sync-token");
 const { publicTeachingProfile, sanitizeTeachingProfile } = require("./server/teaching-profile");
 const { abilityChanges, analyzeAbilities } = require("./server/ability-analysis");
-const { expandRegisteredChineseAnswers, naturalizePlainDeepChinese, normalizeEnglish: normalizeVariantEnglish, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById, validateGeneratedSentenceVariant } = require("./review-variants");
+const { expandRegisteredChineseAnswers, naturalizePlainDeepChinese, normalizeEnglish: normalizeVariantEnglish, prioritizeRegisteredChineseMeanings, registeredChineseMeaningConflicts, sanitizeGeneratedSentenceVariant, sentenceFamily, sentenceVariantById, validateGeneratedSentenceVariant } = require("./review-variants");
 const { classifyRepeatedReviewBatch, mergeReviewSession, retireReviewSession, uniqueBatchIds } = require("./review-session");
 const {
   REVIEW_VARIANT_POOL_BATCH,
@@ -223,15 +223,71 @@ function normalizeStoredContentSentences(target) {
     const english = String(item && item.english || "").trim();
     const sourceChinese = String(item && item.chinese || "").trim();
     if (!english || !sourceChinese) return item;
-    const chinese = naturalizePlainDeepChinese(english, sourceChinese);
+    const chinese = prioritizeRegisteredChineseMeanings(context, english, sourceChinese);
     const acceptedChinese = expandRegisteredChineseAnswers(context, english, [
       chinese,
-      sourceChinese,
+      prioritizeRegisteredChineseMeanings(context, english, sourceChinese),
       ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])
-    ], 16);
+        .map(answer => prioritizeRegisteredChineseMeanings(context, english, answer))
+    ].filter(answer => answer && !registeredChineseMeaningConflicts(context, english, answer).length), 16);
     return { ...item, chinese, acceptedChinese };
   });
   return context;
+}
+
+function repairStoredQuestionWordMeanings(question) {
+  if (!question || typeof question !== "object") return false;
+  const english = String(question.english || "").trim();
+  const sourceChinese = String(question.chinese || "").trim();
+  if (!english || !sourceChinese) return false;
+  const before = JSON.stringify({
+    chinese: question.chinese,
+    acceptedChinese: question.acceptedChinese,
+    reviewVariant: question.reviewVariant
+  });
+  const chinese = prioritizeRegisteredChineseMeanings(content, english, sourceChinese);
+  const acceptedChinese = expandRegisteredChineseAnswers(content, english, [
+    chinese,
+    ...(Array.isArray(question.acceptedChinese) ? question.acceptedChinese : [])
+      .map(answer => prioritizeRegisteredChineseMeanings(content, english, answer))
+  ].filter(answer => answer && !registeredChineseMeaningConflicts(content, english, answer).length), 16);
+  question.chinese = chinese;
+  question.acceptedChinese = acceptedChinese.length ? acceptedChinese : [chinese];
+  if (question.reviewVariant && typeof question.reviewVariant === "object") {
+    question.reviewVariant.chinese = chinese;
+    question.reviewVariant.acceptedChinese = [...question.acceptedChinese];
+  }
+  return before !== JSON.stringify({
+    chinese: question.chinese,
+    acceptedChinese: question.acceptedChinese,
+    reviewVariant: question.reviewVariant
+  });
+}
+
+function repairStoredPracticeWordMeanings(state) {
+  if (!state || typeof state !== "object") return false;
+  let changed = false;
+  const practice = state.formalPractice && state.formalPractice.review;
+  const reviewBatches = [
+    practice && practice.current,
+    ...(practice && Array.isArray(practice.history) ? practice.history : [])
+  ].filter(Boolean);
+  reviewBatches.forEach(batch => {
+    (Array.isArray(batch.questions) ? batch.questions : []).forEach(question => {
+      if (repairStoredQuestionWordMeanings(question)) changed = true;
+    });
+  });
+  const aiPractice = state.aiPractice && typeof state.aiPractice === "object" ? state.aiPractice : null;
+  const aiSets = [
+    aiPractice && aiPractice.currentSet,
+    ...(aiPractice && Array.isArray(aiPractice.queuedSets) ? aiPractice.queuedSets : [])
+  ].filter(Boolean);
+  aiSets.forEach(set => {
+    (Array.isArray(set.questions) ? set.questions : []).forEach(question => {
+      if (repairStoredQuestionWordMeanings(question)) changed = true;
+    });
+  });
+  return changed;
 }
 
 function recalculateCurrentDay(target, seedDay = 0) {
@@ -433,15 +489,17 @@ function repairStoredUserStates() {
     const normalized = sanitizeState(value);
     const interrupted = recoverInterruptedFormalWork(normalized);
     const repaired = repairLearningEvidence(content, normalized);
+    const repairedWordMeanings = repairStoredPracticeWordMeanings(repaired.state);
     const ensuredPool = ensureReviewVariantPool(repaired.state.reviewVariantPool, {
       date: today(),
       syncKey: reviewVariantSyncKey(content),
       contentSignature: reviewVariantContentSignature(content),
+      content,
       targetCount: REVIEW_VARIANT_POOL_TARGET
     });
     repaired.state.reviewVariantPool = ensuredPool.pool;
     userStates.users[userId] = repaired.state;
-    if (interrupted || repaired.changed || ensuredPool.changed || JSON.stringify(repaired.state) !== JSON.stringify(value)) changed = true;
+    if (interrupted || repaired.changed || repairedWordMeanings || ensuredPool.changed || JSON.stringify(repaired.state) !== JSON.stringify(value)) changed = true;
   });
   if (changed) persistUserStates();
 }
@@ -535,10 +593,12 @@ function getUserState(user) {
     userStates.users[user.id] = repaired.state;
     if (repaired.changed) changed = true;
   }
+  if (repairStoredPracticeWordMeanings(userStates.users[user.id])) changed = true;
   const ensured = ensureReviewVariantPool(userStates.users[user.id].reviewVariantPool, {
     date: today(),
     syncKey: reviewVariantSyncKey(content),
     contentSignature: reviewVariantContentSignature(content),
+    content,
     targetCount: REVIEW_VARIANT_POOL_TARGET
   });
   userStates.users[user.id].reviewVariantPool = ensured.pool;
@@ -1717,7 +1777,12 @@ function findStoredPoolSentenceTask(user, taskId, variantId = "") {
   if (!assignedId || (requestedId && requestedId !== assignedId)) return null;
   const storedVariant = Array.isArray(pool.variants) ? pool.variants.find(item => item.id === assignedId) : null;
   if (!storedVariant) return null;
-  const variant = { ...storedVariant, acceptedChinese: expandRegisteredChineseAnswers(content, storedVariant.english, storedVariant.acceptedChinese, 16) };
+  const chinese = prioritizeRegisteredChineseMeanings(content, storedVariant.english, storedVariant.chinese);
+  const acceptedChinese = expandRegisteredChineseAnswers(content, storedVariant.english, [
+    chinese,
+    ...storedVariant.acceptedChinese.map(answer => prioritizeRegisteredChineseMeanings(content, storedVariant.english, answer))
+  ].filter(answer => answer && !registeredChineseMeaningConflicts(content, storedVariant.english, answer).length), 16);
+  const variant = { ...storedVariant, chinese, acceptedChinese };
   return { ...base, item: { ...base.baseItem, ...variant }, variant };
 }
 
@@ -2760,6 +2825,12 @@ function reviewQuestionSnapshot(user, taskId, variantId = "") {
   const task = findReviewTutorTask(user, taskId, variantId);
   if (!task) throw Object.assign(new Error("review question not found or is not eligible"), { statusCode: 404 });
   const item = task.item;
+  const chinese = prioritizeRegisteredChineseMeanings(content, item.english, item.chinese);
+  const acceptedChinese = expandRegisteredChineseAnswers(content, item.english, [
+    chinese,
+    ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : []).map(answer => prioritizeRegisteredChineseMeanings(content, item.english, answer))
+  ].filter(answer => answer && !registeredChineseMeaningConflicts(content, item.english, answer).length), 16);
+  const reviewVariant = task.variant ? { ...task.variant, chinese, acceptedChinese } : null;
   return {
     id: `reviewq-${crypto.randomUUID()}`,
     taskId: task.taskId,
@@ -2769,10 +2840,10 @@ function reviewQuestionSnapshot(user, taskId, variantId = "") {
     day: Number(item.day) || 0,
     phonetic: String(item.phonetic || ""),
     english: item.english,
-    chinese: item.chinese,
+    chinese,
     acceptedEnglish: item.acceptedEnglish || [item.english],
-    acceptedChinese: item.acceptedChinese || [item.chinese],
-    reviewVariant: task.variant ? { ...task.variant } : null,
+    acceptedChinese,
+    reviewVariant,
     answer: ""
   };
 }
@@ -2819,6 +2890,36 @@ function indexedCompletedReviewTaskIds(state, batch) {
   ]);
 }
 
+function formalWordMeaningConflictGrade(question, answer) {
+  if (!question || question.direction !== "en-zh") return null;
+  const conflicts = registeredChineseMeaningConflicts(content, question.english, answer);
+  if (!conflicts.length) return null;
+  const words = Array.from(new Set(conflicts.map(item => item.token)));
+  const expected = prioritizeRegisteredChineseMeanings(content, question.english, question.chinese);
+  const explanation = `本题必须使用正式词库登记的词义；${conflicts.map(item => `${item.token} 应优先按“${item.preferred || "词库登记义项"}”理解，不能写成“${item.hint}”`).join("；")}。`;
+  return completeTranslationGrade(question.direction, question.english, answer, {
+    correct: false,
+    score: 0,
+    gradingStatus: "incorrect",
+    explanation,
+    problemWords: words,
+    source: "word-bank"
+  }, expected);
+}
+
+function formalWordMeaningsForEnglish(english, studyDate = today()) {
+  const sourceTokens = new Set(String(english || "").toLocaleLowerCase().match(/[a-z]+(?:'[a-z]+)?/g) || []);
+  return Object.fromEntries(content.words.flatMap(item => {
+    const token = normalizeVariantEnglish(item && item.english);
+    if (!token || !sourceTokens.has(token) || item.preview === true || !item.learned || String(item.learned) > String(studyDate)) return [];
+    const meanings = Array.from(new Set([
+      ...String(item.chinese || "").split(/[；;、]/u),
+      ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])
+    ].map(value => String(value || "").trim()).filter(Boolean)));
+    return meanings.length ? [[token, meanings]] : [];
+  }));
+}
+
 function reviewBatchWasRetired(state, batchId) {
   const requestedId = String(batchId || "").trim();
   if (!requestedId) return false;
@@ -2840,6 +2941,8 @@ function retireReviewBatchState(state, batch, updatedAt) {
 }
 
 async function gradeFormalQuestion(question, answer, route = null) {
+  const wordMeaningConflict = formalWordMeaningConflictGrade(question, answer);
+  if (wordMeaningConflict) return wordMeaningConflict;
   const acceptedAnswers = question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese;
   const local = localTranslationGrade(question.direction, question.english, answer, acceptedAnswers);
   if (local) return local;
@@ -2856,12 +2959,18 @@ async function gradeFormalQuestion(question, answer, route = null) {
   }
   if (!route) throw Object.assign(new Error("AI grading is not configured"), { statusCode: 503 });
   const sourceText = question.direction === "zh-en" ? question.chinese : question.english;
-  const routed = await runAiRoute(route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: question.direction, sourceText }));
+  const routed = await runAiRoute(route, config => createAiGrader(config).grade({
+    answer,
+    acceptedAnswers,
+    direction: question.direction,
+    sourceText,
+    wordMeanings: formalWordMeaningsForEnglish(question.english)
+  }));
   return { ...completeTranslationGrade(question.direction, question.english, answer, routed.value, question.direction === "zh-en" ? question.english : question.chinese), source: "ai" };
 }
 
 async function gradeReviewBatchQuestions(user, batch) {
-  const localResults = batch.questions.map(question => localTranslationGrade(
+  const localResults = batch.questions.map(question => formalWordMeaningConflictGrade(question, question.answer) || localTranslationGrade(
     question.direction,
     question.english,
     question.answer,
@@ -3015,6 +3124,219 @@ function applyCompletedReviewBatch(user, expectedBatch, results) {
   return userStates.users[user.id];
 }
 
+function reviewBatchHasActivity(batch) {
+  if (!batch) return false;
+  if (batch.phase !== "answering") return true;
+  return batch.questions.some(question => Boolean(
+    String(question.answer || "").trim()
+    || question.result
+    || question.completedAt
+    || (Array.isArray(question.attempts) && question.attempts.length)
+  ));
+}
+
+function ensureImmediateAttemptRequestIds(batch) {
+  let changed = false;
+  if (!batch || !Array.isArray(batch.questions)) return changed;
+  batch.questions.forEach(question => {
+    if (question.completedAt || question.attemptRequestId) return;
+    question.attemptRequestId = `reviewattempt-${crypto.randomUUID()}`;
+    changed = true;
+  });
+  return changed;
+}
+
+function immediateQuestionCompleted(question) {
+  const result = sanitizeReviewResult(question && question.result);
+  return Boolean(question && question.completedAt && result && result.correct === true && result.gradingStatus === "correct" && Number(result.score) >= 1);
+}
+
+async function gradeImmediateReviewQuestion(user, batch, question, answer) {
+  const local = formalWordMeaningConflictGrade(question, answer) || localTranslationGrade(
+    question.direction,
+    question.english,
+    answer,
+    question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese
+  );
+  if (local) return local;
+  if (question.itemType !== "sentence") return gradeFormalQuestion(question, answer);
+  if (!aiConfigured()) throw Object.assign(new Error("AI 批改暂不可用，本题尚未记分，请稍后重试"), { statusCode: 503 });
+  const rate = takeAiRequest(user.id);
+  if (!rate.allowed) throw Object.assign(new Error("AI 请求过于频繁，本题尚未记分，请稍后重试"), { statusCode: 429, retryAfterSeconds: rate.retryAfterSeconds });
+  const route = selectAiCandidates(aiSettings, { model: batch.model, reasoningEffort: batch.reasoningEffort });
+  return gradeFormalQuestion(question, answer, route);
+}
+
+function findImmediateAttempt(batch, attemptId) {
+  for (const question of batch && Array.isArray(batch.questions) ? batch.questions : []) {
+    const attempt = (Array.isArray(question.attempts) ? question.attempts : []).find(item => item.id === attemptId);
+    if (attempt) return { question, attempt };
+  }
+  return null;
+}
+
+function applyImmediateReviewAttempt(user, expectedBatch, questionId, attemptId, answer, rawResult) {
+  const latest = getUserState(user);
+  const practice = sanitizeFormalPractice(latest.formalPractice);
+  const current = practice.review.current;
+  if (!current || current.id !== expectedBatch.id) throw Object.assign(new Error("review batch changed while grading"), { statusCode: 409 });
+  const existing = findImmediateAttempt(current, attemptId);
+  if (existing) {
+    if (existing.question.id !== questionId || existing.attempt.answer !== answer) {
+      throw Object.assign(new Error("同一提交标识不能改写为另一份答案"), { statusCode: 409 });
+    }
+    return { state: latest, reused: true };
+  }
+  if (current.gradingMode !== "immediate" || current.phase !== "answering") throw Object.assign(new Error("当前题组不是逐题批改作答阶段"), { statusCode: 409 });
+  const currentQuestion = current.questions[current.index];
+  if (!currentQuestion || currentQuestion.id !== questionId) throw Object.assign(new Error("review question changed"), { statusCode: 409 });
+  if (currentQuestion.attemptRequestId !== attemptId) throw Object.assign(new Error("本题提交标识已更新，请使用恢复后的当前题目重试"), { statusCode: 409 });
+
+  const result = sanitizeReviewResult(rawResult);
+  if (!result) throw Object.assign(new Error("review grade is invalid"), { statusCode: 503 });
+  const next = sanitizeState(JSON.parse(JSON.stringify(latest)));
+  const nextPractice = sanitizeFormalPractice(next.formalPractice);
+  const batch = nextPractice.review.current;
+  const question = batch.questions[batch.index];
+  const submittedAt = new Date().toISOString();
+  const studyDate = batch.date || today();
+  const prompt = question.direction === "en-zh" ? question.english : question.chinese;
+  const expected = question.direction === "zh-en" ? question.english : question.chinese;
+  const attempt = {
+    id: attemptId,
+    batchId: batch.id,
+    taskId: question.taskId,
+    variantId: question.variantId,
+    reviewVariant: question.reviewVariant,
+    date: studyDate,
+    submittedAt,
+    direction: question.direction,
+    prompt,
+    english: question.english,
+    chinese: question.chinese,
+    answer,
+    correct: result.correct,
+    score: result.score,
+    gradingStatus: result.gradingStatus,
+    expected,
+    gradingSource: result.source,
+    explanation: result.explanation,
+    detailedExplanation: result.detailedExplanation,
+    problemWords: result.problemWords,
+    wordResults: result.wordResults,
+    formalEvidence: true
+  };
+
+  updateFormalSchedule(next, question, result, studyDate);
+  const existingAttemptIds = new Set(next.attempts.map(item => String(item && item.id || "")));
+  if (!existingAttemptIds.has(attempt.id)) next.attempts = [...next.attempts, attempt].slice(-120);
+  if (question.variantId) appendSentencePracticeEvents(next, [{
+    id: attempt.id,
+    variantId: question.variantId,
+    date: studyDate,
+    practicedAt: submittedAt,
+    correct: result.correct === true && result.gradingStatus !== "partial" && Number(result.score) >= 1,
+    source: "review"
+  }]);
+  const history = next.history[studyDate] && typeof next.history[studyDate] === "object" ? next.history[studyDate] : { reviewed: 0, correct: 0 };
+  history.reviewed = (Number(history.reviewed) || 0) + 1;
+  history.correct = Math.round(((Number(history.correct) || 0) + Number(result.score || 0)) * 100) / 100;
+  next.history[studyDate] = history;
+
+  const mistakeId = `mistake-${batch.id}:${question.id}`;
+  if (result.gradingStatus !== "correct") {
+    next.mistakes = [...next.mistakes.filter(item => item && item.id !== mistakeId), {
+      id: mistakeId,
+      attemptId,
+      batchId: batch.id,
+      taskId: question.taskId,
+      variantId: question.variantId,
+      reviewVariant: question.reviewVariant,
+      date: studyDate,
+      direction: question.direction,
+      day: question.day,
+      prompt,
+      userAnswer: answer,
+      correctAnswer: expected,
+      note: result.detailedExplanation || result.explanation || "本次复习未完全答对。"
+    }];
+  }
+  next.mistakes = next.mistakes.filter(item => !mistakeIsResolved(next.attempts, item && item.taskId)).slice(-80);
+
+  question.answer = answer;
+  question.draftUpdatedAt = submittedAt;
+  question.result = result;
+  question.attempts = [...question.attempts, { id: attemptId, answer, result, submittedAt }].slice(-20);
+  if (result.correct === true && result.gradingStatus === "correct" && Number(result.score) >= 1) {
+    question.completedAt = submittedAt;
+    question.attemptRequestId = "";
+  } else {
+    question.completedAt = "";
+    question.attemptRequestId = `reviewattempt-${crypto.randomUUID()}`;
+  }
+  batch.updatedAt = submittedAt;
+  batch.lastError = "";
+  nextPractice.updatedAt = submittedAt;
+  next.formalPractice = nextPractice;
+  userStates.users[user.id] = sanitizeState(next);
+  persistUserStates();
+  return { state: userStates.users[user.id], reused: false };
+}
+
+function advanceImmediateReviewQuestion(user, expectedBatchId, questionId) {
+  const latest = getUserState(user);
+  const practice = sanitizeFormalPractice(latest.formalPractice);
+  const current = practice.review.current;
+  if (!current || current.id !== expectedBatchId) throw Object.assign(new Error("review batch not found"), { statusCode: 404 });
+  if (current.gradingMode !== "immediate") throw Object.assign(new Error("当前题组不是逐题批改模式"), { statusCode: 409 });
+  const requestedIndex = current.questions.findIndex(question => question.id === questionId);
+  if (requestedIndex < 0) throw Object.assign(new Error("review question not found"), { statusCode: 404 });
+  if (current.phase === "completed" || requestedIndex < current.index) return { state: latest, reused: true };
+  if (current.phase !== "answering" || requestedIndex !== current.index) throw Object.assign(new Error("review question changed"), { statusCode: 409 });
+  if (!immediateQuestionCompleted(current.questions[requestedIndex])) throw Object.assign(new Error("本题尚未完全答对，请先完成订正"), { statusCode: 409 });
+
+  const next = sanitizeState(JSON.parse(JSON.stringify(latest)));
+  const nextPractice = sanitizeFormalPractice(next.formalPractice);
+  const batch = nextPractice.review.current;
+  const question = batch.questions[requestedIndex];
+  const now = new Date().toISOString();
+  const studyDate = batch.date || today();
+  const last = requestedIndex >= batch.questions.length - 1;
+  const existingSession = next.sessions[studyDate] && typeof next.sessions[studyDate] === "object" ? next.sessions[studyDate] : {};
+  const taskIds = batch.questions.map(item => item.taskId);
+  const doneTaskIds = reviewSessionDoneTaskIds([...(Array.isArray(existingSession.doneTaskIds) ? existingSession.doneTaskIds : []), question.taskId]);
+
+  if (last) {
+    batch.phase = "completed";
+    batch.completedAt = now;
+    batch.index = Math.max(0, batch.questions.length - 1);
+  } else {
+    batch.index = requestedIndex + 1;
+    ensureImmediateAttemptRequestIds(batch);
+  }
+  batch.updatedAt = now;
+  batch.lastError = "";
+  next.sessions[studyDate] = {
+    ...existingSession,
+    date: studyDate,
+    mode: batch.mode,
+    taskIds,
+    doneTaskIds,
+    index: last ? taskIds.length : batch.index,
+    currentTaskId: last ? null : (taskIds[batch.index] || null),
+    batchId: batch.id,
+    batchComplete: last,
+    allowRepeat: batch.allowRepeat === true,
+    updatedAt: now,
+    variants: existingSession.variants && typeof existingSession.variants === "object" ? existingSession.variants : {}
+  };
+  nextPractice.updatedAt = now;
+  next.formalPractice = nextPractice;
+  userStates.users[user.id] = sanitizeState(next);
+  persistUserStates();
+  return { state: userStates.users[user.id], reused: false };
+}
+
 function handleReviewBatches(req, res, url, user) {
   if (!user) return sendError(res, 401, "login required");
   const suffix = url.pathname.slice("/api/review/batches".length) || "/";
@@ -3023,6 +3345,27 @@ function handleReviewBatches(req, res, url, user) {
     const state = getUserState(user);
     const practice = sanitizeFormalPractice(state.formalPractice);
     const now = new Date().toISOString();
+    if (suffix === "/mode" && req.method === "POST") {
+      const gradingMode = ["group", "immediate"].includes(body.gradingMode) ? body.gradingMode : "";
+      if (!gradingMode) return sendError(res, 400, "批改模式不正确");
+      const current = practice.review.current;
+      const locked = reviewBatchHasActivity(current);
+      practice.review.gradingMode = gradingMode;
+      if (current && !locked) {
+        current.gradingMode = gradingMode;
+        if (gradingMode === "immediate") ensureImmediateAttemptRequestIds(current);
+        current.updatedAt = now;
+      }
+      practice.updatedAt = now;
+      saveFormalPracticeState(user, state, practice);
+      const saved = getUserState(user);
+      return sendJson(res, 200, {
+        gradingMode,
+        appliesTo: current && !locked ? "current" : "next",
+        batch: publicReviewBatch(saved.formalPractice.review.current),
+        state: publicReviewState(saved)
+      });
+    }
     if (suffix === "/start" && req.method === "POST") {
       const requestedId = String(body.batchId || "").trim().slice(0, 180) || `reviewbatch-${crypto.randomUUID()}`;
       const current = practice.review.current;
@@ -3049,6 +3392,7 @@ function handleReviewBatches(req, res, url, user) {
         id: requestedId,
         date: studyDate,
         mode: body.mode,
+        gradingMode: practice.review.gradingMode,
         allowRepeat,
         model: body.model,
         reasoningEffort: body.reasoningEffort
@@ -3087,6 +3431,12 @@ function handleReviewBatches(req, res, url, user) {
         if (reviewBatchWasRetired(state, requestedBatchId)) return sendJson(res, 200, { batch: publicReviewBatch(batch), retiredBatchId: requestedBatchId, reused: true, state: publicReviewState(state) });
         return sendError(res, 404, "review batch not found");
       }
+      if (batch.gradingMode === "immediate") return sendJson(res, 409, {
+        code: "review_repeat_not_confirmed",
+        error: "逐题批改题组包含独立正式尝试，不能按旧版空草稿自动处理",
+        batch: publicReviewBatch(batch),
+        state: publicReviewState(state)
+      });
       const completedTaskIds = authoritativeCompletedReviewTaskIds(state, batch);
       const repeated = classifyRepeatedReviewBatch(batch, completedTaskIds);
       if (!repeated) return sendJson(res, 409, {
@@ -3141,7 +3491,56 @@ function handleReviewBatches(req, res, url, user) {
     }
     const batch = practice.review.current;
     if (!batch || batch.id !== String(body.batchId || "")) return sendError(res, 404, "review batch not found");
+    if (suffix === "/answer" && req.method === "POST") {
+      if (batch.gradingMode !== "immediate") return sendJson(res, 409, { error: "当前题组使用整组批改", batch: publicReviewBatch(batch) });
+      const questionId = String(body.questionId || "").trim().slice(0, 180);
+      const attemptId = String(body.attemptRequestId || "").trim().slice(0, 180);
+      const answer = String(body.answer || "").trim().slice(0, MAX_AI_ANSWER_LENGTH);
+      if (!questionId || !attemptId) return sendError(res, 400, "本题提交标识不完整");
+      const duplicate = findImmediateAttempt(batch, attemptId);
+      if (duplicate) {
+        if (duplicate.question.id !== questionId || duplicate.attempt.answer !== answer) return sendJson(res, 409, { error: "同一提交标识不能改写为另一份答案", batch: publicReviewBatch(batch) });
+        return sendJson(res, 200, { batch: publicReviewBatch(batch), reused: true, state: publicReviewState(state) });
+      }
+      if (!answer) return sendJson(res, 400, { error: "请先填写本题答案", batch: publicReviewBatch(batch) });
+      if (batch.phase !== "answering" || !batch.questions[batch.index] || batch.questions[batch.index].id !== questionId) return sendJson(res, 409, { error: "当前题目已经变化，请按恢复后的题目继续", batch: publicReviewBatch(batch) });
+      if (batch.questions[batch.index].attemptRequestId !== attemptId) return sendJson(res, 409, { error: "本题提交标识已更新，请按恢复后的题目继续", batch: publicReviewBatch(batch) });
+      try {
+        const result = await gradeImmediateReviewQuestion(user, batch, batch.questions[batch.index], answer);
+        const applied = applyImmediateReviewAttempt(user, batch, questionId, attemptId, answer, result);
+        return sendJson(res, 200, {
+          batch: publicReviewBatch(applied.state.formalPractice.review.current),
+          reused: applied.reused,
+          state: publicReviewState(applied.state)
+        });
+      } catch (error) {
+        const latest = getUserState(user);
+        const failedPractice = sanitizeFormalPractice(latest.formalPractice);
+        const failedBatch = failedPractice.review.current;
+        if (failedBatch && failedBatch.id === batch.id && failedBatch.phase === "answering") {
+          failedBatch.lastError = String(error && error.message || "本题批改暂不可用，答案尚未记分，请稍后重试").slice(0, 300);
+          failedBatch.updatedAt = new Date().toISOString();
+          failedPractice.updatedAt = failedBatch.updatedAt;
+          saveFormalPracticeState(user, latest, failedPractice);
+        }
+        const status = error && [400, 404, 409, 429, 503].includes(error.statusCode) ? error.statusCode : 503;
+        return sendJson(res, status, {
+          error: String(error && error.message || "本题批改暂不可用，答案尚未记分，请稍后重试"),
+          batch: publicReviewBatch(getUserState(user).formalPractice.review.current)
+        }, error && error.retryAfterSeconds ? { "Retry-After": String(error.retryAfterSeconds) } : {});
+      }
+    }
+    if (suffix === "/advance" && req.method === "POST") {
+      if (batch.gradingMode !== "immediate") return sendJson(res, 409, { error: "当前题组使用整组批改", batch: publicReviewBatch(batch) });
+      const advanced = advanceImmediateReviewQuestion(user, batch.id, String(body.questionId || "").trim().slice(0, 180));
+      return sendJson(res, 200, {
+        batch: publicReviewBatch(advanced.state.formalPractice.review.current),
+        reused: advanced.reused,
+        state: publicReviewState(advanced.state)
+      });
+    }
     if (suffix === "/draft" && req.method === "PUT") {
+      if (batch.gradingMode !== "group") return sendJson(res, 409, { error: "逐题批改不保存整组草稿", batch: publicReviewBatch(batch) });
       if (batch.phase !== "answering") return sendJson(res, 409, { error: "当前题组不在作答阶段", batch: publicReviewBatch(batch) });
       const index = Math.min(Math.max(Number(body.index) || 0, 0), batch.questions.length - 1);
       const question = batch.questions[index];
@@ -3158,6 +3557,7 @@ function handleReviewBatches(req, res, url, user) {
       return sendJson(res, 200, { batch: publicReviewBatch(batch) });
     }
     if (suffix === "/edit" && req.method === "POST") {
+      if (batch.gradingMode !== "group") return sendJson(res, 409, { error: "逐题批改不能进入整组修改", batch: publicReviewBatch(batch) });
       if (batch.phase === "completed") return sendJson(res, 409, { error: "题组已经完成批改", batch: publicReviewBatch(batch) });
       batch.phase = "answering";
       batch.index = Math.min(Math.max(Number(body.index) || 0, 0), batch.questions.length - 1);
@@ -3168,6 +3568,7 @@ function handleReviewBatches(req, res, url, user) {
       return sendJson(res, 200, { batch: publicReviewBatch(batch) });
     }
     if (suffix === "/review" && req.method === "POST") {
+      if (batch.gradingMode !== "group") return sendJson(res, 409, { error: "逐题批改不进入整组核对", batch: publicReviewBatch(batch) });
       if (batch.phase === "completed") return sendJson(res, 200, { batch: publicReviewBatch(batch), reused: true });
       const missingIndex = batch.questions.findIndex(question => !question.answer.trim());
       if (missingIndex >= 0) {
@@ -3188,6 +3589,7 @@ function handleReviewBatches(req, res, url, user) {
       return sendJson(res, 200, { batch: publicReviewBatch(batch) });
     }
     if (suffix === "/grade" && req.method === "POST") {
+      if (batch.gradingMode !== "group") return sendJson(res, 409, { error: "逐题批改不能调用整组批改", batch: publicReviewBatch(batch) });
       if (batch.phase === "completed") return sendJson(res, 200, { batch: publicReviewBatch(batch), reused: true, state: publicReviewState(state) });
       if (!["review", "grading"].includes(batch.phase)) return sendJson(res, 409, { error: "请先核对整组答案", batch: publicReviewBatch(batch) });
       const requestId = String(body.gradeRequestId || batch.gradeRequestId || "").trim();
@@ -3282,7 +3684,7 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
 }
 
 async function gradeAiQuestionSet(user, set) {
-  const localResults = set.questions.map(question => localTranslationGrade(
+  const localResults = set.questions.map(question => formalWordMeaningConflictGrade(question, question.userAnswer) || localTranslationGrade(
     question.direction,
     question.english,
     question.userAnswer,
@@ -3518,7 +3920,13 @@ async function handleAiGrade(req, res, user) {
     const selection = aiSelectionForState(state, body);
     persistUserStates();
     const sourceText = task.direction === "zh-en" ? task.item.chinese : task.item.english;
-    const routed = await runAiRoute(selection.route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: task.direction, sourceText }));
+    const routed = await runAiRoute(selection.route, config => createAiGrader(config).grade({
+      answer,
+      acceptedAnswers,
+      direction: task.direction,
+      sourceText,
+      wordMeanings: formalWordMeaningsForEnglish(task.item.english)
+    }));
     return sendJson(res, 200, { ...completeTranslationGrade(task.direction, task.item.english, answer, routed.value, task.direction === "zh-en" ? task.item.english : (task.item.chinese || acceptedAnswers[0])), source: "ai" });
   } catch (error) {
     if (error && [400, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
@@ -3608,7 +4016,7 @@ async function handleAiGenerate(req, res, user) {
       const routed = await runAiRoute(prepared.selection.route, config => createAiQuestionGenerator(config).generateGroups(prepared.profile, prepared.selection.count, prepared.selection.groupCount));
       const normalizedGroups = routed.value.map(group => group.map(question => {
         const sourceChinese = String(question && question.chinese || "").trim();
-        const chinese = naturalizePlainDeepChinese(question && question.english, sourceChinese);
+        const chinese = prioritizeRegisteredChineseMeanings(content, question && question.english, sourceChinese);
         const poolVariant = prepared.currentPool.variants.find(item => normalizeVariantEnglish(item.english) === normalizeVariantEnglish(question && question.english));
         return {
           ...question,
@@ -3616,9 +4024,9 @@ async function handleAiGenerate(req, res, user) {
           chinese,
           acceptedChinese: expandRegisteredChineseAnswers(content, question && question.english, [
             chinese,
-            sourceChinese,
             ...(Array.isArray(question && question.acceptedChinese) ? question.acceptedChinese : [])
-          ], 16)
+              .map(answer => prioritizeRegisteredChineseMeanings(content, question && question.english, answer))
+          ].filter(answer => answer && !registeredChineseMeaningConflicts(content, question && question.english, answer).length), 16)
         };
       }));
       const sets = normalizedGroups.map((questions, index) => createQuestionSet(questions, routed.config, {
@@ -3929,16 +4337,23 @@ async function handleAiQuestionGrade(req, res, user) {
     if (!question) return sendError(res, 404, "AI question not found");
 
     const acceptedAnswers = question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese;
-    let result = localTranslationGrade(question.direction, question.english, answer, acceptedAnswers);
+    const wordMeaningConflict = formalWordMeaningConflictGrade(question, answer);
+    let result = wordMeaningConflict || localTranslationGrade(question.direction, question.english, answer, acceptedAnswers);
     if (!result) result = { correct: false, score: 0, gradingStatus: "incorrect", explanation: "本地规则判定。", problemWords: [], wordResults: [], source: "local" };
-    if (!result.correct) {
+    if (!result.correct && !wordMeaningConflict) {
       const rate = takeAiRequest(user.id);
       if (!rate.allowed) return sendJson(res, 429, { error: "AI rate limit reached" }, { "Retry-After": String(rate.retryAfterSeconds) });
       const availableModels = getAvailableModels(aiSettings);
       const requestedModel = availableModels.includes(set.model) ? set.model : aiSettings.defaultModel;
       const route = selectAiCandidates(aiSettings, { model: requestedModel, reasoningEffort: set.reasoningEffort });
       const sourceText = question.direction === "zh-en" ? question.chinese : question.english;
-      const routed = await runAiRoute(route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: question.direction, sourceText }));
+      const routed = await runAiRoute(route, config => createAiGrader(config).grade({
+        answer,
+        acceptedAnswers,
+        direction: question.direction,
+        sourceText,
+        wordMeanings: formalWordMeaningsForEnglish(question.english)
+      }));
       result = { ...completeTranslationGrade(question.direction, question.english, answer, routed.value, question.direction === "zh-en" ? question.english : question.chinese), source: "ai" };
     }
     const savedQuestion = saveAiQuestionResult(state, set.id, question.id, answer, result);

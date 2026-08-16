@@ -8,7 +8,7 @@ test("learning profile prioritizes weak learned content and excludes future less
   const content = {
     currentDay: 3,
     words: [
-      { id: "cat", day: 1, learned: "2026-08-01", english: "cat", chinese: "猫", directions: ["en-zh", "zh-en"] },
+      { id: "cat", day: 1, learned: "2026-08-01", english: "cat", chinese: "猫；猫咪", acceptedChinese: ["猫", "猫咪"], directions: ["en-zh", "zh-en"] },
       { id: "big", day: 2, learned: "2026-08-01", english: "big", chinese: "大的", directions: ["en-zh"] },
       { id: "future", day: 3, learned: "2026-08-02", english: "dog", chinese: "狗", directions: ["en-zh"] }
     ],
@@ -29,6 +29,7 @@ test("learning profile prioritizes weak learned content and excludes future less
   const profile = buildLearningProfile(content, state, "2026-08-01");
 
   assert.deepEqual(new Set(profile.allowedWords), new Set(["cat", "big"]));
+  assert.deepEqual(profile.wordMeanings.cat, ["猫", "猫咪"]);
   assert.equal(profile.allowedWords.includes("dog"), false);
   assert.equal(profile.learnedSentences.length, 1);
   assert.equal(profile.weakItems[0].english, "cat");
