@@ -320,6 +320,35 @@ test("self-study unlock boundaries follow the anchored dates and preview stays p
   assert.equal(candidate.lesson.lessonId, "trip-day-boundary-13");
 });
 
+test("active legacy snapshots use the anchored schedule without changing answers or evidence", () => {
+  const source = lesson("1", "trip-day-active-legacy", 12);
+  source.formalDate = "2026-08-11";
+  source.enabledFrom = "2026-08-11T00:00:00+08:00";
+  source.expiresAt = "2026-09-10T23:59:59+08:00";
+  source.plannedContent.note.date = "2026-08-11";
+  let state = upload([source]);
+  state.enabled = true;
+  state = startSelfStudyLesson(state, new Date("2026-08-18T00:00:00.000Z"));
+  const snapshot = state.progress[source.lessonId].snapshot;
+  snapshot.formalDate = "2026-08-11";
+  snapshot.enabledFrom = "2026-08-11T00:00:00+08:00";
+  snapshot.expiresAt = "2026-09-10T23:59:59+08:00";
+  snapshot.plannedContent.note.date = "2026-08-11";
+
+  const preview = selfStudyPreviewContent(state, new Date("2026-08-18T00:00:00.000Z"));
+  assert.equal(preview.formalDate, "2026-08-18");
+  assert.equal(preview.enabledFrom, "2026-08-17T16:00:00.000Z");
+  assert.equal(preview.note.date, "2026-08-18");
+  const publicState = publicSelfStudyState(state, new Date("2026-08-18T00:00:00.000Z"));
+  assert.equal(publicState.current.formalDate, "2026-08-18");
+  assert.equal(publicState.current.enabledFrom, "2026-08-17T16:00:00.000Z");
+  const history = selfStudyHistory(state);
+  assert.equal(history.lessons[0].formalDate, "2026-08-18");
+  assert.equal(history.lessons[0].plannedContent.note.date, "2026-08-18");
+  assert.equal(state.progress[source.lessonId].snapshot.formalDate, "2026-08-11");
+  assert.equal(state.progress[source.lessonId].snapshot.stages[0].steps[0].acceptedAnswers[0], "A");
+});
+
 test("public self-study state shows only the current step and never leaks an unanswered reference", () => {
   let state = upload([lesson(), lesson("1", "trip-day-10", 10)]);
   state.enabled = true;

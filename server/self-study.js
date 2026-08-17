@@ -714,6 +714,11 @@ function lessonStatus(state, lesson, now = new Date()) {
   return "not-started";
 }
 
+function scheduledLessonForProgress(state, progress, snapshot) {
+  if (!progress || !["in-progress", "paused", "ready"].includes(progress.status)) return snapshot;
+  return state.lessons.find(lesson => lesson.lessonId === progress.lessonId) || snapshot;
+}
+
 function currentLessonCandidate(value, now = new Date()) {
   const state = sanitizeSelfStudyState(value);
   const active = Object.values(state.progress).find(item => ["in-progress", "paused", "ready"].includes(item.status));
@@ -732,16 +737,21 @@ function selfStudyPreviewContent(value, now = new Date()) {
   const candidate = currentLessonCandidate(value, now);
   const lesson = candidate.progress ? candidate.progress.snapshot : (candidate.lesson || candidate.waitingLesson || null);
   if (!lesson) return null;
+  const schedule = scheduledLessonForProgress(candidate.state, candidate.progress, lesson);
+  const note = clone(lesson.plannedContent.note);
+  if (schedule.plannedContent && schedule.plannedContent.note && schedule.plannedContent.note.date) {
+    note.date = schedule.plannedContent.note.date;
+  }
   const source = candidate.progress ? "active-self-study" : "planned-self-study";
   return {
     source,
     lessonId: lesson.lessonId,
     lessonVersion: lesson.version,
     studyDay: lesson.studyDay,
-    formalDate: lesson.formalDate,
+    formalDate: schedule.formalDate || lesson.formalDate,
     title: lesson.title,
-    enabledFrom: lesson.enabledFrom,
-    expiresAt: lesson.expiresAt,
+    enabledFrom: schedule.enabledFrom || lesson.enabledFrom,
+    expiresAt: schedule.expiresAt || lesson.expiresAt,
     currentDay: Math.max(1, Number(lesson.studyDay) - 1),
     nextDay: Number(lesson.studyDay),
     updatedAt: candidate.progress?.updatedAt || candidate.state.updatedAt || lesson.publishedAt || "",
@@ -764,7 +774,7 @@ function selfStudyPreviewContent(value, now = new Date()) {
       sourceLessonId: lesson.lessonId,
       sourceLessonVersion: lesson.version
     })),
-    note: clone(lesson.plannedContent.note),
+    note,
     nextPreview: lesson.nextPreview
   };
 }
@@ -1214,14 +1224,15 @@ function publicSelfStudyState(value, now = new Date()) {
   const progress = candidate.progress;
   const completedLessons = Object.values(state.progress).filter(item => item.status === "completed").length;
   const hasLessons = state.lessons.length > 0 || Object.keys(state.progress).length > 0;
+  const currentSchedule = progress ? scheduledLessonForProgress(state, progress, progress.snapshot) : null;
   const current = progress ? {
     lessonId: progress.lessonId,
     lessonVersion: progress.lessonVersion,
     studyDay: progress.snapshot.studyDay,
-    formalDate: progress.snapshot.formalDate,
+    formalDate: currentSchedule.formalDate || progress.snapshot.formalDate,
     title: progress.snapshot.title,
-    enabledFrom: progress.snapshot.enabledFrom,
-    expiresAt: progress.snapshot.expiresAt,
+    enabledFrom: currentSchedule.enabledFrom || progress.snapshot.enabledFrom,
+    expiresAt: currentSchedule.expiresAt || progress.snapshot.expiresAt,
     status: progress.status,
     startedAt: progress.startedAt,
     updatedAt: progress.updatedAt,
@@ -1275,6 +1286,11 @@ function publicSelfStudyState(value, now = new Date()) {
 function selfStudyHistory(value) {
   const state = sanitizeSelfStudyState(value);
   const histories = Object.values(state.progress).sort((left, right) => (left.snapshot.studyDay - right.snapshot.studyDay) || left.lessonId.localeCompare(right.lessonId)).map(progress => {
+    const schedule = scheduledLessonForProgress(state, progress, progress.snapshot);
+    const plannedContent = clone(progress.snapshot.plannedContent);
+    if (schedule.plannedContent && schedule.plannedContent.note && schedule.plannedContent.note.date) {
+      plannedContent.note = { ...(plannedContent.note || {}), date: schedule.plannedContent.note.date };
+    }
     const stages = progress.snapshot.stages.map(stage => ({
       stageId: stage.stageId,
       type: stage.type,
@@ -1311,10 +1327,10 @@ function selfStudyHistory(value) {
       lessonId: progress.lessonId,
       lessonVersion: progress.lessonVersion,
       studyDay: progress.snapshot.studyDay,
-      formalDate: progress.snapshot.formalDate,
+      formalDate: schedule.formalDate || progress.snapshot.formalDate,
       title: progress.snapshot.title,
-      enabledFrom: progress.snapshot.enabledFrom,
-      expiresAt: progress.snapshot.expiresAt,
+      enabledFrom: schedule.enabledFrom || progress.snapshot.enabledFrom,
+      expiresAt: schedule.expiresAt || progress.snapshot.expiresAt,
       status: progress.status,
       startedAt: progress.startedAt,
       updatedAt: progress.updatedAt,
@@ -1329,9 +1345,9 @@ function selfStudyHistory(value) {
       stages,
       plannedContent: {
         status: progress.status === "completed" ? "learned" : "planned",
-        words: clone(progress.snapshot.plannedContent.words),
-        sentences: clone(progress.snapshot.plannedContent.sentences),
-        note: clone(progress.snapshot.plannedContent.note)
+        words: plannedContent.words,
+        sentences: plannedContent.sentences,
+        note: plannedContent.note
       }
     };
   });
