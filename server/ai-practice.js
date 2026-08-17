@@ -410,7 +410,9 @@ function sanitizeGenerationQueueItem(value) {
     setIds: sanitizeStringArray(value.setIds, []).slice(0, MAX_AI_GROUPS),
     generatedGroupCount,
     failedGroupNumber,
-    error: cleanText(value.error, 300)
+    error: cleanText(value.error, 300),
+    cancelledAt: cleanText(value.cancelledAt, 40),
+    cancelledGroupCount: Math.max(0, Number(value.cancelledGroupCount) || 0)
   };
 }
 

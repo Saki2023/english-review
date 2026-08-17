@@ -22,6 +22,7 @@ test("mobile styles keep AI, exam, ability, dictation, focused, pronunciation, n
   assert.match(mobile, /\.brand-mark\s*\{[^}]*width:\s*30px[^}]*height:\s*30px/s);
   assert.match(mobile, /\.user-badge\s*\{[^}]*max-width:\s*64px/s);
   assert.match(mobile, /\.ai-controls\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(mobile, /\.ai-queue-actions\s*\{[^}]*max-width:\s*100%/s);
   assert.match(mobile, /\.exam-controls\s*\{[^}]*grid-template-columns:\s*1fr/s);
   assert.match(mobile, /\.exam-options,\s*\.exam-generate-button\s*\{[^}]*grid-column:\s*1/s);
   assert.match(mobile, /\.exam-type-scores\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/s);

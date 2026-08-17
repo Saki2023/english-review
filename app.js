@@ -61,6 +61,7 @@
   const FOCUSED_TYPE_LABELS = { listening: "听力", choice: "选择", "fill-blank": "填空", "true-false": "判断", translation: "翻译", cloze: "完形填空", reading: "材料题", essay: "作文" };
   const DEFAULT_AI_TIMEOUT_MS = 30000;
   const AI_CLIENT_TIMEOUT_MS = 125000;
+  const AI_GENERATION_REQUEST_TIMEOUT_MS = 15000;
   const EXAM_GENERATION_POLL_MS = 2000;
   const AI_GENERATION_POLL_MS = 1500;
   const REVIEW_VARIANT_POLL_MS = 2000;
@@ -132,8 +133,10 @@
   let reviewAnswerResetRequested = true;
   let aiRequestInProgress = false;
   let aiGenerationInProgress = false;
+  let aiGenerationRetryRequest = null;
   let aiGenerationPollTimer = null;
   let aiGenerationPollInProgress = false;
+  let aiQueueClearInProgress = false;
   let aiTutorRequestInProgress = false;
   let reviewVariantPreparation = null;
   let reviewVariantRetryTimer = null;
@@ -171,6 +174,7 @@
   let aiOptions = { configured: false, models: [], providers: [], defaultModel: "", efforts: [...AI_EFFORTS], admin: false };
   let aiOptionsLoaded = false;
   let aiOptionsLoading = false;
+  let aiOptionsLoadPromise = null;
   let aiOptionsError = "";
   let aiConfigDraft = null;
   let activeAiProviderId = "";
@@ -2000,7 +2004,9 @@
     reviewCompletedConflictRecoveryKey = "";
     aiRequestInProgress = false;
     aiGenerationInProgress = false;
+    aiGenerationRetryRequest = null;
     aiGenerationPollInProgress = false;
+    aiQueueClearInProgress = false;
     [$("#generateAiQuestions"), $("#startNextAiBatch"), $("#startNextOfflineAiBatch"), $("#generateAnotherAiSet")].filter(Boolean).forEach(button => setBusyButton(button, false, ""));
   }
 
@@ -2245,7 +2251,7 @@
       button.setAttribute("aria-pressed", String(active));
       button.disabled = !aiOptions.configured || aiOptionsLoading;
     });
-    $("#generateAiQuestions").disabled = aiGenerationInProgress || aiOptionsLoading || offlineSession;
+    $("#generateAiQuestions").disabled = aiGenerationInProgress || aiQueueClearInProgress || aiOptionsLoading || offlineSession;
     const retryButton = $("#retryAiConnection");
     if (retryButton) {
       retryButton.disabled = aiOptionsLoading || offlineReplayInProgress;
@@ -2288,6 +2294,16 @@
   }
 
   async function loadAiOptions() {
+    if (aiOptionsLoadPromise) return aiOptionsLoadPromise;
+    aiOptionsLoadPromise = loadAiOptionsInternal();
+    try {
+      return await aiOptionsLoadPromise;
+    } finally {
+      aiOptionsLoadPromise = null;
+    }
+  }
+
+  async function loadAiOptionsInternal() {
     if (aiOptionsLoading) return;
     aiOptionsLoading = true;
     aiStatusMessage = "正在读取 AI 配置…";
@@ -2302,7 +2318,7 @@
     }
     const previousOptions = aiOptions;
     try {
-      const response = await fetch("/api/ai/options", { credentials: "same-origin", cache: "no-store" });
+      const response = await fetchWithVisibleTimeout("/api/ai/options", { credentials: "same-origin", cache: "no-store" }, AI_GENERATION_REQUEST_TIMEOUT_MS, "读取 AI 配置");
       aiOptions = await responseJson(response);
       aiOptions.providers = (Array.isArray(aiOptions.providers) ? aiOptions.providers : []).map(provider => ({
         id: String(provider && provider.id || ""),
@@ -2358,7 +2374,7 @@
     await loadAiOptions();
     if (!aiOptions.configured) return;
     try {
-      const data = await responseJson(await fetch("/api/ai/questions/batch", { credentials: "same-origin", cache: "no-store" }));
+      const data = await responseJson(await fetchWithVisibleTimeout("/api/ai/questions/batch", { credentials: "same-origin", cache: "no-store" }, AI_GENERATION_REQUEST_TIMEOUT_MS, "读取 AI 题组状态"));
       applyAiPracticeResponse(data);
       aiOptionsError = "";
       aiStatusMessage = "AI 连接和题组状态已更新。";
@@ -3007,9 +3023,21 @@
     const queue = Array.isArray(practice.generationQueue) ? practice.generationQueue : [];
     const panel = $("#aiQueuePanel");
     panel.hidden = queue.length === 0;
-    if (!queue.length) return;
     const groups = aiQueueGroupCount(practice);
     $("#aiQueueCount").textContent = `${groups} 组`;
+    const clearButton = $("#clearAiQueueButton");
+    if (clearButton) {
+      clearButton.hidden = groups === 0;
+      clearButton.disabled = aiQueueClearInProgress;
+      clearButton.innerHTML = aiQueueClearInProgress
+        ? '<i data-lucide="loader-circle" aria-hidden="true"></i>正在清空'
+        : `<i data-lucide="trash-2" aria-hidden="true"></i>清空生成队列（${groups}）`;
+    }
+    if (!queue.length) {
+      $("#aiQueueList").replaceChildren();
+      refreshIcons();
+      return;
+    }
     let position = 0;
     $("#aiQueueList").innerHTML = queue.flatMap(item => {
       const fallbackCount = item.status === "ready" ? item.readyGroups : item.groupCount;
@@ -3148,6 +3176,24 @@
       delete button.dataset.idleHtml;
       button.disabled = false;
       refreshIcons();
+    }
+  }
+
+  async function fetchWithVisibleTimeout(url, options = {}, timeoutMs = AI_GENERATION_REQUEST_TIMEOUT_MS, label = "请求") {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || AI_GENERATION_REQUEST_TIMEOUT_MS));
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        const timeoutError = new Error(`${label}超时，请检查网络后重试`);
+        timeoutError.statusCode = 504;
+        timeoutError.requestUncertain = true;
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -3340,7 +3386,7 @@
     const previousCurrentId = String(previous.currentSet && previous.currentSet.id || "");
     aiGenerationPollInProgress = true;
     try {
-      const response = await fetch("/api/ai/questions/batch", { credentials: "same-origin", cache: "no-store" });
+      const response = await fetchWithVisibleTimeout("/api/ai/questions/batch", { credentials: "same-origin", cache: "no-store" }, AI_GENERATION_REQUEST_TIMEOUT_MS, "读取 AI 题组进度");
       const data = await responseJson(response);
       if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
       const practice = applyAiPracticeResponse(data);
@@ -4047,8 +4093,16 @@
     renderPreviewPractice();
   }
 
+  function aiGenerationSettingsKey(settings) {
+    return [String(settings && settings.model || ""), String(settings && settings.reasoningEffort || ""), Number(settings && settings.count) || 0, Number(settings && settings.groupCount) || 0].join("\u0000");
+  }
+
   async function generateAiQuestions(retryRequestId = "", retrySettings = null) {
-    if (aiGenerationInProgress) return;
+    if (aiGenerationInProgress) {
+      aiStatusMessage = "上一次生成请求仍在提交，请稍候；系统不会重复加入队列。";
+      renderAiView();
+      return;
+    }
     if (offlineSession || !browserIsOnline()) {
       aiStatusMessage = "当前设备已断网；实时 AI 生成需要联网，请使用出门前预生成的题组。";
       renderAiView();
@@ -4070,7 +4124,15 @@
       count: Number($("#aiQuestionCount").value) || 5,
       groupCount: Number($("#aiGroupCount").value) || 1
     };
-    const requestId = retryRequestId || (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function" ? `aigen-${globalThis.crypto.randomUUID()}` : `aigen-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+    const settingsKey = aiGenerationSettingsKey(settings);
+    const uncertainRetry = !retryRequestId
+      && aiGenerationRetryRequest
+      && aiGenerationRetryRequest.accountId === String(currentUser && currentUser.id || "")
+      && aiGenerationRetryRequest.settingsKey === settingsKey
+      ? aiGenerationRetryRequest
+      : null;
+    const requestId = retryRequestId || (uncertainRetry && uncertainRetry.requestId) || (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function" ? `aigen-${globalThis.crypto.randomUUID()}` : `aigen-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
+    aiGenerationRetryRequest = { accountId: String(currentUser && currentUser.id || ""), requestId, settingsKey };
     updateAiPreferences(settings);
     aiGenerationInProgress = true;
     setBusyButton(button, true, "正在创建分批任务…");
@@ -4079,20 +4141,22 @@
       : `正在生成 1 组 ${settings.count} 题…`;
     $("#aiStatus").textContent = aiStatusMessage;
     try {
-      const response = await fetch("/api/ai/questions/generate", {
+      const response = await fetchWithVisibleTimeout("/api/ai/questions/generate", {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...settings, requestId })
-      });
+      }, AI_GENERATION_REQUEST_TIMEOUT_MS, "提交 AI 生成请求");
       const data = await responseJson(response);
       if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
+      if (aiGenerationRetryRequest && aiGenerationRetryRequest.requestId === requestId) aiGenerationRetryRequest = null;
       applyAiPracticeResponse(data);
       aiOptionsError = "";
+      const queuedGroups = aiQueueGroupCount(model.aiPractice);
       aiStatusMessage = data.pending
         ? model.aiPractice.currentSet
-          ? "当前题组可以继续作答；剩余题组正在后台逐组生成。"
-          : `正在生成首组 ${settings.count} 题，完成后会自动显示。`
+          ? `生成请求已受理；当前题组可继续作答，队列现有 ${queuedGroups} 组。`
+          : `生成请求已受理，队列现有 ${queuedGroups} 组；首组完成后会自动显示。`
         : data.started
         ? "题目已生成，可以开始作答"
         : data.reused
@@ -4100,7 +4164,13 @@
           : `${settings.groupCount} 组题目已追加到队列末尾`;
       if (data.pending) scheduleAiGenerationPolling(0);
     } catch (error) {
-      if (accountRequestContextIsCurrent(accountContext) && !error.silent) aiStatusMessage = error.message;
+      const uncertain = Boolean(error && (error.requestUncertain || !error.statusCode || Number(error.statusCode) >= 500));
+      if (!uncertain && aiGenerationRetryRequest && aiGenerationRetryRequest.requestId === requestId) aiGenerationRetryRequest = null;
+      if (accountRequestContextIsCurrent(accountContext) && !error.silent) {
+        aiStatusMessage = uncertain
+          ? `${error.message}；提交结果暂不确定，再点“生成题目”会使用同一请求安全重试，不会重复排队。`
+          : error.message;
+      }
       showRequestError(error);
     } finally {
       aiGenerationInProgress = false;
@@ -4108,6 +4178,49 @@
         setBusyButton(button, false, "");
         renderAiView();
       }
+    }
+  }
+
+  async function clearAiGenerationQueue() {
+    if (aiQueueClearInProgress || offlineSession || !currentUser || !API_ENABLED) return;
+    const practice = normalizeClientAiPractice(model.aiPractice);
+    const groupCount = aiQueueGroupCount(practice);
+    if (!groupCount) {
+      aiStatusMessage = "当前没有可清空的生成队列。";
+      renderAiView();
+      return;
+    }
+    const confirmation = `当前账号有 ${groupCount} 组尚未开始的生成任务（包括生成中和待重试）。确认清空吗？正在作答的当前题组和正式记录不会改变。`;
+    if (typeof window.confirm === "function" && !window.confirm(confirmation)) return;
+    const accountContext = captureAccountRequestContext();
+    aiQueueClearInProgress = true;
+    aiStatusMessage = `正在清空 ${groupCount} 组生成任务…`;
+    renderAiView();
+    try {
+      const response = await fetchWithVisibleTimeout("/api/ai/questions/queue/clear", {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clearRequestId: `aiclear-${Date.now()}` })
+      }, AI_GENERATION_REQUEST_TIMEOUT_MS, "清空 AI 生成队列");
+      const data = await responseJson(response);
+      if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
+      aiGenerationRetryRequest = null;
+      applyAiPracticeResponse(data);
+      aiOptionsError = "";
+      aiStatusMessage = data.reused
+        ? "生成队列已经清空；没有新的任务被恢复。"
+        : `已清空 ${Number(data.cancelledGroups) || 0} 组生成任务；当前题组和正式记录保持不变。`;
+      showToast(aiStatusMessage);
+    } catch (error) {
+      if (accountRequestContextIsCurrent(accountContext) && !error.silent) {
+        aiStatusMessage = `清空生成队列失败：${error.message}，请重试。`;
+        showRequestError(error);
+      }
+    } finally {
+      aiQueueClearInProgress = false;
+      if (accountRequestContextIsCurrent(accountContext)) renderAiView();
     }
   }
 
@@ -8082,6 +8195,7 @@
       renderAiView();
     });
     $("#generateAiQuestions").addEventListener("click", () => generateAiQuestions());
+    $("#clearAiQueueButton").addEventListener("click", () => void clearAiGenerationQueue());
     $("#generateAnotherAiSet").addEventListener("click", continuePreparedAiSet);
     $("#startNextAiBatch").addEventListener("click", continuePreparedAiSet);
     $("#startNextOfflineAiBatch").addEventListener("click", continuePreparedAiSet);
@@ -8274,7 +8388,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=72", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=73", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

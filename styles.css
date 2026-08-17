@@ -233,7 +233,8 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .ai-queue-panel { margin: 0 0 18px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
 .ai-queue-heading { display: flex; align-items: end; justify-content: space-between; gap: 14px; padding-bottom: 11px; border-bottom: 1px solid var(--border); }
 .ai-queue-heading h2 { margin: 2px 0 0; font-size: 16px; }
-.ai-queue-heading > strong { color: var(--muted); font-size: 12px; }
+.ai-queue-heading > strong, .ai-queue-actions > strong { color: var(--muted); font-size: 12px; }
+.ai-queue-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 .ai-queue-list { display: grid; }
 .ai-queue-item { min-width: 0; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--border); }
 .ai-queue-item:last-child { border-bottom: 0; padding-bottom: 0; }
@@ -996,6 +997,7 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
   .batch-result-list dl > div { grid-template-columns: 1fr; gap: 2px; }
   .ai-queue-panel { padding: 14px; }
   .ai-queue-heading { align-items: flex-start; }
+  .ai-queue-actions { max-width: 100%; justify-content: flex-end; }
   .ai-queue-item { grid-template-columns: 26px minmax(0, 1fr); align-items: start; }
   .ai-queue-item > .secondary-button, .ai-queue-status { grid-column: 2; justify-self: start; }
   .ai-queue-item > .secondary-button { width: 100%; }

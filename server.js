@@ -4251,6 +4251,74 @@ function startAiGenerationWorker(user) {
   return job;
 }
 
+function clearAiGenerationQueue(user) {
+  return withFormalPracticeLock(user.id, async () => {
+    const state = getUserState(user);
+    const practice = sanitizeAiPractice(state.aiPractice);
+    const currentSet = practice.currentSet;
+    const currentSetId = String(currentSet && currentSet.id || "");
+    const currentRequestId = String(currentSet && currentSet.generationRequestId || "");
+    const cancelableGroupIds = new Set();
+    const queuedSetIds = new Set(practice.queuedSets.map(set => String(set && set.id || "")).filter(Boolean));
+    const now = new Date().toISOString();
+    let cancelledRequests = 0;
+    let changed = false;
+
+    const addPlannedGroupIds = (item, isCurrentRequest) => {
+      const plannedIds = Array.isArray(item.plannedSetIds) ? item.plannedSetIds : [];
+      const expectedCount = Math.max(Number(item.groupCount) || 0, plannedIds.length, Array.isArray(item.setIds) ? item.setIds.length : 0);
+      const currentIncluded = isCurrentRequest && plannedIds.includes(currentSetId);
+      const before = cancelableGroupIds.size;
+      for (let index = 0; index < expectedCount; index += 1) {
+        const plannedId = String(plannedIds[index] || `${item.requestId}:group-${index + 1}`);
+        if (isCurrentRequest && plannedId === currentSetId) continue;
+        if (isCurrentRequest && !currentIncluded && index === 0) continue;
+        cancelableGroupIds.add(plannedId);
+      }
+      return cancelableGroupIds.size - before;
+    };
+
+    practice.generationQueue.forEach(item => {
+      if (!item || item.status === "consumed") return;
+      cancelledRequests += 1;
+      const isCurrentRequest = Boolean(currentSetId && (item.requestId === currentRequestId || item.plannedSetIds.includes(currentSetId)));
+      const cancelledGroupCount = addPlannedGroupIds(item, isCurrentRequest);
+      item.setIds = [];
+      item.status = "consumed";
+      item.failedGroupNumber = 0;
+      item.error = "";
+      item.cancelledAt = now;
+      item.cancelledGroupCount = cancelledGroupCount;
+      item.updatedAt = now;
+      changed = true;
+    });
+
+    // Legacy states can contain prepared sets without a matching generation
+    // receipt. They are never the active set, so they are safe to cancel too.
+    queuedSetIds.forEach(setId => {
+      if (setId !== currentSetId) cancelableGroupIds.add(setId);
+    });
+    const previousQueuedCount = practice.queuedSets.length;
+    practice.queuedSets = practice.queuedSets.filter(set => String(set && set.id || "") === currentSetId);
+    if (practice.queuedSets.length !== previousQueuedCount) changed = true;
+
+    if (changed) {
+      practice.updatedAt = now;
+      state.aiPractice = practice;
+      userStates.users[user.id] = sanitizeState(state);
+      persistUserStates();
+    }
+    const remaining = publicAiPractice(changed ? state.aiPractice : practice);
+    return {
+      practice: remaining,
+      cancelledRequests,
+      cancelledGroups: cancelableGroupIds.size,
+      remainingGroups: remaining.generationQueue.reduce((sum, item) => sum + item.groups.length, 0),
+      reused: !changed
+    };
+  }, "ai-generation-clear");
+}
+
 async function handleAiGenerate(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI generation endpoint not found");
@@ -4283,7 +4351,8 @@ async function handleAiGenerate(req, res, user) {
       const now = new Date().toISOString();
       if (!queueItem) {
         if (practice.generationQueue.filter(item => item.status !== "consumed").length >= 30) {
-          throw Object.assign(new Error("AI 题组队列已满，请先完成当前队列"), { statusCode: 409 });
+          const queuedGroups = publicAiPractice(practice).generationQueue.reduce((sum, item) => sum + item.groups.length, 0);
+          throw Object.assign(new Error(`AI 题组队列已满（当前 ${queuedGroups} 组），请先完成或清空生成队列`), { statusCode: 409 });
         }
         queueItem = {
           id: `aiqueue-${crypto.randomUUID()}`,
@@ -4331,6 +4400,17 @@ async function handleAiGenerate(req, res, user) {
     console.warn(`AI question generation request failed: ${error && error.message ? error.message : "unknown error"}`);
     const failure = publicAiGenerationFailure(error);
     return sendJson(res, failure.statusCode, { error: failure.message, providerStatus: failure.providerStatus });
+  }
+}
+
+async function handleAiGenerationQueueClear(req, res, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "POST") return sendError(res, 404, "AI queue endpoint not found");
+  try {
+    const result = await clearAiGenerationQueue(user);
+    return sendJson(res, 200, result);
+  } catch (error) {
+    return sendError(res, error.statusCode || 400, error.message || "AI 题组队列清空失败");
   }
 }
 
@@ -5094,6 +5174,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/ai/exams" || url.pathname.startsWith("/api/ai/exams/")) return handleAiExams(req, res, url, user);
   if (url.pathname === "/api/ai/dictation" || url.pathname.startsWith("/api/ai/dictation/")) return handleAiDictation(req, res, url, user);
   if (url.pathname === "/api/ai/focused" || url.pathname.startsWith("/api/ai/focused/")) return handleAiFocusedPractice(req, res, url, user);
+  if (url.pathname === "/api/ai/questions/queue/clear") return handleAiGenerationQueueClear(req, res, user);
   if (url.pathname === "/api/ai/questions/generate") return handleAiGenerate(req, res, user);
   if (url.pathname === "/api/ai/questions/next") return handleAiNextSet(req, res, user);
   if (url.pathname === "/api/ai/questions/batch" || url.pathname.startsWith("/api/ai/questions/batch/")) return handleAiQuestionBatch(req, res, url, user);

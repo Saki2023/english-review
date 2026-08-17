@@ -81,6 +81,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | POST | `/api/ai/questions/batch/review` | 所有题有答案后进入无泄露核对页 |
 | POST | `/api/ai/questions/batch/grade` | 使用稳定批改 ID 统一判题并原子写入整组正式证据 |
 | POST | `/api/ai/questions/generate` | 使用稳定 `requestId` 生成 1/2/3/5 组并追加到账号 FIFO 队列 |
+| POST | `/api/ai/questions/queue/clear` | 幂等取消当前账号全部未开始、生成中或失败的队列组，保留当前题组与正式证据 |
 | POST | `/api/ai/questions/next` | 当前结果页确认后才取 FIFO 队首作为下一组 |
 | GET | `/api/ai/exams` | 获取当前账号的试卷草稿、历史和薄弱点，需要登录 |
 | POST | `/api/ai/exams/generate` | 创建按学习进度生成完整试卷的后台任务，需要登录及当前试卷接口版本头，返回 `202` |
@@ -337,6 +338,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 | POST | `/api/admin/ai-config/models` | 管理员 | 使用当前或已保存的连接信息获取上游模型列表，不保存配置 |
 | POST | `/api/admin/ai-config/test` | 管理员 | 测试指定供应商和模型，不触发轮换 |
 | POST | `/api/ai/questions/generate` | 已登录 | 根据当前账号进度生成题组；`count` 为每组 5/10 题，`groupCount` 为 1/2/3/5 组 |
+| POST | `/api/ai/questions/queue/clear` | 已登录 | 清空当前账号尚未开始的生成队列；当前题组、草稿、历史和正式证据不变 |
 | POST | `/api/ai/questions/next` | 已登录 | 当前组完成后进入服务器已保存的下一组，不再次调用 AI |
 | POST | `/api/ai/questions/ask` | 已登录 | 询问当前或历史 AI 题目；请求可带独立 `model` 和 `reasoningEffort`，并按账号及题目追加长期问答记录 |
 | POST | `/api/ai/questions/tutor/clear` | 已登录 | 切断指定题目的当前 AI 会话上下文，旧问答仍保留为学习历史 |
@@ -355,7 +357,7 @@ Docker 部署时，复习记录和通过 API 添加的内容保存在 `server/da
 }
 ```
 
-服务器只调用一次上游生成请求，并把结果保存为 1 个当前题组和 2 个待开始题组。待开始题组会随账号状态保存，但在真正作答前不会进入做题历史、错题、能力分析或学习同步证据。完成当前组后调用 `/api/ai/questions/next` 即可立即进入下一组。
+服务器先持久化整批稳定组 ID，再按组逐次调用上游；首组保存后即可作答，其余组在账号 FIFO 中继续生成。待开始题组会随账号状态保存，但在真正作答前不会进入做题历史、错题、能力分析或学习同步证据。完成当前组后调用 `/api/ai/questions/next` 即可进入已就绪的下一组。
 
 ### 每次学习同步的 50 条句子池
 

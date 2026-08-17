@@ -793,3 +793,206 @@ test("service restart turns interrupted generation and grading into explicit ret
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test("clearing the AI generation queue cancels pending, ready, and failed groups without touching the current set", async () => {
+  const dataDir = temporaryDataDir();
+  const store = loadUsers(dataDir);
+  createUser(store, { username: "clear-owner", password: "clear-owner-password" });
+  createUser(store, { username: "clear-other", password: "clear-other-password" });
+  saveUsers(dataDir, store);
+  const { provider, control } = createProvider();
+  let app;
+  try {
+    await new Promise((resolve, reject) => provider.listen(0, "127.0.0.1", error => error ? reject(error) : resolve()));
+    const providerPort = provider.address().port;
+    app = await startApp(dataDir);
+    let cookie = await login(app.baseUrl, "clear-owner", "clear-owner-password");
+    let otherCookie = await login(app.baseUrl, "clear-other", "clear-other-password");
+    await request(app.baseUrl, cookie, "/api/admin/ai-config", {
+      method: "PUT",
+      body: { baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "clear-test-key", models: ["test-model"], defaultModel: "test-model", timeoutMs: 10000, rateLimitPerMinute: 60 }
+    });
+
+    const secondStarted = control.holdAt(2);
+    const firstStart = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "clear-first", model: "test-model", reasoningEffort: "high", count: 5, groupCount: 3 }
+    });
+    assert.equal(firstStart.response.status, 202);
+    await secondStarted;
+    const firstReady = await waitForAiPractice(app.baseUrl, cookie, practice => Boolean(practice.currentSet)
+      && practice.generationQueue.some(item => item.requestId === "clear-first" && item.generatedGroupCount === 1), "the first group was not exposed while the second group was held");
+    const currentSetId = firstReady.currentSet.id;
+    const firstQuestion = firstReady.currentSet.questions[0];
+    const draft = await request(app.baseUrl, cookie, "/api/ai/questions/batch/draft", {
+      method: "PUT",
+      body: { setId: currentSetId, questionId: firstQuestion.id, index: 0, nextIndex: 1, answer: "保留中的草稿" }
+    });
+    assert.equal(draft.response.status, 200);
+    const before = (await request(app.baseUrl, cookie, "/api/state")).body;
+
+    const secondStart = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "clear-second", model: "test-model", reasoningEffort: "medium", count: 5, groupCount: 1 }
+    });
+    assert.equal(secondStart.response.status, 202);
+    const queuedBeforeClear = await request(app.baseUrl, cookie, "/api/ai/questions/batch");
+    assert.equal(queuedBeforeClear.body.practice.generationQueue.length, 2);
+
+    const concurrentClears = await Promise.all([
+      request(app.baseUrl, cookie, "/api/ai/questions/queue/clear", { method: "POST", body: { clearRequestId: "clear-operation-tab-a" } }),
+      request(app.baseUrl, cookie, "/api/ai/questions/queue/clear", { method: "POST", body: { clearRequestId: "clear-operation-tab-b" } })
+    ]);
+    const cleared = concurrentClears.find(result => result.body.cancelledGroups === 3);
+    const concurrentReuse = concurrentClears.find(result => result.body.cancelledGroups === 0);
+    assert.ok(cleared, JSON.stringify(concurrentClears.map(result => result.body)));
+    assert.ok(concurrentReuse, JSON.stringify(concurrentClears.map(result => result.body)));
+    assert.equal(cleared.response.status, 200, JSON.stringify(cleared.body));
+    assert.equal(cleared.body.cancelledRequests, 2);
+    assert.equal(cleared.body.cancelledGroups, 3);
+    assert.equal(cleared.body.remainingGroups, 0);
+    assert.equal(cleared.body.practice.currentSet.id, currentSetId);
+    assert.equal(cleared.body.practice.currentSet.questions[0].userAnswer, "保留中的草稿");
+    assert.deepEqual(cleared.body.practice.generationQueue, []);
+    assert.equal(concurrentReuse.body.reused, true);
+    assert.equal(concurrentReuse.body.practice.currentSet.id, currentSetId);
+
+    control.release();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const afterWorker = await request(app.baseUrl, cookie, "/api/ai/questions/batch");
+    assert.equal(afterWorker.body.practice.currentSet.id, currentSetId);
+    assert.deepEqual(afterWorker.body.practice.generationQueue, []);
+    assert.equal(control.calls.filter(item => item.generation).length, 2, "a delayed worker must not restore a cancelled group");
+
+    await stopApp(app);
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "clear-owner", "clear-owner-password");
+    otherCookie = await login(app.baseUrl, "clear-other", "clear-other-password");
+    const afterRestart = await request(app.baseUrl, cookie, "/api/ai/questions/batch");
+    assert.equal(afterRestart.body.practice.currentSet.id, currentSetId);
+    assert.equal(afterRestart.body.practice.currentSet.questions[0].userAnswer, "保留中的草稿");
+    assert.deepEqual(afterRestart.body.practice.generationQueue, []);
+
+    const repeatedClear = await request(app.baseUrl, cookie, "/api/ai/questions/queue/clear", { method: "POST", body: { clearRequestId: "clear-operation" } });
+    assert.equal(repeatedClear.response.status, 200);
+    assert.equal(repeatedClear.body.reused, true);
+    assert.equal(repeatedClear.body.cancelledGroups, 0);
+    assert.equal(repeatedClear.body.practice.currentSet.id, currentSetId);
+
+    const readyStart = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "clear-ready", model: "test-model", reasoningEffort: "medium", count: 5, groupCount: 1 }
+    });
+    assert.equal(readyStart.response.status, 202);
+    const readyQueue = await waitForAiPractice(app.baseUrl, cookie, practice => practice.generationQueue.some(item => item.requestId === "clear-ready" && item.status === "ready"));
+    assert.equal(readyQueue.generationQueue.find(item => item.requestId === "clear-ready").readyGroups, 1);
+    const clearedReady = await request(app.baseUrl, cookie, "/api/ai/questions/queue/clear", { method: "POST", body: { clearRequestId: "clear-ready-operation" } });
+    assert.equal(clearedReady.response.status, 200);
+    assert.equal(clearedReady.body.cancelledGroups, 1);
+    assert.deepEqual(clearedReady.body.practice.generationQueue, []);
+
+    control.failNextGeneration = true;
+    const failedStart = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "clear-failed", model: "test-model", reasoningEffort: "high", count: 5, groupCount: 1 }
+    });
+    assert.equal(failedStart.response.status, 202);
+    const failedQueue = await waitForAiPractice(app.baseUrl, cookie, practice => practice.generationQueue.some(item => item.requestId === "clear-failed" && item.status === "failed"));
+    assert.equal(failedQueue.generationQueue[0].status, "failed");
+    const clearedFailed = await request(app.baseUrl, cookie, "/api/ai/questions/queue/clear", { method: "POST", body: { clearRequestId: "clear-failed-operation" } });
+    assert.equal(clearedFailed.response.status, 200);
+    assert.equal(clearedFailed.body.cancelledGroups, 1);
+    assert.deepEqual(clearedFailed.body.practice.generationQueue, []);
+
+    const reusedCancelled = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "clear-failed", model: "test-model", reasoningEffort: "low", count: 10, groupCount: 5 }
+    });
+    assert.equal(reusedCancelled.response.status, 200);
+    assert.equal(reusedCancelled.body.reused, true);
+    assert.deepEqual(reusedCancelled.body.practice.generationQueue, []);
+
+    const after = (await request(app.baseUrl, cookie, "/api/state")).body;
+    assert.deepEqual(after.attempts, before.attempts);
+    assert.deepEqual(after.mistakes, before.mistakes);
+    assert.deepEqual(after.history, before.history);
+    const otherStart = await request(app.baseUrl, otherCookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "clear-other-ready", model: "test-model", reasoningEffort: "medium", count: 5, groupCount: 2 }
+    });
+    assert.equal(otherStart.response.status, 202);
+    const otherReady = await waitForAiPractice(app.baseUrl, otherCookie, practice => Boolean(practice.currentSet)
+      && practice.generationQueue.some(item => item.requestId === "clear-other-ready" && item.status === "ready"));
+    assert.equal(otherReady.generationQueue[0].groups.length, 1);
+    const ownerRepeatedClear = await request(app.baseUrl, cookie, "/api/ai/questions/queue/clear", { method: "POST", body: { clearRequestId: "owner-empty-clear" } });
+    assert.equal(ownerRepeatedClear.body.cancelledGroups, 0);
+    const otherAfterOwnerClear = await request(app.baseUrl, otherCookie, "/api/ai/questions/batch");
+    assert.equal(otherAfterOwnerClear.response.status, 200);
+    assert.equal(otherAfterOwnerClear.body.practice.currentSet.id, otherReady.currentSet.id);
+    assert.equal(otherAfterOwnerClear.body.practice.generationQueue[0].groups.length, 1);
+  } finally {
+    control.release();
+    await stopApp(app);
+    await new Promise(resolve => provider.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a full AI generation queue returns a visible capacity reason without adding another request", async () => {
+  const dataDir = temporaryDataDir();
+  const store = loadUsers(dataDir);
+  const owner = createUser(store, { username: "capacity-owner", password: "capacity-owner-password" });
+  saveUsers(dataDir, store);
+  const { provider } = createProvider();
+  let app;
+  try {
+    await new Promise((resolve, reject) => provider.listen(0, "127.0.0.1", error => error ? reject(error) : resolve()));
+    const providerPort = provider.address().port;
+    app = await startApp(dataDir);
+    let cookie = await login(app.baseUrl, "capacity-owner", "capacity-owner-password");
+    await request(app.baseUrl, cookie, "/api/admin/ai-config", {
+      method: "PUT",
+      body: { baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "capacity-test-key", models: ["test-model"], defaultModel: "test-model", timeoutMs: 10000, rateLimitPerMinute: 60 }
+    });
+    await request(app.baseUrl, cookie, "/api/state");
+    await stopApp(app);
+    app = null;
+
+    const stateFile = path.join(dataDir, "user-states.json");
+    const disk = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    disk.users[owner.id].aiPractice.generationQueue = Array.from({ length: 30 }, (_, index) => ({
+      id: `capacity-item-${index + 1}`,
+      requestId: `capacity-request-${index + 1}`,
+      batchId: `capacity-batch-${index + 1}`,
+      status: "failed",
+      createdAt: "2026-08-17T00:00:00.000Z",
+      updatedAt: "2026-08-17T00:00:00.000Z",
+      model: "test-model",
+      reasoningEffort: "medium",
+      count: 5,
+      groupCount: 1,
+      plannedSetIds: [`capacity-set-${index + 1}`],
+      setIds: [],
+      generatedGroupCount: 0,
+      failedGroupNumber: 1,
+      error: "等待重试"
+    }));
+    fs.writeFileSync(stateFile, `${JSON.stringify(disk)}\n`, "utf8");
+
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "capacity-owner", "capacity-owner-password");
+    const rejected = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "capacity-new-request", model: "test-model", reasoningEffort: "max", count: 5, groupCount: 5 }
+    });
+    assert.equal(rejected.response.status, 409);
+    assert.match(rejected.body.error, /队列已满.*当前 30 组.*清空生成队列/);
+    const unchanged = await request(app.baseUrl, cookie, "/api/ai/questions/batch");
+    assert.equal(unchanged.body.practice.generationQueue.length, 30);
+    assert.equal(unchanged.body.practice.generationQueue.some(item => item.requestId === "capacity-new-request"), false);
+  } finally {
+    await stopApp(app);
+    await new Promise(resolve => provider.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
