@@ -349,3 +349,68 @@ test("self-study API isolates accounts, resumes after restart, preserves correct
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test("anchored future lesson dates flow through preview, offline, sync, and restart without account leakage", async () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "english-review-self-study-date-api-"));
+  const savedUsers = loadUsers(dataDir);
+  createUser(savedUsers, { username: "date-traveler", password: "date-traveler-password" });
+  createUser(savedUsers, { username: "date-other", password: "date-other-password" });
+  saveUsers(dataDir, savedUsers);
+  const apiToken = "self-study-date-api-token";
+  const readToken = deriveLearningSyncToken(apiToken);
+  const writeToken = deriveTeachingProfileWriteToken(apiToken);
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  let child = startServer(dataDir, port, apiToken);
+  try {
+    await waitForHealth(baseUrl, child);
+    const lesson = courseLesson("trip-day-12-date", 12, "dog", "狗");
+    lesson.formalDate = "2026-08-11";
+    lesson.enabledFrom = "2026-08-11T00:00:00+08:00";
+    lesson.expiresAt = "2026-09-10T23:59:59+08:00";
+    lesson.plannedContent.note.date = "2026-08-11";
+    const body = { updatedAt: "2026-08-17T00:00:00.000Z", lessons: [lesson] };
+    const syncUrl = `${baseUrl}/api/sync/self-study-lessons?username=date-traveler`;
+    const upload = await fetch(syncUrl, { method: "PUT", headers: { Authorization: `Bearer ${writeToken}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    assert.equal(upload.status, 200);
+    const repeated = await fetch(syncUrl, { method: "PUT", headers: { Authorization: `Bearer ${writeToken}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    assert.equal(repeated.status, 200);
+
+    const travelerCookie = await login(baseUrl, "date-traveler", "date-traveler-password");
+    const otherCookie = await login(baseUrl, "date-other", "date-other-password");
+    const selfStudy = await request(baseUrl, travelerCookie, "/api/self-study");
+    assert.equal(selfStudy.data.availableLesson, null);
+    assert.equal(selfStudy.data.waitingUntil, "2026-08-17T16:00:00.000Z");
+    const previewWords = await request(baseUrl, travelerCookie, "/api/preview/words");
+    assert.equal(previewWords.data.nextDay, 12);
+    assert.equal(previewWords.data.formalDate, "2026-08-18");
+    assert.equal(previewWords.data.enabledFrom, "2026-08-17T16:00:00.000Z");
+    assert.equal(previewWords.data.words[0].formalEvidence, false);
+    const preview = await request(baseUrl, travelerCookie, "/api/preview");
+    assert.match(preview.data.preview.content, /2026-08-18/);
+    const offline = await request(baseUrl, travelerCookie, "/api/offline/pack");
+    assert.equal(offline.data.preview.formalDate, "2026-08-18");
+    assert.equal(offline.data.selfStudy.lessons[0].formalDate, "2026-08-18");
+    assert.equal(offline.data.selfStudy.lessons[0].enabledFrom, "2026-08-17T16:00:00.000Z");
+    const profile = await fetch(`${baseUrl}/api/sync/profile?username=date-traveler`, { headers: { Authorization: `Bearer ${readToken}` } });
+    const profileData = await profile.json();
+    assert.equal(profile.status, 200);
+    assert.equal(profileData.selfStudyPlannedLessons[0].formalDate, "2026-08-18");
+    assert.equal(profileData.selfStudyPlannedLessons[0].enabledFrom, "2026-08-17T16:00:00.000Z");
+    assert.equal(profileData.selfStudyPlannedLessons[0].plannedContent.status, "planned");
+    const other = await request(baseUrl, otherCookie, "/api/preview/words");
+    assert.deepEqual(other.data.words, []);
+
+    await stopServer(child);
+    child = startServer(dataDir, port, apiToken);
+    await waitForHealth(baseUrl, child);
+    const restored = await request(baseUrl, travelerCookie, "/api/self-study");
+    assert.equal(restored.data.waitingUntil, "2026-08-17T16:00:00.000Z");
+    const restoredPreview = await request(baseUrl, travelerCookie, "/api/preview/words");
+    assert.equal(restoredPreview.data.formalDate, "2026-08-18");
+    assert.equal((await request(baseUrl, otherCookie, "/api/self-study")).data.hasLessons, false);
+  } finally {
+    await stopServer(child);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});

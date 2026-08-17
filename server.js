@@ -1355,7 +1355,7 @@ function selfStudyPreviewDocument(previewData) {
   const sentenceLines = previewData.sentences.map(item => `- ${item.english}：${item.chinese}`);
   const note = previewData.note && typeof previewData.note === "object" ? previewData.note : {};
   const sections = [
-    `第 ${previewData.nextDay} 天出门自学预习`,
+    `第 ${previewData.nextDay} 天出门自学预习${previewData.formalDate ? `（${previewData.formalDate} 开始）` : ""}`,
     note.summary ? `\n学习重点\n${note.summary}` : "",
     wordLines.length ? `\n预习单词\n${wordLines.join("\n")}` : "",
     sentenceLines.length ? `\n预习句子\n${sentenceLines.join("\n")}` : "",
@@ -1406,6 +1406,9 @@ function accountPreviewData(user, stateValue = null) {
   return {
     currentDay,
     nextDay: selectedNextDay,
+    formalDate: selfStudy?.formalDate || "",
+    enabledFrom: selfStudy?.enabledFrom || "",
+    expiresAt: selfStudy?.expiresAt || "",
     updatedAt: selfStudy?.updatedAt || content.updatedAt,
     sourceLessonId: selfStudy?.lessonId || "",
     sourceLessonVersion: selfStudy?.lessonVersion || "",
@@ -1459,6 +1462,9 @@ function buildOfflinePack(user) {
     preview: {
       currentDay: previewData.currentDay,
       nextDay: previewData.nextDay,
+      formalDate: previewData.formalDate,
+      enabledFrom: previewData.enabledFrom,
+      expiresAt: previewData.expiresAt,
       updatedAt: previewData.updatedAt,
       sourceLessonId: previewData.sourceLessonId,
       formalEvidence: false,
@@ -1500,6 +1506,9 @@ function handlePreviewWords(req, res, user) {
   return sendJson(res, 200, {
     currentDay: previewData.currentDay,
     nextDay: previewData.nextDay,
+    formalDate: previewData.formalDate,
+    enabledFrom: previewData.enabledFrom,
+    expiresAt: previewData.expiresAt,
     updatedAt: previewData.updatedAt,
     sourceLessonId: previewData.sourceLessonId,
     formalEvidence: false,

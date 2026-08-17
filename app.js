@@ -75,6 +75,8 @@
   const REVIEW_REPEAT_RESOLVE_TIMEOUT_MS = Number(REVIEW_BATCH_CLIENT.DEFAULT_REPEAT_RESOLVE_TIMEOUT_MS) || 8000;
   const REVIEW_REPEAT_RECOVERY_TIMEOUT_MS = Number(REVIEW_BATCH_CLIENT.DEFAULT_REPEAT_RECOVERY_TIMEOUT_MS) || 6000;
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
+  const SPEECH_DEFAULT_RATE = 0.72;
+  const SPEECH_SLOW_RATE = 0.5;
   const offlineStore = API_ENABLED && typeof OFFLINE_STORAGE.createOfflineStore === "function" ? OFFLINE_STORAGE.createOfflineStore(window) : null;
   let remoteReady = !API_ENABLED;
   const allItems = [
@@ -806,9 +808,14 @@
     return typeof window.SpeechSynthesisUtterance === "function" && Boolean(window.speechSynthesis);
   }
 
-  function speechButtonHtml(text, label = "播放英文发音") {
+  function speechButtonHtml(text, label = "播放英文发音", options = {}) {
     if (!text || !speechSynthesisAvailable()) return "";
-    return `<button class="speak-button" type="button" data-speak-text="${escapeHtml(text)}" data-tooltip="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><i data-lucide="volume-2" aria-hidden="true"></i></button>`;
+    const value = escapeHtml(text);
+    const normalButton = `<button class="speak-button" type="button" data-speak-text="${value}" data-tooltip="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"><i data-lucide="volume-2" aria-hidden="true"></i></button>`;
+    if (options.includeSlow !== true) return normalButton;
+    const slowLabel = String(options.slowLabel || "慢速播放");
+    const slowButton = `<button class="speak-button speak-slow-button" type="button" data-speak-text="${value}" data-speak-rate="${SPEECH_SLOW_RATE}" data-tooltip="${escapeHtml(slowLabel)}" aria-label="${escapeHtml(slowLabel)}"><i data-lucide="gauge" aria-hidden="true"></i></button>`;
+    return `<span class="speech-controls" role="group" aria-label="英文朗读速度">${normalButton}${slowButton}</span>`;
   }
 
   function phonemeSoundButtonHtml(item) {
@@ -881,7 +888,7 @@
     return true;
   }
 
-  function speakEnglish(text, button = null, rate = 0.72) {
+  function speakEnglish(text, button = null, rate = SPEECH_DEFAULT_RATE) {
     const value = String(text || "").trim();
     if (!value || !speechSynthesisAvailable()) return false;
     stopPronunciationSound();
@@ -889,7 +896,7 @@
     $$(".speak-button.is-playing").forEach(item => item.classList.remove("is-playing"));
     const utterance = new SpeechSynthesisUtterance(value);
     utterance.lang = "en-US";
-    utterance.rate = Math.max(0.5, Math.min(1, Number(rate) || 0.72));
+    utterance.rate = Math.max(0.5, Math.min(1, Number(rate) || SPEECH_DEFAULT_RATE));
     const voices = window.speechSynthesis.getVoices();
     utterance.voice = voices.find(voice => /^en-US/i.test(voice.lang)) || voices.find(voice => /^en/i.test(voice.lang)) || null;
     if (button) button.classList.add("is-playing");
@@ -6482,7 +6489,7 @@
   function selfStudyStepBodyHtml(step) {
     const pronunciationText = step.english || (step.type === "read-aloud" ? step.content : "");
     const pronunciation = step.phonetic || step.pronunciation || pronunciationText
-      ? `<div class="self-study-pronunciation">${step.phonetic ? `<span>${escapeHtml(step.phonetic)}</span>` : ""}${step.pronunciation ? `<span>中文辅助：${escapeHtml(step.pronunciation)}</span>` : ""}${speechButtonHtml(pronunciationText, "播放当前英文")}</div>`
+      ? `<div class="self-study-pronunciation">${step.phonetic ? `<span>${escapeHtml(step.phonetic)}</span>` : ""}${step.pronunciation ? `<span>中文辅助：${escapeHtml(step.pronunciation)}</span>` : ""}${speechButtonHtml(pronunciationText, "播放当前英文", { includeSlow: true, slowLabel: "慢速播放当前英文" })}</div>`
       : "";
     return `
       ${step.title ? `<h2>${escapeHtml(step.title)}</h2>` : ""}
@@ -6650,6 +6657,22 @@
     const previousStepId = step.stepId;
     await selfStudyRequest("/continue", { body: { lessonId: current.lessonId, stepId: step.stepId, continueId: record.continueId } });
     removeSelfStudyStepLocal(previousLessonId, previousStepId);
+  }
+
+  function handleSelfStudyStepEnter(event) {
+    if (!shouldSubmitOnEnter(event) || activeView !== "self-study" || selfStudyRequestInProgress) return;
+    const target = event.target;
+    if (target && typeof target.closest === "function" && target.closest("input, textarea, select, button, a, [contenteditable=\"true\"]")) return;
+    const current = selfStudyState.current;
+    const step = selfStudyCurrentStep();
+    const submit = $("#submitSelfStudyButton");
+    if (!current || !step || !submit || submit.disabled) return;
+    const questionTypes = ["choice", "short-answer", "en-zh", "zh-en", "reading-question", "correction"];
+    const canContinue = step.status === "completed" && questionTypes.includes(step.type);
+    const hasNoAnswerControl = ["teach", "read-aloud"].includes(step.type);
+    if (!canContinue && !hasNoAnswerControl) return;
+    event.preventDefault();
+    $("#selfStudyAnswerForm")?.requestSubmit();
   }
 
   async function submitSelfStudyAnswer(event) {
@@ -7941,6 +7964,7 @@
       event.preventDefault();
       $("#selfStudyAnswerForm").requestSubmit();
     });
+    document.addEventListener("keydown", handleSelfStudyStepEnter);
     $("#selfStudyAnswerForm").addEventListener("input", persistSelfStudyDraftLocally);
     $("#selfStudyAnswerForm").addEventListener("change", persistSelfStudyDraftLocally);
     $("#toggleSelfStudyQuestion").addEventListener("click", () => {
@@ -8162,7 +8186,10 @@
         return;
       }
       const button = event.target.closest("[data-speak-text]");
-      if (button) speakEnglish(button.dataset.speakText, button);
+      if (button) {
+        const rate = Number(button.dataset.speakRate);
+        speakEnglish(button.dataset.speakText, button, Number.isFinite(rate) ? rate : SPEECH_DEFAULT_RATE);
+      }
     });
     $("#examForm").addEventListener("input", event => {
       const article = event.target.closest("[data-exam-question]");
@@ -8247,7 +8274,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=70", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=71", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

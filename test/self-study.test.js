@@ -3,7 +3,10 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const {
+  SELF_STUDY_SCHEDULE_ANCHOR_DATE,
+  SELF_STUDY_SCHEDULE_ANCHOR_DAY,
   continueSelfStudyStep,
+  currentLessonCandidate,
   localStepGrade,
   markLessonCompleted,
   mergeSelfStudyLessons,
@@ -11,6 +14,8 @@ const {
   sanitizeSelfStudyLesson,
   sanitizeSelfStudyState,
   selfStudyHistory,
+  selfStudyPreviewContent,
+  selfStudyScheduledDate,
   startSelfStudyLesson,
   submitSelfStudyStep
 } = require("../server/self-study");
@@ -187,6 +192,132 @@ test("later planned lessons may reuse words introduced by an earlier planned les
     () => mergeSelfStudyLessons(dayNineOnly, { lessons: [unsafeDayTen] }, { learnedWords: LEARNED_WORDS }),
     /unapproved English words: apple/
   );
+});
+
+test("self-study schedule anchors day 12 on 2026-08-18 and keeps day 10/11 dates", () => {
+  assert.equal(SELF_STUDY_SCHEDULE_ANCHOR_DAY, 12);
+  assert.equal(SELF_STUDY_SCHEDULE_ANCHOR_DATE, "2026-08-18");
+  assert.equal(selfStudyScheduledDate(11), "");
+  assert.equal(selfStudyScheduledDate(12), "2026-08-18");
+  assert.equal(selfStudyScheduledDate(13), "2026-08-19");
+
+  const day10 = lesson("1", "trip-day-10", 10);
+  day10.formalDate = "2026-08-09";
+  day10.enabledFrom = "2026-08-09T00:00:00+08:00";
+  day10.plannedContent.note.date = "2026-08-09";
+  const day11 = lesson("1", "trip-day-11", 11);
+  day11.formalDate = "2026-08-10";
+  day11.enabledFrom = "2026-08-10T00:00:00+08:00";
+  day11.plannedContent.note.date = "2026-08-10";
+  const day12 = lesson("1", "trip-day-12", 12);
+  day12.formalDate = "2026-08-11";
+  day12.enabledFrom = "2026-08-11T00:00:00+08:00";
+  day12.expiresAt = "2026-09-10T23:59:59+08:00";
+  day12.plannedContent.note.date = "2026-08-11";
+  const day13 = lesson("1", "trip-day-13", 13);
+  day13.formalDate = "2026-08-12";
+  day13.enabledFrom = "2026-08-12T00:00:00+08:00";
+  day13.expiresAt = "2026-09-10T23:59:59+08:00";
+  day13.plannedContent.note.date = "2026-08-12";
+
+  const state = upload([day10, day11, day12, day13]);
+  const dates = new Map(state.lessons.map(item => [item.lessonId, item]));
+  assert.equal(dates.get("trip-day-10").formalDate, "2026-08-09");
+  assert.equal(dates.get("trip-day-11").formalDate, "2026-08-10");
+  assert.equal(dates.get("trip-day-12").formalDate, "2026-08-18");
+  assert.equal(dates.get("trip-day-12").enabledFrom, "2026-08-17T16:00:00.000Z");
+  assert.equal(dates.get("trip-day-12").expiresAt, "2026-09-17T15:59:59.000Z");
+  assert.equal(dates.get("trip-day-12").plannedContent.note.date, "2026-08-18");
+  assert.equal(dates.get("trip-day-13").formalDate, "2026-08-19");
+  assert.equal(dates.get("trip-day-13").enabledFrom, "2026-08-18T16:00:00.000Z");
+  assert.equal(dates.get("trip-day-13").expiresAt, "2026-09-17T15:59:59.000Z");
+  assert.equal(dates.get("trip-day-13").plannedContent.note.date, "2026-08-19");
+
+  const preview = selfStudyPreviewContent(state, new Date("2026-08-17T12:00:00.000Z"));
+  assert.equal(preview.lessonId, "trip-day-10");
+  assert.equal(preview.formalDate, "2026-08-09");
+  assert.equal(preview.formalEvidence, false);
+  assert.equal(preview.words[0].status, "planned");
+});
+
+test("date normalization is idempotent and preserves completed historical snapshots", () => {
+  const day12 = lesson("1", "trip-day-12-history", 12);
+  day12.formalDate = "2026-08-11";
+  day12.enabledFrom = "2026-08-11T00:00:00+08:00";
+  day12.expiresAt = "2026-09-10T23:59:59+08:00";
+  day12.plannedContent.note.date = "2026-08-11";
+  const legacySnapshot = sanitizeSelfStudyLesson(day12, { skipVocabularyValidation: true });
+  const state = {
+    enabled: true,
+    lessons: [day12],
+    progress: {
+      [day12.lessonId]: {
+        lessonId: day12.lessonId,
+        lessonVersion: day12.version,
+        status: "completed",
+        completedAt: "2026-08-11T02:00:00.000Z",
+        snapshot: legacySnapshot,
+        steps: {}
+      }
+    }
+  };
+
+  const replacement = structuredClone(day12);
+  replacement.formalDate = "2026-08-11";
+  replacement.enabledFrom = "2026-08-11T00:00:00+08:00";
+  replacement.expiresAt = "2026-09-10T23:59:59+08:00";
+  replacement.plannedContent.note.date = "2026-08-11";
+  const merged = mergeSelfStudyLessons(state, { lessons: [replacement] }, { learnedWords: LEARNED_WORDS }).state;
+  assert.equal(merged.lessons[0].formalDate, "2026-08-11");
+  assert.equal(merged.lessons[0].enabledFrom, "2026-08-10T16:00:00.000Z");
+  assert.equal(merged.lessons[0].plannedContent.note.date, "2026-08-11");
+  assert.equal(merged.progress[day12.lessonId].snapshot.formalDate, "2026-08-11");
+
+  const pending = lesson("1", "trip-day-13-pending", 13);
+  pending.formalDate = "2026-08-12";
+  pending.enabledFrom = "2026-08-12T00:00:00+08:00";
+  pending.expiresAt = "2026-09-10T23:59:59+08:00";
+  pending.publishedAt = "2026-08-07T00:00:00+08:00";
+  pending.plannedContent.note.date = "2026-08-12";
+  const first = mergeSelfStudyLessons(merged, { lessons: [pending] }, { learnedWords: LEARNED_WORDS }).state;
+  const second = mergeSelfStudyLessons(first, { lessons: [pending] }, { learnedWords: LEARNED_WORDS }).state;
+  assert.deepEqual(second.lessons.find(item => item.lessonId === pending.lessonId), first.lessons.find(item => item.lessonId === pending.lessonId));
+  assert.equal(second.lessons.find(item => item.lessonId === pending.lessonId).formalDate, "2026-08-19");
+});
+
+test("self-study unlock boundaries follow the anchored dates and preview stays planned", () => {
+  const lessons = [10, 11, 12, 13].map(day => lesson("1", `trip-day-boundary-${day}`, day));
+  let state = upload(lessons);
+  const completed = day => {
+    const source = state.lessons.find(item => item.studyDay === day);
+    return {
+      lessonId: source.lessonId,
+      lessonVersion: source.version,
+      status: "completed",
+      completedAt: "2026-08-16T00:00:00.000Z",
+      snapshot: structuredClone(source),
+      steps: {}
+    };
+  };
+  state.progress["trip-day-boundary-10"] = completed(10);
+  state.progress["trip-day-boundary-11"] = completed(11);
+
+  let candidate = currentLessonCandidate(state, new Date("2026-08-17T15:59:59.000Z"));
+  assert.equal(candidate.lesson, null);
+  assert.equal(candidate.waitingLesson.lessonId, "trip-day-boundary-12");
+  const waitingPreview = selfStudyPreviewContent(state, new Date("2026-08-17T15:59:59.000Z"));
+  assert.equal(waitingPreview.lessonId, "trip-day-boundary-12");
+  assert.equal(waitingPreview.formalDate, "2026-08-18");
+  assert.equal(waitingPreview.formalEvidence, false);
+  candidate = currentLessonCandidate(state, new Date("2026-08-17T16:00:00.000Z"));
+  assert.equal(candidate.lesson.lessonId, "trip-day-boundary-12");
+
+  state.progress["trip-day-boundary-12"] = completed(12);
+  candidate = currentLessonCandidate(state, new Date("2026-08-18T15:59:59.000Z"));
+  assert.equal(candidate.lesson, null);
+  assert.equal(candidate.waitingLesson.lessonId, "trip-day-boundary-13");
+  candidate = currentLessonCandidate(state, new Date("2026-08-18T16:00:00.000Z"));
+  assert.equal(candidate.lesson.lessonId, "trip-day-boundary-13");
 });
 
 test("public self-study state shows only the current step and never leaks an unanswered reference", () => {

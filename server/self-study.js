@@ -22,6 +22,8 @@ const TEST_BLUEPRINT = Object.freeze({ phonics: 2, "en-zh": 2, "zh-en": 2, readi
 const MAX_LESSONS = 60;
 const MAX_ATTEMPTS_PER_STEP = 20;
 const MAX_QUESTIONS_PER_STEP = 50;
+const SELF_STUDY_SCHEDULE_ANCHOR_DAY = 12;
+const SELF_STUDY_SCHEDULE_ANCHOR_DATE = "2026-08-18";
 
 function fail(message, statusCode = 400) {
   throw Object.assign(new Error(message), { statusCode });
@@ -44,6 +46,65 @@ function cleanId(value, label = "id") {
 function cleanIso(value) {
   const text = cleanInline(value, 40);
   return text && Number.isFinite(Date.parse(text)) ? new Date(text).toISOString() : "";
+}
+
+function addCalendarDays(dateText, days) {
+  const match = String(dateText || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return "";
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + Number(days || 0)));
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toISOString().slice(0, 10);
+}
+
+function selfStudyScheduledDate(studyDay) {
+  const day = Number(studyDay);
+  if (!Number.isInteger(day) || day < SELF_STUDY_SCHEDULE_ANCHOR_DAY) return "";
+  return addCalendarDays(SELF_STUDY_SCHEDULE_ANCHOR_DATE, day - SELF_STUDY_SCHEDULE_ANCHOR_DAY);
+}
+
+function alignSelfStudyLessonSchedule(lesson) {
+  const scheduledDate = selfStudyScheduledDate(lesson && lesson.studyDay);
+  if (!scheduledDate || !lesson || typeof lesson !== "object") return lesson;
+  const originalStart = Date.parse(lesson.enabledFrom || "");
+  const originalExpiry = Date.parse(lesson.expiresAt || "");
+  const duration = Number.isFinite(originalStart) && Number.isFinite(originalExpiry) && originalExpiry > originalStart
+    ? originalExpiry - originalStart
+    : 0;
+  const next = {
+    ...lesson,
+    formalDate: scheduledDate,
+    enabledFrom: new Date(`${scheduledDate}T00:00:00+08:00`).toISOString(),
+    expiresAt: duration ? new Date(Date.parse(`${scheduledDate}T00:00:00+08:00`) + duration).toISOString() : lesson.expiresAt,
+    plannedContent: {
+      ...(lesson.plannedContent || {}),
+      note: lesson.plannedContent && lesson.plannedContent.note
+        ? { ...lesson.plannedContent.note, date: scheduledDate }
+        : lesson.plannedContent?.note
+    }
+  };
+  return next;
+}
+
+function preserveSelfStudyHistorySchedule(lesson, progress) {
+  const snapshot = progress && progress.snapshot && typeof progress.snapshot === "object" ? progress.snapshot : null;
+  if (!snapshot) return lesson;
+  const historicalDate = cleanDate(snapshot.formalDate);
+  const historicalStart = cleanIso(snapshot.enabledFrom);
+  const historicalExpiry = cleanIso(snapshot.expiresAt);
+  const historicalNoteDate = cleanDate(snapshot.plannedContent && snapshot.plannedContent.note && snapshot.plannedContent.note.date);
+  if (!historicalDate && !historicalStart && !historicalExpiry && !historicalNoteDate) return lesson;
+  return {
+    ...lesson,
+    formalDate: historicalDate || lesson.formalDate,
+    enabledFrom: historicalStart || lesson.enabledFrom,
+    expiresAt: historicalExpiry || lesson.expiresAt,
+    plannedContent: {
+      ...(lesson.plannedContent || {}),
+      note: lesson.plannedContent && lesson.plannedContent.note
+        ? { ...lesson.plannedContent.note, date: historicalNoteDate || lesson.plannedContent.note.date }
+        : lesson.plannedContent?.note
+    }
+  };
 }
 
 function cleanDate(value) {
@@ -297,15 +358,20 @@ function sanitizeSelfStudyLesson(value, options = {}) {
     if (contentIds.has(item.id)) fail(`${lessonId} contains duplicate planned content id: ${item.id}`);
     contentIds.add(item.id);
   });
+  const formalDate = cleanDate(source.formalDate || source.date);
+  const enabledFrom = cleanIso(source.enabledFrom || source.availableFrom);
+  const publishedAt = cleanIso(source.publishedAt)
+    || enabledFrom
+    || (formalDate ? new Date(`${formalDate}T00:00:00+08:00`).toISOString() : "");
   const lesson = {
     lessonId,
     studyDay,
-    formalDate: cleanDate(source.formalDate || source.date),
+    formalDate,
     title: cleanInline(source.title, 200) || `第 ${studyDay} 天自学课程`,
     version: cleanInline(source.version, 80) || "1",
-    enabledFrom: cleanIso(source.enabledFrom || source.availableFrom),
+    enabledFrom,
     expiresAt: cleanIso(source.expiresAt),
-    publishedAt: cleanIso(source.publishedAt) || new Date().toISOString(),
+    publishedAt,
     stages,
     plannedContent: {
       words: plannedWords,
@@ -463,10 +529,16 @@ function sanitizeSelfStudyState(value) {
     const normalized = sanitizeProgress(value);
     if (normalized && normalized.lessonId === lessonId) progress[lessonId] = normalized;
   });
+  const lessons = Array.from(lessonMap.values()).sort((left, right) => left.studyDay - right.studyDay || left.lessonId.localeCompare(right.lessonId)).map(lesson => {
+    const progressItem = progress[lesson.lessonId];
+    return progressItem && ["completed", "cancelled", "expired"].includes(progressItem.status)
+      ? preserveSelfStudyHistorySchedule(lesson, progressItem)
+      : alignSelfStudyLessonSchedule(lesson);
+  });
   return {
     schema: 1,
     enabled: source.enabled === true,
-    lessons: Array.from(lessonMap.values()).sort((left, right) => left.studyDay - right.studyDay || left.lessonId.localeCompare(right.lessonId)),
+    lessons,
     progress,
     updatedAt: cleanIso(source.updatedAt)
   };
@@ -583,6 +655,12 @@ function mergeSelfStudyLessons(value, packageValue, options = {}) {
   const source = packageValue && typeof packageValue === "object" ? packageValue : {};
   const incoming = (Array.isArray(source.lessons) ? source.lessons : [])
     .map(lesson => sanitizeSelfStudyLesson(lesson, { skipVocabularyValidation: true }))
+    .map(lesson => {
+      const progress = state.progress[lesson.lessonId];
+      return progress && ["completed", "cancelled", "expired"].includes(progress.status)
+        ? preserveSelfStudyHistorySchedule(lesson, progress)
+        : alignSelfStudyLessonSchedule(lesson);
+    })
     .sort((left, right) => left.studyDay - right.studyDay || left.lessonId.localeCompare(right.lessonId));
   if (!incoming.length) fail("self-study package requires at least one lesson");
   const incomingIds = new Set();
@@ -660,7 +738,10 @@ function selfStudyPreviewContent(value, now = new Date()) {
     lessonId: lesson.lessonId,
     lessonVersion: lesson.version,
     studyDay: lesson.studyDay,
+    formalDate: lesson.formalDate,
     title: lesson.title,
+    enabledFrom: lesson.enabledFrom,
+    expiresAt: lesson.expiresAt,
     currentDay: Math.max(1, Number(lesson.studyDay) - 1),
     nextDay: Number(lesson.studyDay),
     updatedAt: candidate.progress?.updatedAt || candidate.state.updatedAt || lesson.publishedAt || "",
@@ -1137,7 +1218,10 @@ function publicSelfStudyState(value, now = new Date()) {
     lessonId: progress.lessonId,
     lessonVersion: progress.lessonVersion,
     studyDay: progress.snapshot.studyDay,
+    formalDate: progress.snapshot.formalDate,
     title: progress.snapshot.title,
+    enabledFrom: progress.snapshot.enabledFrom,
+    expiresAt: progress.snapshot.expiresAt,
     status: progress.status,
     startedAt: progress.startedAt,
     updatedAt: progress.updatedAt,
@@ -1174,7 +1258,15 @@ function publicSelfStudyState(value, now = new Date()) {
     lessonCount: state.lessons.length,
     completedLessons,
     current,
-    availableLesson: !progress && candidate.lesson ? { lessonId: candidate.lesson.lessonId, studyDay: candidate.lesson.studyDay, title: candidate.lesson.title, version: candidate.lesson.version } : null,
+    availableLesson: !progress && candidate.lesson ? {
+      lessonId: candidate.lesson.lessonId,
+      studyDay: candidate.lesson.studyDay,
+      formalDate: candidate.lesson.formalDate,
+      title: candidate.lesson.title,
+      version: candidate.lesson.version,
+      enabledFrom: candidate.lesson.enabledFrom,
+      expiresAt: candidate.lesson.expiresAt
+    } : null,
     waitingUntil: candidate.waitingLesson ? candidate.waitingLesson.enabledFrom : "",
     updatedAt: state.updatedAt
   };
@@ -1219,7 +1311,10 @@ function selfStudyHistory(value) {
       lessonId: progress.lessonId,
       lessonVersion: progress.lessonVersion,
       studyDay: progress.snapshot.studyDay,
+      formalDate: progress.snapshot.formalDate,
       title: progress.snapshot.title,
+      enabledFrom: progress.snapshot.enabledFrom,
+      expiresAt: progress.snapshot.expiresAt,
       status: progress.status,
       startedAt: progress.startedAt,
       updatedAt: progress.updatedAt,
@@ -1249,6 +1344,7 @@ function selfStudyHistory(value) {
     lessonId: lesson.lessonId,
     lessonVersion: lesson.version,
     studyDay: lesson.studyDay,
+    formalDate: lesson.formalDate,
     title: lesson.title,
     status: lessonExpired(lesson) ? "expired" : "planned",
     enabledFrom: lesson.enabledFrom,
@@ -1282,12 +1378,15 @@ function selfStudyHistory(value) {
 
 module.exports = {
   QUESTION_STEP_TYPES,
+  SELF_STUDY_SCHEDULE_ANCHOR_DATE,
+  SELF_STUDY_SCHEDULE_ANCHOR_DAY,
   SELF_STUDY_STAGE_TYPES,
   SELF_STUDY_STEP_TYPES,
   TEST_BLUEPRINT,
   addTutorQuestion,
   continueSelfStudyStep,
   currentLessonCandidate,
+  alignSelfStudyLessonSchedule,
   isQuestionStep,
   localStepGrade,
   markLessonCompleted,
@@ -1303,6 +1402,7 @@ module.exports = {
   saveSelfStudyDraft,
   selfStudyPreviewContent,
   selfStudyHistory,
+  selfStudyScheduledDate,
   startSelfStudyLesson,
   submitSelfStudyStep,
   testSummary

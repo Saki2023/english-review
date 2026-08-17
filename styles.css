@@ -445,10 +445,15 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .speak-button:hover { border-color: var(--primary); background: var(--primary-soft); }
 .speak-button svg { width: 16px; height: 16px; }
 .speak-button.is-playing { border-color: var(--primary); color: var(--surface); background: var(--primary); }
+.speech-controls { display: inline-flex; align-items: center; gap: 6px; }
+.speech-controls .speak-slow-button { color: var(--muted); }
+.speech-controls .speak-slow-button:hover { color: var(--primary-deep); }
 .prompt-with-audio { display: flex; align-items: center; justify-content: center; gap: 10px; }
 .prompt-with-audio .prompt-text { min-width: 0; }
 .inline-english { display: inline-flex; align-items: center; gap: 7px; }
 .inline-english .speak-button { width: 29px; height: 29px; }
+.inline-english .speech-controls { gap: 5px; }
+.inline-english .speech-controls .speak-button { width: 29px; height: 29px; }
 
 .dictation-controls { display: grid; grid-template-columns: minmax(170px, 1.2fr) minmax(250px, 1.7fr) minmax(110px, .7fr) auto; align-items: end; gap: 14px 16px; margin-bottom: 8px; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .dictation-sheet { border-top: 1px solid var(--border); }

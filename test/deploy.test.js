@@ -159,9 +159,14 @@ test("Bash parses every deployment script and the real Git history produces a st
   );
   assert.equal(catalog.status, 0, catalog.stderr);
   const lines = catalog.stdout.trim().split(/\r?\n/);
-  assert.equal(lines[0], "70");
-  assert.match(lines[1], /^v70\t[0-9a-f]{40}\t\d{4}-\d{2}-\d{2}\t/);
-  assert.match(lines[2], /^v69\t[0-9a-f]{40}\t\d{4}-\d{2}-\d{2}\t/);
+  const headHtml = spawnSync(bash, ["-c", "git show HEAD:index.html"], { cwd: ROOT, encoding: "utf8", env: bashEnv });
+  assert.equal(headHtml.status, 0, headHtml.stderr);
+  const headVersion = headHtml.stdout.match(/id=\"appVersionBadge\"[^>]*>v(\d+)<\/span>/)?.[1];
+  assert.ok(headVersion, "HEAD should contain a visible PWA version");
+  assert.equal(lines[0], headVersion);
+  assert.match(lines[1], new RegExp(`^v${headVersion}\\t[0-9a-f]{40}\\t\\d{4}-\\d{2}-\\d{2}\\t`));
+  const previousVersion = String(Math.max(0, Number(headVersion) - 1));
+  assert.match(lines[2], new RegExp(`^v${previousVersion}\\t[0-9a-f]{40}\\t\\d{4}-\\d{2}-\\d{2}\\t`));
 });
 
 test("failed and successful version transactions preserve or advance root-owned markers atomically", t => {
