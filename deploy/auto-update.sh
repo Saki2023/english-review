@@ -7,6 +7,7 @@ readonly COMPOSE_FILE="${ENGLISH_REVIEW_COMPOSE_FILE:-docker-compose.vps.yml}"
 readonly BRANCH="${ENGLISH_REVIEW_BRANCH:-main}"
 readonly STATE_DIR="${ENGLISH_REVIEW_STATE_DIR:-/var/lib/english-review-updater}"
 readonly DEPLOYED_FILE="${STATE_DIR}/deployed-revision"
+readonly PINNED_FILE="${STATE_DIR}/pinned-revision"
 readonly LOCK_FILE="/run/lock/english-review-update.lock"
 readonly BACKUP_DIR="/var/backups/english-review"
 readonly BACKUP_RETENTION=10
@@ -89,14 +90,25 @@ flock -n 9 || { log "another update is already running"; exit 0; }
 
 cd "$REPO_DIR"
 
-current_branch="$(git symbolic-ref --quiet --short HEAD || true)"
-[[ "$current_branch" == "$BRANCH" ]] || fail "expected branch ${BRANCH}, found ${current_branch:-detached HEAD}"
-
 if ! git diff --quiet || ! git diff --cached --quiet; then
   fail "tracked files contain local changes; automatic update stopped"
 fi
 
 verify_data_mount
+
+pinned_revision="$(cat "$PINNED_FILE" 2>/dev/null || true)"
+if [[ -n "$pinned_revision" ]]; then
+  [[ "$pinned_revision" =~ ^[0-9a-f]{40}$ ]] || fail "pinned revision state is invalid"
+  local_revision="$(git rev-parse HEAD)"
+  deployed_revision="$(cat "$DEPLOYED_FILE" 2>/dev/null || true)"
+  [[ "$local_revision" == "$pinned_revision" ]] || fail "pinned revision does not match the checked-out program; run english-review-version status"
+  [[ "$deployed_revision" == "$pinned_revision" ]] || fail "pinned revision does not match the deployed marker; run english-review-version status"
+  log "version pinned at ${pinned_revision:0:12}; automatic update skipped"
+  exit 0
+fi
+
+current_branch="$(git symbolic-ref --quiet --short HEAD || true)"
+[[ "$current_branch" == "$BRANCH" ]] || fail "expected branch ${BRANCH}, found ${current_branch:-detached HEAD}"
 
 git fetch --quiet origin "$BRANCH"
 local_revision="$(git rev-parse HEAD)"
@@ -149,6 +161,12 @@ if [[ -f "${REPO_DIR}/deploy/auto-update.sh" ]]; then
   bash -n "${REPO_DIR}/deploy/auto-update.sh" || fail "updated auto-update.sh has invalid Bash syntax"
   install -m 0755 "${REPO_DIR}/deploy/auto-update.sh" /usr/local/sbin/english-review-update.next
   mv -f /usr/local/sbin/english-review-update.next /usr/local/sbin/english-review-update
+fi
+
+if [[ -f "${REPO_DIR}/deploy/english-review-version" ]]; then
+  bash -n "${REPO_DIR}/deploy/english-review-version" || fail "updated english-review-version has invalid Bash syntax"
+  install -m 0755 "${REPO_DIR}/deploy/english-review-version" /usr/local/sbin/english-review-version.next
+  mv -f /usr/local/sbin/english-review-version.next /usr/local/sbin/english-review-version
 fi
 
 printf '%s\n' "$remote_revision" > "${DEPLOYED_FILE}.tmp"

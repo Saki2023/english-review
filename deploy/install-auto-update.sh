@@ -16,10 +16,12 @@ done
 [[ -f "${REPO_DIR}/.env" ]] || { echo "未找到配置：${REPO_DIR}/.env" >&2; exit 1; }
 docker compose version >/dev/null
 bash -n "${REPO_DIR}/deploy/auto-update.sh"
+bash -n "${REPO_DIR}/deploy/english-review-version"
 bash -n "${REPO_DIR}/deploy/install-auto-update.sh"
 
 install -d -m 0755 /usr/local/sbin /var/lib/english-review-updater
 install -m 0755 "${REPO_DIR}/deploy/auto-update.sh" /usr/local/sbin/english-review-update
+install -m 0755 "${REPO_DIR}/deploy/english-review-version" /usr/local/sbin/english-review-version
 install -m 0644 "${REPO_DIR}/deploy/english-review-update.service" /etc/systemd/system/english-review-update.service
 install -m 0644 "${REPO_DIR}/deploy/english-review-update.timer" /etc/systemd/system/english-review-update.timer
 systemd-analyze verify /etc/systemd/system/english-review-update.service /etc/systemd/system/english-review-update.timer
@@ -34,6 +36,7 @@ fi
 
 echo
 echo "自动更新已启用，每 1 分钟检查一次 GitHub。"
+echo "SSH 版本管理：sudo english-review-version --help"
 systemctl list-timers english-review-update.timer --no-pager
 echo
 echo "查看日志：journalctl -u english-review-update.service -n 100 --no-pager"

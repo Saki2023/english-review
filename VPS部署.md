@@ -180,6 +180,28 @@ journalctl -u english-review-update.service -n 100 --no-pager
 sudo systemctl start english-review-update.service
 ```
 
+### 仅通过 SSH 切换程序版本
+
+不要给网页配置 VPS、Docker、SSH 或 `sudo` 权限。版本管理只安装在 VPS 的 root 命令目录中：
+
+```bash
+cd /opt/english-review
+sudo git switch main
+sudo git pull --ff-only
+sudo bash deploy/install-version-manager.sh
+```
+
+安装完成后使用：
+
+```bash
+sudo english-review-version list
+sudo english-review-version switch v69
+sudo english-review-version status
+sudo english-review-version latest
+```
+
+切换只影响程序代码，不回退 `.env` 或 `server/data`。每次实际切换前自动备份数据；目标版本不健康时自动恢复原程序。固定到旧版本后，每分钟自动更新会暂停升级但定时器仍保持可用；执行 `latest` 并健康部署主分支后恢复自动更新。
+
 ## 十一、配置多套 AI 连接
 
 登录管理员账号后，在“AI 出题”页面右上角打开设置，可以添加 sub2api、NewAPI、DeepSeek、OneAPI 或其他 OpenAI 兼容连接，并选择手动固定或自动轮换，不需要通过 SSH 修改 `.env`。完整说明见 [AI判题配置.md](AI判题配置.md)。

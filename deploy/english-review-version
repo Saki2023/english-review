@@ -1,0 +1,517 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly REPO_DIR="${ENGLISH_REVIEW_REPO_DIR:-/opt/english-review}"
+readonly COMPOSE_FILE="${ENGLISH_REVIEW_COMPOSE_FILE:-docker-compose.vps.yml}"
+readonly BRANCH="${ENGLISH_REVIEW_BRANCH:-main}"
+readonly STATE_DIR="${ENGLISH_REVIEW_STATE_DIR:-/var/lib/english-review-updater}"
+readonly DEPLOYED_FILE="${STATE_DIR}/deployed-revision"
+readonly PINNED_FILE="${STATE_DIR}/pinned-revision"
+readonly CATALOG_FILE="${STATE_DIR}/version-catalog"
+readonly LOCK_FILE="${ENGLISH_REVIEW_LOCK_FILE:-/run/lock/english-review-update.lock}"
+readonly BACKUP_DIR="${ENGLISH_REVIEW_BACKUP_DIR:-/var/backups/english-review}"
+readonly BACKUP_RETENTION=10
+readonly APP_CONTAINER="english-review"
+readonly TUNNEL_CONTAINER="english-review-cloudflared"
+
+paused_container=false
+
+log() {
+  local message="english-review-version: $*"
+  printf '%s\n' "$message"
+  logger -t english-review-version -- "$*" 2>/dev/null || true
+}
+
+fail() {
+  log "错误：$*" >&2
+  exit 1
+}
+
+cleanup() {
+  if [[ "$paused_container" == "true" ]]; then
+    docker unpause "$APP_CONTAINER" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+usage() {
+  cat <<'EOF'
+用法：
+  sudo english-review-version list
+  sudo english-review-version switch v69
+  sudo english-review-version status
+  sudo english-review-version latest
+
+说明：
+  list        列出 origin/main 中经过部署结构校验的 PWA 版本
+  switch vNN  切换并固定到指定版本，不修改学习数据
+  status      显示当前版本、固定状态和容器健康状态
+  latest      健康部署 origin/main 后恢复自动跟随最新版
+EOF
+}
+
+require_root() {
+  [[ "${EUID}" -eq 0 ]] || fail "请使用 sudo 运行此命令"
+}
+
+require_commands() {
+  local command_name
+  for command_name in bash basename cat chmod date docker flock git grep head install logger mv readlink rm sed sleep systemctl tar; do
+    command -v "$command_name" >/dev/null 2>&1 || fail "缺少命令：${command_name}"
+  done
+}
+
+require_layout() {
+  [[ -d "${REPO_DIR}/.git" ]] || fail "未找到程序仓库：${REPO_DIR}"
+  [[ -f "${REPO_DIR}/.env" ]] || fail "未找到 VPS 配置文件"
+  [[ -f "${REPO_DIR}/${COMPOSE_FILE}" ]] || fail "未找到 VPS Compose 文件"
+  [[ -d "${REPO_DIR}/server/data" ]] || fail "未找到学习数据目录"
+  install -d -m 0755 "$STATE_DIR"
+  cd "$REPO_DIR"
+}
+
+require_clean_worktree() {
+  if ! git diff --quiet || ! git diff --cached --quiet; then
+    fail "程序仓库存在受跟踪的本地修改；为防止覆盖，版本切换已停止"
+  fi
+}
+
+acquire_lock() {
+  exec 9>"$LOCK_FILE"
+  flock -n 9 || fail "自动更新或另一项版本操作正在运行，请稍后重试"
+}
+
+read_state_file() {
+  local file="$1"
+  cat "$file" 2>/dev/null || true
+}
+
+write_state_file() {
+  local file="$1"
+  local value="$2"
+  printf '%s\n' "$value" > "${file}.tmp" || return 1
+  chmod 0600 "${file}.tmp" || return 1
+  mv -f "${file}.tmp" "$file" || return 1
+}
+
+is_full_revision() {
+  [[ "$1" =~ ^[0-9a-f]{40}$ ]]
+}
+
+version_for_revision() {
+  local revision="$1"
+  local html sw compose html_version sw_version
+
+  html="$(git show "${revision}:index.html" 2>/dev/null)" || return 1
+  sw="$(git show "${revision}:sw.js" 2>/dev/null)" || return 1
+  compose="$(git show "${revision}:${COMPOSE_FILE}" 2>/dev/null)" || return 1
+  git cat-file -e "${revision}:Dockerfile" 2>/dev/null || return 1
+
+  html_version="$(printf '%s\n' "$html" | grep -oE 'id="appVersionBadge"[^>]*>v[0-9]+' | grep -oE '[0-9]+$' | head -n 1 || true)"
+  sw_version="$(printf '%s\n' "$sw" | grep -oE 'daily-english-review-v[0-9]+' | grep -oE '[0-9]+$' | head -n 1 || true)"
+
+  [[ -n "$html_version" && "$html_version" == "$sw_version" ]] || return 1
+  grep -Fq -- "./server/data:/app/server/data" <<<"$compose" || return 1
+  printf '%s\n' "$html_version"
+}
+
+catalog_lines() {
+  local revision version date subject
+  declare -A seen_versions=()
+
+  while IFS= read -r revision; do
+    version="$(version_for_revision "$revision" 2>/dev/null || true)"
+    [[ -n "$version" ]] || continue
+    [[ -z "${seen_versions[$version]:-}" ]] || continue
+    seen_versions[$version]=1
+    date="$(git show -s --format='%cs' "$revision")"
+    subject="$(git show -s --format='%s' "$revision")"
+    subject="${subject//$'\t'/ }"
+    printf 'v%s\t%s\t%s\t%s\n' "$version" "$revision" "$date" "$subject"
+  done < <(git rev-list --first-parent "origin/${BRANCH}")
+}
+
+catalog_for_remote() {
+  local remote_revision cached_revision
+  remote_revision="$(git rev-parse "origin/${BRANCH}")"
+  cached_revision="$(sed -n '1s/^# //p' "$CATALOG_FILE" 2>/dev/null || true)"
+  if [[ "$cached_revision" != "$remote_revision" ]]; then
+    {
+      printf '# %s\n' "$remote_revision"
+      catalog_lines
+    } > "${CATALOG_FILE}.tmp"
+    grep -q '^v[0-9]' "${CATALOG_FILE}.tmp" || {
+      rm -f "${CATALOG_FILE}.tmp"
+      return 1
+    }
+    chmod 0600 "${CATALOG_FILE}.tmp"
+    mv -f "${CATALOG_FILE}.tmp" "$CATALOG_FILE"
+  fi
+  sed '1d' "$CATALOG_FILE"
+}
+
+resolve_version() {
+  local requested="$1"
+  local version revision date subject
+  while IFS=$'\t' read -r version revision date subject; do
+    if [[ "$version" == "$requested" ]]; then
+      printf '%s\n' "$revision"
+      return 0
+    fi
+  done < <(catalog_for_remote)
+  return 1
+}
+
+validate_target_revision() {
+  local revision="$1"
+  local expected_version="$2"
+  local actual_version
+
+  is_full_revision "$revision" || return 1
+  git cat-file -e "${revision}^{commit}" 2>/dev/null || return 1
+  git merge-base --is-ancestor "$revision" "origin/${BRANCH}" || return 1
+  actual_version="$(version_for_revision "$revision" 2>/dev/null || true)"
+  [[ "v${actual_version}" == "$expected_version" ]]
+}
+
+data_mount_matches() {
+  local expected mounted
+  expected="$(readlink -f "${REPO_DIR}/server/data")"
+  mounted="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/server/data"}}{{.Source}}{{end}}{{end}}' "$APP_CONTAINER" 2>/dev/null || true)"
+  [[ -n "$mounted" && "$(readlink -f "$mounted")" == "$expected" ]]
+}
+
+container_status() {
+  docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$1" 2>/dev/null || true
+}
+
+deployment_is_healthy() {
+  [[ "$(container_status "$APP_CONTAINER")" == "healthy" ]] &&
+    [[ "$(docker inspect --format '{{.State.Status}}' "$TUNNEL_CONTAINER" 2>/dev/null || true)" == "running" ]] &&
+    data_mount_matches
+}
+
+wait_for_healthy_deployment() {
+  local attempt app_status tunnel_status
+  for ((attempt = 1; attempt <= 60; attempt += 1)); do
+    app_status="$(container_status "$APP_CONTAINER")"
+    tunnel_status="$(docker inspect --format '{{.State.Status}}' "$TUNNEL_CONTAINER" 2>/dev/null || true)"
+    if [[ "$app_status" == "healthy" && "$tunnel_status" == "running" ]]; then
+      data_mount_matches
+      return $?
+    fi
+    if [[ "$app_status" == "dead" || "$app_status" == "exited" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  log "部署未通过健康检查：app=${app_status:-missing}, tunnel=${tunnel_status:-missing}"
+  return 1
+}
+
+backup_data() {
+  local revision="$1"
+  local timestamp archive status
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  archive="${BACKUP_DIR}/backup-${timestamp}-${revision:0:12}.tar.gz"
+  install -d -m 0700 "$BACKUP_DIR"
+
+  status="$(docker inspect --format '{{.State.Status}}' "$APP_CONTAINER" 2>/dev/null || true)"
+  if [[ "$status" == "running" ]]; then
+    docker pause "$APP_CONTAINER" >/dev/null || return 1
+    paused_container=true
+  fi
+
+  if ! tar -C "$REPO_DIR" -czf "$archive" .env server/data; then
+    rm -f "$archive"
+    if [[ "$paused_container" == "true" ]]; then
+      docker unpause "$APP_CONTAINER" >/dev/null 2>&1 || true
+      paused_container=false
+    fi
+    return 1
+  fi
+
+  if [[ "$paused_container" == "true" ]]; then
+    docker unpause "$APP_CONTAINER" >/dev/null || return 1
+    paused_container=false
+  fi
+  chmod 0600 "$archive"
+
+  shopt -s nullglob
+  local backups=("${BACKUP_DIR}"/backup-*.tar.gz)
+  shopt -u nullglob
+  while (( ${#backups[@]} > BACKUP_RETENTION )); do
+    rm -f -- "${backups[0]}"
+    backups=("${backups[@]:1}")
+  done
+  log "学习数据备份已创建：$(basename "$archive")"
+}
+
+perform_checkout_and_deploy() {
+  local target_revision="$1"
+  local mode="$2"
+
+  if [[ "$mode" == "latest" ]]; then
+    git switch --quiet "$BRANCH" || return 1
+    git merge --ff-only "origin/${BRANCH}" || return 1
+  else
+    git switch --quiet --detach "$target_revision" || return 1
+  fi
+
+  [[ "$(git rev-parse HEAD)" == "$target_revision" ]] || return 1
+  grep -Fq -- "./server/data:/app/server/data" "$COMPOSE_FILE" || return 1
+  docker compose -f "$COMPOSE_FILE" config --quiet || return 1
+  docker compose -f "$COMPOSE_FILE" up -d --build || return 1
+  wait_for_healthy_deployment || return 1
+}
+
+restore_original_deployment() {
+  local original_revision="$1"
+  local original_branch="$2"
+
+  log "正在恢复原程序 ${original_revision:0:12}"
+  git switch --quiet --detach "$original_revision" || return 1
+  if [[ -n "$original_branch" ]]; then
+    git branch -f "$original_branch" "$original_revision" >/dev/null || return 1
+    git switch --quiet "$original_branch" || return 1
+  fi
+
+  grep -Fq -- "./server/data:/app/server/data" "$COMPOSE_FILE" || return 1
+  docker compose -f "$COMPOSE_FILE" config --quiet || return 1
+  docker compose -f "$COMPOSE_FILE" up -d --build || return 1
+  wait_for_healthy_deployment || return 1
+  log "原程序已恢复并通过健康检查"
+}
+
+restore_marker_files() {
+  local had_pin="$1"
+  local original_pin="$2"
+  local had_deployed="$3"
+  local original_deployed="$4"
+
+  if [[ "$had_pin" == "true" ]]; then
+    write_state_file "$PINNED_FILE" "$original_pin"
+  else
+    rm -f "$PINNED_FILE" "${PINNED_FILE}.tmp"
+  fi
+  if [[ "$had_deployed" == "true" ]]; then
+    write_state_file "$DEPLOYED_FILE" "$original_deployed"
+  else
+    rm -f "$DEPLOYED_FILE" "${DEPLOYED_FILE}.tmp"
+  fi
+}
+
+commit_target_state() {
+  local target_revision="$1"
+  local mode="$2"
+
+  write_state_file "$DEPLOYED_FILE" "$target_revision" || return 1
+  if [[ "$mode" == "latest" ]]; then
+    systemctl enable --now english-review-update.timer >/dev/null || return 1
+    rm -f "$PINNED_FILE" "${PINNED_FILE}.tmp" || return 1
+  else
+    write_state_file "$PINNED_FILE" "$target_revision" || return 1
+  fi
+}
+
+deploy_target() {
+  local target_revision="$1"
+  local mode="$2"
+  local original_revision original_branch original_pin original_deployed
+  local had_pin=false had_deployed=false
+
+  original_revision="$(git rev-parse HEAD)"
+  original_branch="$(git symbolic-ref --quiet --short HEAD || true)"
+  if [[ -f "$PINNED_FILE" ]]; then
+    had_pin=true
+    original_pin="$(read_state_file "$PINNED_FILE")"
+  else
+    original_pin=""
+  fi
+  if [[ -f "$DEPLOYED_FILE" ]]; then
+    had_deployed=true
+    original_deployed="$(read_state_file "$DEPLOYED_FILE")"
+  else
+    original_deployed=""
+  fi
+
+  data_mount_matches || fail "当前容器的学习数据挂载不正确，拒绝切换版本"
+  backup_data "$original_revision" || fail "创建学习数据备份失败，版本未切换"
+
+  if ! perform_checkout_and_deploy "$target_revision" "$mode"; then
+    log "目标版本部署失败，开始恢复原程序"
+    if ! restore_original_deployment "$original_revision" "$original_branch"; then
+      restore_marker_files "$had_pin" "$original_pin" "$had_deployed" "$original_deployed"
+      fail "目标版本和原程序均未通过健康检查；请立即查看 Docker 日志"
+    fi
+    restore_marker_files "$had_pin" "$original_pin" "$had_deployed" "$original_deployed"
+    fail "目标版本部署失败，已自动恢复原程序"
+  fi
+
+  if ! commit_target_state "$target_revision" "$mode"; then
+    log "目标程序已启动，但无法安全提交版本状态，开始恢复原程序"
+    if ! restore_original_deployment "$original_revision" "$original_branch"; then
+      restore_marker_files "$had_pin" "$original_pin" "$had_deployed" "$original_deployed"
+      fail "版本状态提交失败，原程序也未能恢复；请立即检查 VPS"
+    fi
+    restore_marker_files "$had_pin" "$original_pin" "$had_deployed" "$original_deployed"
+    fail "版本状态提交失败，已自动恢复原程序"
+  fi
+
+  if [[ "$mode" == "latest" ]]; then
+    log "已恢复最新版 ${target_revision:0:12}，自动更新继续运行"
+  else
+    log "已切换并固定到 ${target_revision:0:12}；自动更新不会覆盖此版本"
+  fi
+}
+
+command_list() {
+  local version revision date subject marker
+  local current_revision pinned_revision
+  current_revision="$(git rev-parse HEAD)"
+  pinned_revision="$(read_state_file "$PINNED_FILE")"
+
+  printf '版本\t提交\t日期\t状态\t说明\n'
+  while IFS=$'\t' read -r version revision date subject; do
+    marker=""
+    if [[ "$revision" == "$current_revision" ]]; then
+      marker="当前"
+      [[ "$revision" == "$pinned_revision" ]] && marker="当前/已固定"
+    elif [[ "$revision" == "$pinned_revision" ]]; then
+      marker="已固定"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$version" "${revision:0:12}" "$date" "${marker:--}" "$subject"
+  done < <(catalog_for_remote)
+}
+
+command_status() {
+  local current_revision current_version pinned_revision deployed_revision branch
+  local app_status tunnel_status timer_state
+  current_revision="$(git rev-parse HEAD)"
+  current_version="$(version_for_revision "$current_revision" 2>/dev/null || true)"
+  pinned_revision="$(read_state_file "$PINNED_FILE")"
+  deployed_revision="$(read_state_file "$DEPLOYED_FILE")"
+  branch="$(git symbolic-ref --quiet --short HEAD || true)"
+  app_status="$(container_status "$APP_CONTAINER")"
+  tunnel_status="$(docker inspect --format '{{.State.Status}}' "$TUNNEL_CONTAINER" 2>/dev/null || true)"
+  timer_state="$(systemctl is-enabled english-review-update.timer 2>/dev/null || true)"
+
+  if [[ -n "$current_version" ]]; then
+    printf '当前版本：v%s\n' "$current_version"
+  else
+    printf '当前版本：无法识别\n'
+  fi
+  printf '当前提交：%s\n' "${current_revision:0:12}"
+  printf 'Git 状态：%s\n' "${branch:-detached}"
+  if [[ -n "$pinned_revision" ]]; then
+    printf '更新模式：已固定 %s\n' "${pinned_revision:0:12}"
+  else
+    printf '更新模式：自动跟随 origin/%s\n' "$BRANCH"
+  fi
+  printf '已部署标记：%s\n' "${deployed_revision:0:12}"
+  printf '应用容器：%s\n' "${app_status:-missing}"
+  printf 'Tunnel 容器：%s\n' "${tunnel_status:-missing}"
+  printf '自动更新定时器：%s\n' "${timer_state:-unknown}"
+  if data_mount_matches; then
+    printf '学习数据挂载：正常\n'
+  else
+    printf '学习数据挂载：异常\n'
+  fi
+  if [[ -n "$pinned_revision" ]]; then
+    if [[ "$current_revision" == "$pinned_revision" && "$deployed_revision" == "$pinned_revision" ]]; then
+      printf '版本状态一致性：正常\n'
+    else
+      printf '版本状态一致性：异常，请勿继续切换并检查日志\n'
+    fi
+  elif [[ "$branch" == "$BRANCH" && "$current_revision" == "$deployed_revision" ]]; then
+    printf '版本状态一致性：正常\n'
+  else
+    printf '版本状态一致性：异常，请勿继续切换并检查日志\n'
+  fi
+}
+
+command_switch() {
+  local requested_version="$1"
+  local target_revision confirmation current_revision pinned_revision
+
+  [[ "$requested_version" =~ ^v[0-9]+$ ]] || fail "版本格式无效，只允许 v 加数字，例如 v69"
+  target_revision="$(resolve_version "$requested_version" || true)"
+  [[ -n "$target_revision" ]] || fail "${requested_version} 不在可部署版本目录中"
+  validate_target_revision "$target_revision" "$requested_version" || fail "目标版本未通过主分支和部署结构校验"
+
+  current_revision="$(git rev-parse HEAD)"
+  pinned_revision="$(read_state_file "$PINNED_FILE")"
+  if [[ "$current_revision" == "$target_revision" && "$pinned_revision" == "$target_revision" ]] && deployment_is_healthy; then
+    log "已经固定在 ${requested_version} (${target_revision:0:12})"
+    return 0
+  fi
+
+  [[ -t 0 ]] || fail "switch 必须在交互式 SSH 终端中确认"
+  printf '即将把程序切换到 %s (%s)，学习数据不会回退。\n' "$requested_version" "${target_revision:0:12}"
+  printf '请输入 %s 确认：' "$requested_version"
+  read -r confirmation
+  [[ "$confirmation" == "$requested_version" ]] || fail "确认内容不一致，操作已取消"
+
+  deploy_target "$target_revision" "pinned"
+}
+
+command_latest() {
+  local target_revision target_version current_revision pinned_revision
+  target_revision="$(git rev-parse "origin/${BRANCH}")"
+  target_version="$(version_for_revision "$target_revision" 2>/dev/null || true)"
+  [[ -n "$target_version" ]] || fail "origin/${BRANCH} 当前提交没有一致的 PWA 版本或数据挂载声明"
+  validate_target_revision "$target_revision" "v${target_version}" || fail "origin/${BRANCH} 当前提交不可部署"
+  current_revision="$(git rev-parse HEAD)"
+  pinned_revision="$(read_state_file "$PINNED_FILE")"
+
+  if [[ "$current_revision" == "$target_revision" && -z "$pinned_revision" && "$(git symbolic-ref --quiet --short HEAD || true)" == "$BRANCH" ]] && deployment_is_healthy; then
+    log "已经是最新版 ${target_revision:0:12}，自动更新正常"
+    return 0
+  fi
+  deploy_target "$target_revision" "latest"
+}
+
+main() {
+  local command="${1:-}"
+  if [[ "$command" == "-h" || "$command" == "--help" || "$command" == "help" || -z "$command" ]]; then
+    usage
+    return 0
+  fi
+  require_root
+  require_commands
+  require_layout
+  acquire_lock
+
+  case "$command" in
+    list)
+      [[ "$#" -eq 1 ]] || fail "list 不接受额外参数"
+      git fetch --quiet origin "$BRANCH"
+      command_list
+      ;;
+    status)
+      [[ "$#" -eq 1 ]] || fail "status 不接受额外参数"
+      command_status
+      ;;
+    switch)
+      [[ "$#" -eq 2 ]] || fail "用法：english-review-version switch v69"
+      require_clean_worktree
+      git fetch --quiet origin "$BRANCH"
+      command_switch "$2"
+      ;;
+    latest)
+      [[ "$#" -eq 1 ]] || fail "latest 不接受额外参数"
+      require_clean_worktree
+      git fetch --quiet origin "$BRANCH"
+      command_latest
+      ;;
+    *)
+      usage >&2
+      fail "未知命令：${command}"
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
