@@ -300,19 +300,25 @@ function publicAiPractice(value) {
     currentSet: publicQuestionSet(practice.currentSet),
     queuedSets: [],
     generationQueue: practice.generationQueue.filter(item => item.status !== "consumed").map(item => {
-      const visibleSetIds = item.status === "ready" ? item.setIds : item.plannedSetIds;
-      const groups = visibleSetIds.map((setId, index) => {
+      const readySetIds = new Set(item.setIds);
+      const currentSetId = practice.currentSet && practice.currentSet.id;
+      const groups = item.plannedSetIds.flatMap((setId, index) => {
         const set = practice.queuedSets.find(candidate => candidate.id === setId);
-        return {
+        const ready = readySetIds.has(setId) || Boolean(set);
+        const failed = item.status === "failed" && item.failedGroupNumber === index + 1;
+        const pending = index >= item.generatedGroupCount;
+        if (!ready && !failed && !pending) return [];
+        if (setId === currentSetId) return [];
+        return [{
           id: setId,
-          groupNumber: set ? set.groupNumber : index + 1,
+          groupNumber: index + 1,
           questionCount: set ? set.questions.length : item.count,
           model: set ? set.model : item.model,
           reasoningEffort: set ? set.reasoningEffort : item.reasoningEffort,
           createdAt: set ? set.createdAt : item.createdAt,
           questionVersion: set ? set.questionVersion : QUESTION_SET_VERSION,
-          status: item.status === "ready" ? "ready" : item.status
-        };
+          status: ready ? "ready" : failed ? "failed" : "pending"
+        }];
       });
       const { setIds, plannedSetIds, ...metadata } = item;
       return { ...metadata, readyGroups: setIds.length, groups };
@@ -375,11 +381,23 @@ function sanitizeGenerationQueueItem(value) {
   if (!value || typeof value !== "object") return null;
   const requestId = cleanText(value.requestId, 180);
   if (!requestId) return null;
+  const groupCount = [1, 2, 3, 5].includes(Number(value.groupCount)) ? Number(value.groupCount) : 1;
+  const status = ["pending", "ready", "failed", "consumed"].includes(value.status) ? value.status : "pending";
+  const inferredGeneratedGroupCount = ["ready", "consumed"].includes(status)
+    ? groupCount
+    : Math.min(groupCount, Array.isArray(value.setIds) ? value.setIds.length : 0);
+  const generatedGroupCount = Math.min(Math.max(
+    Object.hasOwn(value, "generatedGroupCount") ? Number(value.generatedGroupCount) || 0 : inferredGeneratedGroupCount,
+    0
+  ), groupCount);
+  const failedGroupNumber = status === "failed"
+    ? Math.min(Math.max(Number(value.failedGroupNumber) || generatedGroupCount + 1, 1), groupCount)
+    : 0;
   return {
     id: cleanText(value.id, 180) || requestId,
     requestId,
     batchId: cleanText(value.batchId, 80),
-    status: ["pending", "ready", "failed", "consumed"].includes(value.status) ? value.status : "pending",
+    status,
     createdAt: cleanText(value.createdAt, 40) || new Date().toISOString(),
     updatedAt: cleanText(value.updatedAt, 40),
     providerId: cleanText(value.providerId, 64),
@@ -387,9 +405,11 @@ function sanitizeGenerationQueueItem(value) {
     model: cleanText(value.model, 120),
     reasoningEffort: AI_EFFORTS.includes(value.reasoningEffort) ? value.reasoningEffort : "medium",
     count: [5, 10].includes(Number(value.count)) ? Number(value.count) : 5,
-    groupCount: [1, 2, 3, 5].includes(Number(value.groupCount)) ? Number(value.groupCount) : 1,
+    groupCount,
     plannedSetIds: sanitizeStringArray(value.plannedSetIds, []).slice(0, MAX_AI_GROUPS),
     setIds: sanitizeStringArray(value.setIds, []).slice(0, MAX_AI_GROUPS),
+    generatedGroupCount,
+    failedGroupNumber,
     error: cleanText(value.error, 300)
   };
 }

@@ -62,6 +62,7 @@
   const DEFAULT_AI_TIMEOUT_MS = 30000;
   const AI_CLIENT_TIMEOUT_MS = 125000;
   const EXAM_GENERATION_POLL_MS = 2000;
+  const AI_GENERATION_POLL_MS = 1500;
   const REVIEW_VARIANT_POLL_MS = 2000;
   const REVIEW_VARIANT_RETRY_MS = 5 * 60 * 1000;
   const REVIEW_VARIANT_POOL_STATUS_POLL_MS = 2000;
@@ -129,6 +130,8 @@
   let reviewAnswerResetRequested = true;
   let aiRequestInProgress = false;
   let aiGenerationInProgress = false;
+  let aiGenerationPollTimer = null;
+  let aiGenerationPollInProgress = false;
   let aiTutorRequestInProgress = false;
   let reviewVariantPreparation = null;
   let reviewVariantRetryTimer = null;
@@ -637,6 +640,8 @@
         count: [5, 10].includes(Number(item && item.count)) ? Number(item.count) : 5,
         groupCount: [1, 2, 3, 5].includes(Number(item && item.groupCount)) ? Number(item.groupCount) : 1,
         readyGroups: Math.max(0, Number(item && item.readyGroups) || 0),
+        generatedGroupCount: Math.max(0, Number(item && item.generatedGroupCount) || 0),
+        failedGroupNumber: Math.max(0, Number(item && item.failedGroupNumber) || 0),
         groups: (Array.isArray(item && item.groups) ? item.groups : []).map(group => ({
           id: String(group && group.id || ""),
           groupNumber: Math.max(1, Number(group && group.groupNumber) || 1),
@@ -1961,6 +1966,7 @@
 
   function showAuthView() {
     clearReviewVariantPoolStatusPolling();
+    clearAiGenerationPolling();
     reviewVariantPoolStatus = null;
     resetReviewVariantPoolViewer();
     document.body.classList.add("auth-mode");
@@ -1975,6 +1981,7 @@
   }
 
   function setAccountContext(user) {
+    clearAiGenerationPolling();
     accountRequestEpoch += 1;
     currentUser = user;
     remoteStateQueue?.setAccountId(user && user.id);
@@ -1986,6 +1993,7 @@
     reviewCompletedConflictRecoveryKey = "";
     aiRequestInProgress = false;
     aiGenerationInProgress = false;
+    aiGenerationPollInProgress = false;
     [$("#generateAiQuestions"), $("#startNextAiBatch"), $("#startNextOfflineAiBatch"), $("#generateAnotherAiSet")].filter(Boolean).forEach(button => setBusyButton(button, false, ""));
   }
 
@@ -2975,7 +2983,17 @@
   }
 
   function aiQueueGroupCount(practice = model.aiPractice) {
-    return (practice && Array.isArray(practice.generationQueue) ? practice.generationQueue : []).reduce((sum, item) => sum + (item.status === "ready" ? item.readyGroups : item.groupCount), 0);
+    return (practice && Array.isArray(practice.generationQueue) ? practice.generationQueue : []).reduce((sum, item) => sum + (Array.isArray(item.groups) ? item.groups.length : 0), 0);
+  }
+
+  function firstPreparedAiQueueGroup(practice = model.aiPractice) {
+    const queue = practice && Array.isArray(practice.generationQueue) ? practice.generationQueue : [];
+    for (const item of queue) {
+      const group = (Array.isArray(item.groups) ? item.groups : []).find(candidate => candidate.status === "ready");
+      if (group) return { item, group };
+      if (item.status === "pending" || item.status === "failed") return null;
+    }
+    return null;
   }
 
   function renderAiQueue(practice) {
@@ -3005,8 +3023,8 @@
         const createdAt = group.createdAt ? formatAiHistoryTime(group.createdAt, group.createdAt) : "时间待记录";
         return `<div class="ai-queue-item" data-queue-status="${group.status}" data-queue-group-id="${escapeHtml(group.id)}">
           <span class="ai-queue-position">${position}</span>
-          <div class="ai-queue-copy"><strong>${escapeHtml(group.model || "默认模型")} · ${escapeHtml(effort)}</strong><span>${group.questionCount} 题 · ${createdAt} · ${status}</span>${item.error && groupIndex === 0 ? `<small>${escapeHtml(item.error)}</small>` : ""}</div>
-          ${item.status === "failed" && groupIndex === 0 ? `<button class="secondary-button compact-button" type="button" data-retry-ai-generation="${escapeHtml(item.requestId)}">原位重试</button>` : `<span class="ai-queue-status">${status}</span>`}
+          <div class="ai-queue-copy"><strong>第 ${group.groupNumber}/${item.groupCount} 组 · ${escapeHtml(group.model || "默认模型")} · ${escapeHtml(effort)}</strong><span>${group.questionCount} 题 · ${createdAt} · ${status}</span>${item.error && group.status === "failed" ? `<small>${escapeHtml(item.error)}</small>` : ""}</div>
+          ${group.status === "failed" ? `<button class="secondary-button compact-button" type="button" data-retry-ai-generation="${escapeHtml(item.requestId)}">只重试本组</button>` : `<span class="ai-queue-status">${status}</span>`}
         </div>`;
       });
     }).join("");
@@ -3017,13 +3035,19 @@
     const previousAnswerUi = answerInput ? { key: String(answerInput.dataset.aiQuestionKey || ""), value: answerInput.value } : null;
     model.aiPractice = normalizeClientAiPractice(model.aiPractice);
     const practice = model.aiPractice;
+    syncAiGenerationPolling(practice);
     const queuedCount = Math.max(aiQueueGroupCount(practice), offlineSession ? practice.queuedSets.length : 0);
     populateAiModelSelect();
     renderAiHistory();
     renderAiQueue(practice);
     $("#openAiConfigButton").hidden = !currentUser || currentUser.role !== "admin";
     const connectivityMessage = offlineSession || !browserIsOnline() ? "当前设备处于离线学习模式；可使用已下载或已预生成内容，实时 AI 生成需要联网。" : "";
-    const baseStatusMessage = aiStatusMessage || aiOptionsError || (aiOptions.configured ? (queuedCount ? `后续 ${queuedCount} 组已经准备好` : "AI 已配置") : "AI 尚未配置");
+    const queueGroups = practice.generationQueue.flatMap(item => item.groups);
+    const readyQueueGroups = queueGroups.filter(group => group.status === "ready").length;
+    const pendingQueueGroups = queueGroups.filter(group => group.status === "pending").length;
+    const failedQueueGroups = queueGroups.filter(group => group.status === "failed").length;
+    const queueSummary = [readyQueueGroups ? `${readyQueueGroups} 组已就绪` : "", pendingQueueGroups ? `${pendingQueueGroups} 组生成中` : "", failedQueueGroups ? `${failedQueueGroups} 组待重试` : ""].filter(Boolean).join("，");
+    const baseStatusMessage = aiStatusMessage || aiOptionsError || (aiOptions.configured ? (queueSummary || "AI 已配置") : "AI 尚未配置");
     $("#aiStatus").textContent = connectivityMessage ? `${connectivityMessage}${aiStatusMessage ? ` ${aiStatusMessage}` : ""}` : baseStatusMessage;
     const empty = $("#aiEmptyState");
     const panel = $("#aiPracticePanel");
@@ -3059,14 +3083,16 @@
       }
       const startNext = $("#startNextAiBatch");
       if (startNext) {
+        const preparedNext = firstPreparedAiQueueGroup(practice);
+        const firstQueueItem = practice.generationQueue[0];
         startNext.hidden = set.phase !== "completed" || queuedCount === 0;
         startNext.disabled = aiRequestInProgress || (offlineSession
           ? !practice.queuedSets.length
-          : !practice.generationQueue.length || practice.generationQueue[0].status !== "ready");
-        startNext.innerHTML = practice.generationQueue[0] && practice.generationQueue[0].status === "failed"
-          ? '请先原位重试队首题组<i data-lucide="refresh-cw" aria-hidden="true"></i>'
-          : practice.generationQueue[0] && practice.generationQueue[0].status === "pending"
-            ? '队首题组生成中<i data-lucide="loader-circle" aria-hidden="true"></i>'
+          : !preparedNext);
+        startNext.innerHTML = !preparedNext && firstQueueItem && firstQueueItem.status === "failed"
+          ? `第 ${firstQueueItem.failedGroupNumber || firstQueueItem.generatedGroupCount + 1} 组待原位重试<i data-lucide="refresh-cw" aria-hidden="true"></i>`
+          : !preparedNext && firstQueueItem && firstQueueItem.status === "pending"
+            ? '下一组正在后台生成<i data-lucide="loader-circle" aria-hidden="true"></i>'
             : `开始下一组（等待 ${queuedCount} 组）<i data-lucide="arrow-right" aria-hidden="true"></i>`;
       }
       refreshIcons();
@@ -3268,7 +3294,75 @@
   function applyAiPracticeResponse(data) {
     if (data && data.practice) model.aiPractice = normalizeClientAiPractice(data.practice);
     saveModel({ remote: false });
+    syncAiGenerationPolling(model.aiPractice);
     return model.aiPractice;
+  }
+
+  function aiGenerationCanAdvanceInBackground(practice = model.aiPractice) {
+    const queue = normalizeClientAiPractice(practice).generationQueue;
+    for (const item of queue) {
+      if (item.status === "failed") return false;
+      if (item.status === "pending") return true;
+    }
+    return false;
+  }
+
+  function clearAiGenerationPolling() {
+    clearTimeout(aiGenerationPollTimer);
+    aiGenerationPollTimer = null;
+  }
+
+  function scheduleAiGenerationPolling(delay = AI_GENERATION_POLL_MS) {
+    clearAiGenerationPolling();
+    if (!API_ENABLED || offlineSession || !currentUser || activeView !== "ai" || !browserIsOnline() || !aiGenerationCanAdvanceInBackground()) return;
+    aiGenerationPollTimer = setTimeout(() => {
+      aiGenerationPollTimer = null;
+      void pollAiGenerationProgress();
+    }, Math.max(0, Number(delay) || 0));
+  }
+
+  function syncAiGenerationPolling(practice = model.aiPractice) {
+    if (aiGenerationCanAdvanceInBackground(practice)) scheduleAiGenerationPolling();
+    else clearAiGenerationPolling();
+  }
+
+  async function pollAiGenerationProgress() {
+    if (aiGenerationPollInProgress || !API_ENABLED || offlineSession || !currentUser || activeView !== "ai" || !browserIsOnline()) return;
+    const accountContext = captureAccountRequestContext();
+    const previous = normalizeClientAiPractice(model.aiPractice);
+    const previousCurrentId = String(previous.currentSet && previous.currentSet.id || "");
+    aiGenerationPollInProgress = true;
+    try {
+      const response = await fetch("/api/ai/questions/batch", { credentials: "same-origin", cache: "no-store" });
+      const data = await responseJson(response);
+      if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
+      const practice = applyAiPracticeResponse(data);
+      const groups = practice.generationQueue.flatMap(item => item.groups);
+      const pendingCount = groups.filter(group => group.status === "pending").length;
+      const failedGroup = groups.find(group => group.status === "failed");
+      const currentId = String(practice.currentSet && practice.currentSet.id || "");
+      if (!previousCurrentId && currentId) {
+        aiStatusMessage = pendingCount
+          ? `首组 ${practice.currentSet.questions.length} 题已生成，可以开始作答；剩余 ${pendingCount} 组正在后台逐组生成。`
+          : `首组 ${practice.currentSet.questions.length} 题已生成，可以开始作答。`;
+      } else if (failedGroup) {
+        const item = practice.generationQueue.find(candidate => candidate.groups.some(group => group.id === failedGroup.id));
+        aiStatusMessage = item && item.error ? item.error : `第 ${failedGroup.groupNumber} 组生成失败，前面已完成的题组仍可继续。`;
+      } else if (pendingCount) {
+        aiStatusMessage = `当前题组可正常作答；后台还在逐组生成剩余 ${pendingCount} 组。`;
+      } else if (previous.generationQueue.some(item => item.status === "pending")) {
+        aiStatusMessage = "所选题组已全部生成并保存。";
+      }
+      renderAiView();
+    } catch (error) {
+      if (accountRequestContextIsCurrent(accountContext) && !error.silent) {
+        aiStatusMessage = `暂时无法读取后台生成进度：${error.message}；系统不会重复创建题组。`;
+        renderAiView();
+      }
+    } finally {
+      aiGenerationPollInProgress = false;
+      if (accountRequestContextIsCurrent(accountContext)) syncAiGenerationPolling(model.aiPractice);
+    }
   }
 
   async function offlineAiRequest(path, body = {}) {
@@ -3972,8 +4066,10 @@
     const requestId = retryRequestId || (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function" ? `aigen-${globalThis.crypto.randomUUID()}` : `aigen-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
     updateAiPreferences(settings);
     aiGenerationInProgress = true;
-    setBusyButton(button, true, settings.groupCount > 1 ? `正在生成 ${settings.groupCount} 组…` : "正在生成…");
-    aiStatusMessage = settings.groupCount > 1 ? `正在预生成 ${settings.groupCount} 个独立题组…` : "正在分析学习进度…";
+    setBusyButton(button, true, "正在创建分批任务…");
+    aiStatusMessage = settings.groupCount > 1
+      ? `正在先生成第 1 组 ${settings.count} 题；首组完成即可作答，剩余 ${settings.groupCount - 1} 组会在后台逐组生成。`
+      : `正在生成 1 组 ${settings.count} 题…`;
     $("#aiStatus").textContent = aiStatusMessage;
     try {
       const response = await fetch("/api/ai/questions/generate", {
@@ -3987,12 +4083,15 @@
       applyAiPracticeResponse(data);
       aiOptionsError = "";
       aiStatusMessage = data.pending
-        ? "同一生成请求仍在后台处理中，当前题组可以继续作答"
+        ? model.aiPractice.currentSet
+          ? "当前题组可以继续作答；剩余题组正在后台逐组生成。"
+          : `正在生成首组 ${settings.count} 题，完成后会自动显示。`
         : data.started
         ? "题目已生成，可以开始作答"
         : data.reused
           ? "这次生成请求已经处理，不会重复加入队列"
           : `${settings.groupCount} 组题目已追加到队列末尾`;
+      if (data.pending) scheduleAiGenerationPolling(0);
     } catch (error) {
       if (accountRequestContextIsCurrent(accountContext) && !error.silent) aiStatusMessage = error.message;
       showRequestError(error);
@@ -4024,7 +4123,8 @@
         if (data && data.practice) model.aiPractice = normalizeClientAiPractice({ ...data.practice, queuedSets: data.practice.preparedSets || [] });
         return;
       }
-      const nextSetId = practice.generationQueue[0] && practice.generationQueue[0].groups && practice.generationQueue[0].groups[0] && practice.generationQueue[0].groups[0].id;
+      const nextPrepared = firstPreparedAiQueueGroup(practice);
+      const nextSetId = nextPrepared && nextPrepared.group.id;
       if (!nextSetId) throw new Error("队首题组快照暂不可用，请刷新后重试");
       const response = await fetch("/api/ai/questions/next", {
         method: "POST",
@@ -6631,6 +6731,7 @@
   function setView(view) {
     activeView = view;
     if (view !== "home") clearReviewVariantPoolStatusPolling();
+    if (view !== "ai") clearAiGenerationPolling();
     $$(".nav-item").forEach(button => {
       const active = button.dataset.view === view;
       button.classList.toggle("is-active", active);
@@ -6643,7 +6744,10 @@
     });
     if (view === "home") renderHome();
     if (view === "self-study") { renderSelfStudyView(); loadSelfStudy(); }
-    if (view === "ai") renderAiView();
+    if (view === "ai") {
+      renderAiView();
+      if (aiGenerationCanAdvanceInBackground(model.aiPractice)) scheduleAiGenerationPolling(0);
+    }
     if (view === "exam") renderExamView();
     if (view === "abilities") { renderAbilityView(); loadAbilities(); }
     if (view === "dictation") { renderDictationView(); loadDictation(); }
@@ -8143,7 +8247,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=69", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=70", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

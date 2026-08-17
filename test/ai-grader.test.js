@@ -74,6 +74,19 @@ async function requestReviewVariants(baseUrl, cookie, input) {
   return { response, body, startStatus };
 }
 
+async function waitForAiPractice(baseUrl, cookie, predicate, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let body = null;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${baseUrl}/api/ai/questions/batch`, { headers: { "Cookie": cookie } });
+    assert.equal(response.status, 200);
+    body = await response.json();
+    if (predicate(body.practice)) return body;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.fail(`AI practice did not reach the expected state: ${JSON.stringify(body)}`);
+}
+
 test("AI configuration builds OpenAI-compatible chat, responses, and model endpoints", () => {
   assert.equal(buildChatCompletionsUrl("https://sub2api.example/v1"), "https://sub2api.example/v1/chat/completions");
   assert.equal(buildChatCompletionsUrl("https://sub2api.example"), "https://sub2api.example/v1/chat/completions");
@@ -640,8 +653,11 @@ test("admin configures AI on the web and progress-based questions use the select
       headers: { "Content-Type": "application/json", "Cookie": cookie },
       body: JSON.stringify({ model: "strong-model", reasoningEffort: "high", count: 5, groupCount: 3 })
     });
-    assert.equal(generated.status, 201);
-    const generatedBody = await generated.json();
+    assert.equal(generated.status, 202);
+    const pendingGeneratedBody = await generated.json();
+    assert.equal(pendingGeneratedBody.pending, true);
+    const generatedBody = await waitForAiPractice(baseUrl, cookie, practice => Boolean(practice.currentSet)
+      && practice.generationQueue.every(item => item.status !== "pending"));
     const generatedSet = generatedBody.practice.currentSet;
     assert.equal(generatedSet.questions.length, 5);
     assert.equal(generatedSet.model, "strong-model");
@@ -651,11 +667,12 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(generatedBody.practice.generationQueue.length, 1);
     assert.equal(generatedBody.practice.generationQueue[0].readyGroups, 2);
     assert.doesNotMatch(JSON.stringify(generatedBody.practice.generationQueue), /It is big|一只猫|acceptedChinese|acceptedEnglish/);
-    assert.equal(generatedBody.settings.groupCount, 3);
-    assert.equal(providerRequests.length, 3);
+    assert.equal(generatedBody.practice.settings.groupCount, 3);
+    assert.equal(providerRequests.length, 5);
     const profile = JSON.parse(providerRequests[2].body.messages[1].content);
     assert.equal(profile.recentMistakes[0].correctAnswer, "\u732b");
     assert.equal(providerRequests[2].body.reasoning_effort, "high");
+    assert.equal(providerRequests.slice(2).every(item => !String(item.body.messages[0].content).includes("independent groups")), true);
 
     const earlyNext = await fetch(`${baseUrl}/api/ai/questions/next`, { method: "POST", headers: { "Content-Type": "application/json", "Cookie": cookie }, body: "{}" });
     assert.equal(earlyNext.status, 409, "a prepared group must never start before the learner finishes the current group");
@@ -704,7 +721,7 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(questionResult.practice.history[0].questionNumber, 1);
     assert.equal(questionResult.practice.history[0].questionCount, 5);
     assert.match(questionResult.practice.history[0].answeredAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.equal(providerRequests.length, 4);
+    assert.equal(providerRequests.length, 6);
 
     const tutorResponse = await fetch(`${baseUrl}/api/ai/questions/ask`, {
       method: "POST",
@@ -718,10 +735,10 @@ test("admin configures AI on the web and progress-based questions use the select
     assert.equal(tutorBody.exchange.question, "这个句子应该先看哪里？");
     assert.equal(tutorBody.exchange.historyId, questionResult.practice.history[0].id);
     assert.deepEqual(tutorBody.tutorSettings, { providerId: "legacy-primary", model: "strong-model", reasoningEffort: "low" });
-    assert.equal(providerRequests.length, 5);
-    assert.equal(providerRequests[4].body.reasoning_effort, "low");
-    assert.equal(Object.hasOwn(providerRequests[4].body, "response_format"), false);
-    const tutorRequest = JSON.parse(providerRequests[4].body.messages[1].content);
+    assert.equal(providerRequests.length, 7);
+    assert.equal(providerRequests[6].body.reasoning_effort, "low");
+    assert.equal(Object.hasOwn(providerRequests[6].body, "response_format"), false);
+    const tutorRequest = JSON.parse(providerRequests[6].body.messages[1].content);
     assert.equal(tutorRequest.exercise.answered, true);
     assert.equal(tutorRequest.exercise.learnerAnswer, "它非常大");
     assert.equal(tutorRequest.exercise.explanation, "意思相同，只是说法不同。");
@@ -751,8 +768,8 @@ test("admin configures AI on the web and progress-based questions use the select
       body: JSON.stringify({ historyId: questionResult.practice.history[0].id, message: "现在重新解释一次。", reasoningEffort: "low" })
     });
     assert.equal(restartedTutor.status, 200);
-    assert.equal(providerRequests.length, 6);
-    const restartedTutorRequest = JSON.parse(providerRequests[5].body.messages[1].content);
+    assert.equal(providerRequests.length, 8);
+    const restartedTutorRequest = JSON.parse(providerRequests[7].body.messages[1].content);
     assert.deepEqual(restartedTutorRequest.conversation, [], "a cleared session must not send archived messages back to AI");
     const stateAfterRestart = await (await fetch(`${baseUrl}/api/state`, { headers: { "Cookie": cookie } })).json();
     assert.equal(stateAfterRestart.aiPractice.tutorHistory.length, 2);
@@ -807,8 +824,10 @@ test("admin configures AI on the web and progress-based questions use the select
       headers: { "Content-Type": "application/json", "Cookie": cookie },
       body: JSON.stringify({ model: "missing-model", reasoningEffort: "high", count: 5 })
     });
-    assert.equal(unavailableGeneration.status, 502);
-    assert.deepEqual(await unavailableGeneration.json(), { error: "AI 上游不支持该模型的生成接口，请更换模型", providerStatus: 404 });
+    assert.equal(unavailableGeneration.status, 202);
+    const unavailableGenerationBody = await unavailableGeneration.json();
+    const unavailablePractice = await waitForAiPractice(baseUrl, cookie, practice => practice.generationQueue.some(item => item.requestId === unavailableGenerationBody.requestId && item.status === "failed"));
+    assert.match(unavailablePractice.practice.generationQueue.find(item => item.requestId === unavailableGenerationBody.requestId).error, /不支持该模型/);
 
     for (const reasoningEffort of reviewEfforts) {
       const { response: reviewVariants, body: reviewBody, startStatus } = await requestReviewVariants(baseUrl, reviewVariantCookies.get(reasoningEffort), { taskIds: ["d4-s5:en-zh"], model: "strong-model", reasoningEffort, force: true });

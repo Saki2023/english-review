@@ -81,7 +81,10 @@ function createProvider() {
     gradingResult: { correct: false, score: 0, gradingStatus: "incorrect", explanation: "答案与题意不一致。", problemWords: ["it"] },
     failGrading: false,
     failNextGeneration: false,
+    failGenerationNumber: 0,
     holdNextGeneration: false,
+    holdGenerationNumber: 0,
+    generationCount: 0,
     generationStarted: null,
     releaseGeneration: null
   };
@@ -93,15 +96,18 @@ function createProvider() {
     const body = await requestBody(req);
     const system = String(body.messages && body.messages[0] && body.messages[0].content || "");
     const generation = system.includes("Create personalized translation exercises");
-    control.calls.push({ generation, body });
-    if (generation && control.holdNextGeneration) {
+    const generationNumber = generation ? ++control.generationCount : 0;
+    control.calls.push({ generation, generationNumber, body });
+    if (generation && (control.holdNextGeneration || control.holdGenerationNumber === generationNumber)) {
       control.holdNextGeneration = false;
+      control.holdGenerationNumber = 0;
       if (control.generationStarted) control.generationStarted();
       await new Promise(resolve => { control.releaseGeneration = resolve; });
       control.releaseGeneration = null;
     }
-    if (generation && control.failNextGeneration) {
+    if (generation && (control.failNextGeneration || control.failGenerationNumber === generationNumber)) {
       control.failNextGeneration = false;
+      if (control.failGenerationNumber === generationNumber) control.failGenerationNumber = 0;
       res.writeHead(500, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "temporary generation failure" } }));
     }
@@ -123,6 +129,10 @@ function createProvider() {
   });
   control.hold = () => {
     control.holdNextGeneration = true;
+    return new Promise(resolve => { control.generationStarted = resolve; });
+  };
+  control.holdAt = generationNumber => {
+    control.holdGenerationNumber = Number(generationNumber) || 0;
     return new Promise(resolve => { control.generationStarted = resolve; });
   };
   control.release = () => {
@@ -182,6 +192,22 @@ async function request(baseUrl, cookie, pathname, options = {}) {
   return { response, body };
 }
 
+async function waitForAiPractice(baseUrl, cookie, predicate, message = "AI practice did not reach the expected state", timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await request(baseUrl, cookie, "/api/ai/questions/batch");
+    if (predicate(latest.body.practice)) return latest.body.practice;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.fail(`${message}: ${JSON.stringify(latest && latest.body)}`);
+}
+
+async function waitForGeneratedCurrentSet(baseUrl, cookie, requestId, timeoutMs = 5000) {
+  return waitForAiPractice(baseUrl, cookie, practice => Boolean(practice.currentSet)
+    && !practice.generationQueue.some(item => item.requestId === requestId && item.status === "pending"), `generation ${requestId} did not finish`, timeoutMs);
+}
+
 function answerFor(question) {
   const source = QUESTIONS.find(item => (question.direction === "en-zh" ? item.english : item.chinese) === question.prompt);
   assert.ok(source, `missing answer fixture for ${question.prompt}`);
@@ -237,7 +263,8 @@ test("AI practice uses formal word-bank meanings for generation and blocks a con
       method: "POST",
       body: { requestId: "word-bank-generation", model: "test-model", reasoningEffort: "high", count: 5, groupCount: 1 }
     });
-    assert.equal(generated.response.status, 201, JSON.stringify(generated.body));
+    assert.equal(generated.response.status, 202, JSON.stringify(generated.body));
+    const generatedPractice = await waitForGeneratedCurrentSet(app.baseUrl, cookie, "word-bank-generation");
     const generationCall = control.calls.find(item => item.generation);
     const generationProfile = JSON.parse(generationCall.body.messages[1].content);
     assert.deepEqual(generationProfile.wordMeanings.pool, ["水池", "游泳池", "泳池"]);
@@ -257,7 +284,7 @@ test("AI practice uses formal word-bank meanings for generation and blocks a con
       "一条红色的蛇在一个水池里",
       "一只大猫在一个水池里"
     ];
-    const reviewed = await fillAndReview(app.baseUrl, cookie, generated.body.practice.currentSet, answers, "word-bank-grade-request");
+    const reviewed = await fillAndReview(app.baseUrl, cookie, generatedPractice.currentSet, answers, "word-bank-grade-request");
     const graded = await gradeSet(app.baseUrl, cookie, reviewed);
     assert.equal(graded.response.status, 200, JSON.stringify(graded.body));
     assert.equal(graded.body.practice.currentSet.questions[0].gradingStatus, "incorrect");
@@ -317,21 +344,22 @@ test("AI batches grade atomically while generation requests append idempotently 
       method: "POST",
       body: { requestId: "generate-first", model: "test-model", reasoningEffort: "high", count: 5, groupCount: 2 }
     });
-    assert.equal(first.response.status, 201);
-    const firstSetId = first.body.practice.currentSet.id;
-    const firstBatchId = first.body.practice.currentSet.batchId;
-    assert.equal(first.body.practice.currentSet.phase, "answering");
-    assert.ok(first.body.practice.currentSet.questions.every(question => Object.hasOwn(question, "focus") === false));
-    assert.equal(first.body.practice.currentSet.generationRequestId, "generate-first");
-    assert.equal(first.body.practice.currentSet.questionVersion, 1);
-    assert.equal(first.body.practice.currentSet.requestedCount, 5);
-    assert.equal(first.body.practice.generationQueue[0].readyGroups, 1);
-    assert.equal(first.body.practice.generationQueue[0].groups.length, 1);
-    assert.equal(first.body.practice.generationQueue[0].groups[0].groupNumber, 2);
-    assert.equal(first.body.practice.generationQueue[0].groups[0].questionCount, 5);
-    assert.ok(first.body.practice.generationQueue[0].groups[0].createdAt);
-    assert.deepEqual(first.body.practice.queuedSets, []);
-    assert.doesNotMatch(JSON.stringify(first.body.practice.generationQueue), /It is big|一只猫|acceptedChinese|acceptedEnglish/);
+    assert.equal(first.response.status, 202);
+    const firstPractice = await waitForGeneratedCurrentSet(app.baseUrl, cookie, "generate-first");
+    const firstSetId = firstPractice.currentSet.id;
+    const firstBatchId = firstPractice.currentSet.batchId;
+    assert.equal(firstPractice.currentSet.phase, "answering");
+    assert.ok(firstPractice.currentSet.questions.every(question => Object.hasOwn(question, "focus") === false));
+    assert.equal(firstPractice.currentSet.generationRequestId, "generate-first");
+    assert.equal(firstPractice.currentSet.questionVersion, 1);
+    assert.equal(firstPractice.currentSet.requestedCount, 5);
+    assert.equal(firstPractice.generationQueue[0].readyGroups, 1);
+    assert.equal(firstPractice.generationQueue[0].groups.length, 1);
+    assert.equal(firstPractice.generationQueue[0].groups[0].groupNumber, 2);
+    assert.equal(firstPractice.generationQueue[0].groups[0].questionCount, 5);
+    assert.ok(firstPractice.generationQueue[0].groups[0].createdAt);
+    assert.deepEqual(firstPractice.queuedSets, []);
+    assert.doesNotMatch(JSON.stringify(firstPractice.generationQueue), /It is big|一只猫|acceptedChinese|acceptedEnglish/);
 
     const startedHolding = control.hold();
     const backgroundGeneration = request(app.baseUrl, cookie, "/api/ai/questions/generate", {
@@ -339,7 +367,7 @@ test("AI batches grade atomically while generation requests append idempotently 
       body: { requestId: "generate-background", model: "test-model", reasoningEffort: "max", count: 5, groupCount: 2 }
     });
     await startedHolding;
-    const firstQuestion = first.body.practice.currentSet.questions[0];
+    const firstQuestion = firstPractice.currentSet.questions[0];
     const draftWhileGenerating = await Promise.race([
       request(app.baseUrl, cookie, "/api/ai/questions/batch/draft", {
         method: "PUT",
@@ -350,9 +378,10 @@ test("AI batches grade atomically while generation requests append idempotently 
     assert.equal(draftWhileGenerating.response.status, 200);
     control.release();
     const background = await backgroundGeneration;
-    assert.equal(background.response.status, 201);
-    assert.equal(background.body.practice.currentSet.id, firstSetId);
-    assert.deepEqual(background.body.practice.generationQueue.map(item => [item.requestId, item.readyGroups]), [["generate-first", 1], ["generate-background", 2]]);
+    assert.equal(background.response.status, 202);
+    const backgroundPractice = await waitForAiPractice(app.baseUrl, cookie, practice => practice.generationQueue.every(item => item.status !== "pending"), "background groups did not finish");
+    assert.equal(backgroundPractice.currentSet.id, firstSetId);
+    assert.deepEqual(backgroundPractice.generationQueue.map(item => [item.requestId, item.readyGroups]), [["generate-first", 1], ["generate-background", 2]]);
 
     const generationCallsBeforeRepeat = control.calls.filter(item => item.generation).length;
     const repeatedGeneration = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
@@ -462,6 +491,96 @@ test("AI batches grade atomically while generation requests append idempotently 
   }
 });
 
+test("five groups generate as five sequential requests while the learner starts after the first five questions", async () => {
+  const dataDir = temporaryDataDir();
+  const store = loadUsers(dataDir);
+  createUser(store, { username: "staged-owner", password: "staged-owner-password" });
+  saveUsers(dataDir, store);
+  const { provider, control } = createProvider();
+  let app;
+  try {
+    await new Promise((resolve, reject) => provider.listen(0, "127.0.0.1", error => error ? reject(error) : resolve()));
+    const providerPort = provider.address().port;
+    app = await startApp(dataDir);
+    const cookie = await login(app.baseUrl, "staged-owner", "staged-owner-password");
+    await request(app.baseUrl, cookie, "/api/admin/ai-config", {
+      method: "PUT",
+      body: { baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "staged-test-key", models: ["test-model"], defaultModel: "test-model", timeoutMs: 10000, rateLimitPerMinute: 60 }
+    });
+
+    const secondGroupStarted = control.holdAt(2);
+    control.failGenerationNumber = 3;
+    const started = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "staged-five-groups", model: "test-model", reasoningEffort: "max", count: 5, groupCount: 5 }
+    });
+    assert.equal(started.response.status, 202);
+    assert.equal(started.body.pending, true);
+    await secondGroupStarted;
+
+    const firstReady = await waitForAiPractice(app.baseUrl, cookie, practice => Boolean(practice.currentSet)
+      && practice.generationQueue[0]?.generatedGroupCount === 1, "the first group was not exposed while group two was running");
+    assert.equal(firstReady.currentSet.questions.length, 5);
+    assert.equal(firstReady.currentSet.groupNumber, 1);
+    assert.equal(firstReady.generationQueue[0].groups.length, 4);
+    assert.equal(firstReady.generationQueue[0].groups.every(group => group.status === "pending"), true);
+    assert.equal(control.calls.filter(item => item.generation).length, 2);
+    assert.equal(control.calls.filter(item => item.generation).every(item => !String(item.body.messages[0].content).includes("independent groups")), true);
+    const stablePendingGroupIds = firstReady.generationQueue[0].groups.map(group => group.id);
+
+    const duplicateStart = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "staged-five-groups", model: "test-model", reasoningEffort: "max", count: 5, groupCount: 5 }
+    });
+    assert.equal(duplicateStart.response.status, 202);
+    assert.equal(duplicateStart.body.reused, true);
+    assert.deepEqual(duplicateStart.body.practice.generationQueue[0].groups.map(group => group.id), stablePendingGroupIds);
+    assert.equal(control.calls.filter(item => item.generation).length, 2, "a duplicate start must reuse the same account worker");
+
+    const firstQuestion = firstReady.currentSet.questions[0];
+    const savedDraft = await Promise.race([
+      request(app.baseUrl, cookie, "/api/ai/questions/batch/draft", {
+        method: "PUT",
+        body: { setId: firstReady.currentSet.id, questionId: firstQuestion.id, index: 0, nextIndex: 1, answer: answerFor(firstQuestion) }
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("draft was blocked while the next five questions generated")), 1000))
+    ]);
+    assert.equal(savedDraft.response.status, 200);
+
+    control.release();
+    const failedAtThird = await waitForAiPractice(app.baseUrl, cookie, practice => practice.generationQueue[0]?.status === "failed", "the third group failure was not persisted");
+    const failedItem = failedAtThird.generationQueue[0];
+    assert.equal(failedItem.generatedGroupCount, 2);
+    assert.equal(failedItem.failedGroupNumber, 3);
+    assert.equal(failedItem.readyGroups, 1);
+    assert.deepEqual(failedItem.groups.map(group => group.status), ["ready", "failed", "pending", "pending"]);
+    const failedGroupId = failedItem.groups.find(group => group.status === "failed").id;
+    assert.equal(control.calls.filter(item => item.generation).length, 3);
+    assert.equal(failedAtThird.currentSet.questions[0].userAnswer, answerFor(firstQuestion));
+
+    const retry = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+      method: "POST",
+      body: { requestId: "staged-five-groups", model: "ignored", reasoningEffort: "low", count: 10, groupCount: 1 }
+    });
+    assert.equal(retry.response.status, 202);
+    const completed = await waitForAiPractice(app.baseUrl, cookie, practice => practice.generationQueue[0]?.status === "ready", "remaining groups did not finish after an in-place retry");
+    assert.equal(completed.generationQueue[0].generatedGroupCount, 5);
+    assert.equal(completed.generationQueue[0].readyGroups, 4);
+    assert.equal(completed.generationQueue[0].groups.every(group => group.status === "ready"), true);
+    assert.equal(completed.generationQueue[0].groups.find(group => group.groupNumber === 3).id, failedGroupId);
+    assert.equal(control.calls.filter(item => item.generation).length, 6, "only the failed third group and the two remaining groups should be requested again");
+
+    const state = (await request(app.baseUrl, cookie, "/api/state")).body;
+    assert.equal(state.attempts.length, 0);
+    assert.equal(state.mistakes.length, 0);
+  } finally {
+    control.release();
+    await stopApp(app);
+    await new Promise(resolve => provider.close(resolve));
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("a failed FIFO generation item blocks later groups and retries in its original position", async () => {
   const dataDir = temporaryDataDir();
   const store = loadUsers(dataDir);
@@ -483,7 +602,9 @@ test("a failed FIFO generation item blocks later groups and retries in its origi
       method: "POST",
       body: { requestId: "queue-current", model: "test-model", reasoningEffort: "medium", count: 5, groupCount: 1 }
     });
-    const reviewed = await fillAndReview(app.baseUrl, cookie, initial.body.practice.currentSet);
+    assert.equal(initial.response.status, 202);
+    const initialPractice = await waitForGeneratedCurrentSet(app.baseUrl, cookie, "queue-current");
+    const reviewed = await fillAndReview(app.baseUrl, cookie, initialPractice.currentSet);
     const completed = await gradeSet(app.baseUrl, cookie, reviewed);
     assert.equal(completed.response.status, 200);
     assert.equal(completed.body.practice.currentSet.phase, "completed");
@@ -493,16 +614,16 @@ test("a failed FIFO generation item blocks later groups and retries in its origi
       method: "POST",
       body: { requestId: "queue-failed", model: "test-model", reasoningEffort: "high", count: 5, groupCount: 1 }
     });
-    assert.equal(failed.response.status, 502);
-    const failedState = await request(app.baseUrl, cookie, "/api/ai/questions/batch");
-    const failedGroupId = failedState.body.practice.generationQueue.find(item => item.requestId === "queue-failed").groups[0].id;
+    assert.equal(failed.response.status, 202);
+    const failedPractice = await waitForAiPractice(app.baseUrl, cookie, practice => practice.generationQueue.some(item => item.requestId === "queue-failed" && item.status === "failed"), "failed group was not persisted");
+    const failedGroupId = failedPractice.generationQueue.find(item => item.requestId === "queue-failed").groups[0].id;
     const later = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
       method: "POST",
       body: { requestId: "queue-later", model: "test-model", reasoningEffort: "max", count: 5, groupCount: 1 }
     });
-    assert.equal(later.response.status, 201);
+    assert.equal(later.response.status, 202);
     assert.deepEqual(later.body.practice.generationQueue.map(item => item.requestId), ["queue-failed", "queue-later"]);
-    assert.deepEqual(later.body.practice.generationQueue.map(item => item.status), ["failed", "ready"]);
+    assert.deepEqual(later.body.practice.generationQueue.map(item => item.status), ["failed", "pending"]);
 
     const blocked = await request(app.baseUrl, cookie, "/api/ai/questions/next", { method: "POST", body: {} });
     assert.equal(blocked.response.status, 409);
@@ -513,18 +634,19 @@ test("a failed FIFO generation item blocks later groups and retries in its origi
       method: "POST",
       body: { requestId: "queue-failed", model: "ignored-on-retry", reasoningEffort: "low", count: 10, groupCount: 5 }
     });
-    assert.equal(retry.response.status, 201, JSON.stringify(retry.body));
-    assert.deepEqual(retry.body.practice.generationQueue.map(item => item.requestId), ["queue-failed", "queue-later"]);
-    assert.deepEqual(retry.body.practice.generationQueue.map(item => item.status), ["ready", "ready"]);
-    assert.equal(retry.body.practice.generationQueue[0].model, "test-model");
-    assert.equal(retry.body.practice.generationQueue[0].reasoningEffort, "high");
-    assert.equal(retry.body.practice.generationQueue[0].count, 5);
-    assert.equal(retry.body.practice.generationQueue[0].groupCount, 1);
-    assert.equal(retry.body.practice.generationQueue[0].groups[0].id, failedGroupId);
+    assert.equal(retry.response.status, 202, JSON.stringify(retry.body));
+    const retriedPractice = await waitForAiPractice(app.baseUrl, cookie, practice => practice.generationQueue.every(item => item.status !== "pending"), "retried FIFO groups did not finish");
+    assert.deepEqual(retriedPractice.generationQueue.map(item => item.requestId), ["queue-failed", "queue-later"]);
+    assert.deepEqual(retriedPractice.generationQueue.map(item => item.status), ["ready", "ready"]);
+    assert.equal(retriedPractice.generationQueue[0].model, "test-model");
+    assert.equal(retriedPractice.generationQueue[0].reasoningEffort, "high");
+    assert.equal(retriedPractice.generationQueue[0].count, 5);
+    assert.equal(retriedPractice.generationQueue[0].groupCount, 1);
+    assert.equal(retriedPractice.generationQueue[0].groups[0].id, failedGroupId);
 
     const next = await request(app.baseUrl, cookie, "/api/ai/questions/next", { method: "POST", body: {} });
     assert.equal(next.response.status, 200);
-    assert.equal(next.body.practice.currentSet.batchId, retry.body.practice.generationQueue[0].batchId);
+    assert.equal(next.body.practice.currentSet.batchId, retriedPractice.generationQueue[0].batchId);
     assert.equal(next.body.practice.currentSet.id, failedGroupId);
     assert.deepEqual(next.body.practice.generationQueue.map(item => item.requestId), ["queue-later"]);
   } finally {
@@ -535,7 +657,7 @@ test("a failed FIFO generation item blocks later groups and retries in its origi
   }
 });
 
-test("the first FIFO request stays first when a later generation finishes sooner", async () => {
+test("the account FIFO worker keeps later generation requests behind the first request", async () => {
   const dataDir = temporaryDataDir();
   const store = loadUsers(dataDir);
   createUser(store, { username: "race-owner", password: "race-owner-password" });
@@ -562,20 +684,21 @@ test("the first FIFO request stays first when a later generation finishes sooner
       method: "POST",
       body: { requestId: "race-second", model: "test-model", reasoningEffort: "low", count: 5, groupCount: 1 }
     });
-    assert.equal(second.response.status, 201);
+    assert.equal(second.response.status, 202);
     assert.equal(second.body.practice.currentSet, null);
-    assert.deepEqual(second.body.practice.generationQueue.map(item => [item.requestId, item.status]), [["race-first", "pending"], ["race-second", "ready"]]);
+    assert.deepEqual(second.body.practice.generationQueue.map(item => [item.requestId, item.status]), [["race-first", "pending"], ["race-second", "pending"]]);
     const firstBatchId = second.body.practice.generationQueue[0].batchId;
     const firstPlannedSetId = second.body.practice.generationQueue[0].groups[0].id;
     assert.doesNotMatch(JSON.stringify(second.body.practice.generationQueue), /It is big|一只猫|acceptedChinese|acceptedEnglish/);
 
     control.release();
     const first = await firstRequest;
-    assert.equal(first.response.status, 201);
-    assert.equal(first.body.practice.currentSet.batchId, firstBatchId);
-    assert.equal(first.body.practice.currentSet.id, firstPlannedSetId);
-    assert.equal(first.body.practice.currentSet.groupNumber, 1);
-    assert.deepEqual(first.body.practice.generationQueue.map(item => [item.requestId, item.status, item.readyGroups]), [["race-second", "ready", 1]]);
+    assert.equal(first.response.status, 202);
+    const completedPractice = await waitForAiPractice(app.baseUrl, cookie, practice => practice.generationQueue.every(item => item.status !== "pending"), "FIFO requests did not finish");
+    assert.equal(completedPractice.currentSet.batchId, firstBatchId);
+    assert.equal(completedPractice.currentSet.id, firstPlannedSetId);
+    assert.equal(completedPractice.currentSet.groupNumber, 1);
+    assert.deepEqual(completedPractice.generationQueue.map(item => [item.requestId, item.status, item.readyGroups]), [["race-second", "ready", 1]]);
   } finally {
     control.release();
     await stopApp(app);
@@ -601,25 +724,32 @@ test("service restart turns interrupted generation and grading into explicit ret
       body: { baseUrl: `http://127.0.0.1:${providerPort}/v1`, apiKey: "restart-test-key", models: ["test-model"], defaultModel: "test-model", timeoutMs: 10000, rateLimitPerMinute: 60 }
     });
 
-    const started = control.hold();
-    const interruptedRequest = request(app.baseUrl, cookie, "/api/ai/questions/generate", {
+    const started = control.holdAt(3);
+    const interruptedRequest = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
       method: "POST",
-      body: { requestId: "restart-generation", model: "test-model", reasoningEffort: "high", count: 5, groupCount: 1 }
-    }).catch(error => error);
+      body: { requestId: "restart-generation", model: "test-model", reasoningEffort: "high", count: 5, groupCount: 5 }
+    });
+    assert.equal(interruptedRequest.response.status, 202);
     await started;
     const pending = await request(app.baseUrl, cookie, "/api/ai/questions/batch");
-    const plannedSetId = pending.body.practice.generationQueue[0].groups[0].id;
+    const plannedSetId = pending.body.practice.currentSet.id;
+    const pendingGroupIds = pending.body.practice.generationQueue[0].groups.map(group => group.id);
     assert.equal(pending.body.practice.generationQueue[0].status, "pending");
+    assert.equal(pending.body.practice.generationQueue[0].generatedGroupCount, 2);
+    assert.deepEqual(pending.body.practice.generationQueue[0].groups.map(group => group.status), ["ready", "pending", "pending", "pending"]);
 
     await stopApp(app);
     app = null;
     control.release();
-    await interruptedRequest;
     app = await startApp(dataDir);
     cookie = await login(app.baseUrl, "restart-owner", "restart-owner-password");
     const recoveredGeneration = await request(app.baseUrl, cookie, "/api/ai/questions/batch");
     assert.equal(recoveredGeneration.body.practice.generationQueue[0].status, "failed");
-    assert.equal(recoveredGeneration.body.practice.generationQueue[0].groups[0].id, plannedSetId);
+    assert.equal(recoveredGeneration.body.practice.currentSet.id, plannedSetId);
+    assert.equal(recoveredGeneration.body.practice.generationQueue[0].generatedGroupCount, 2);
+    assert.equal(recoveredGeneration.body.practice.generationQueue[0].failedGroupNumber, 3);
+    assert.deepEqual(recoveredGeneration.body.practice.generationQueue[0].groups.map(group => group.id), pendingGroupIds);
+    assert.deepEqual(recoveredGeneration.body.practice.generationQueue[0].groups.map(group => group.status), ["ready", "failed", "pending", "pending"]);
     assert.match(recoveredGeneration.body.practice.generationQueue[0].error, /服务重启.*原位置重试/);
 
     const generationCalls = control.calls.filter(item => item.generation).length;
@@ -627,18 +757,22 @@ test("service restart turns interrupted generation and grading into explicit ret
       method: "POST",
       body: { requestId: "restart-generation", model: "ignored", reasoningEffort: "low", count: 10, groupCount: 5 }
     });
-    assert.equal(retried.response.status, 201, JSON.stringify(retried.body));
-    assert.equal(retried.body.practice.currentSet.id, plannedSetId);
-    assert.equal(retried.body.practice.currentSet.reasoningEffort, "high");
-    assert.equal(retried.body.practice.currentSet.questions.length, 5);
+    assert.equal(retried.response.status, 202, JSON.stringify(retried.body));
+    const retriedPractice = await waitForGeneratedCurrentSet(app.baseUrl, cookie, "restart-generation");
+    assert.equal(retriedPractice.currentSet.id, plannedSetId);
+    assert.equal(retriedPractice.currentSet.reasoningEffort, "high");
+    assert.equal(retriedPractice.currentSet.questions.length, 5);
+    assert.equal(retriedPractice.generationQueue[0].generatedGroupCount, 5);
+    assert.equal(retriedPractice.generationQueue[0].readyGroups, 4);
+    assert.deepEqual(retriedPractice.generationQueue[0].groups.map(group => group.id), pendingGroupIds);
     const repeated = await request(app.baseUrl, cookie, "/api/ai/questions/generate", {
       method: "POST",
       body: { requestId: "restart-generation", model: "test-model", reasoningEffort: "high", count: 5, groupCount: 1 }
     });
     assert.equal(repeated.body.reused, true);
-    assert.equal(control.calls.filter(item => item.generation).length, generationCalls + 1);
+    assert.equal(control.calls.filter(item => item.generation).length, generationCalls + 3);
 
-    const reviewSet = await fillAndReview(app.baseUrl, cookie, retried.body.practice.currentSet);
+    const reviewSet = await fillAndReview(app.baseUrl, cookie, retriedPractice.currentSet);
     await stopApp(app);
     app = null;
     const stateFile = path.join(dataDir, "user-states.json");

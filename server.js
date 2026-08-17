@@ -133,6 +133,7 @@ let users = loadUsers(DATA_DIR);
 let sessions = loadSessions();
 let userStates = loadUserStates();
 const activeExamGenerationJobs = new Map();
+const activeAiGenerationJobsByUserId = new Map();
 const reviewVariantJobsById = new Map();
 const reviewVariantJobIdsByKey = new Map();
 const reviewVariantPoolJobsByUserId = new Map();
@@ -530,7 +531,8 @@ function recoverInterruptedFormalWork(state) {
   aiPractice.generationQueue.forEach(item => {
     if (item.status !== "pending") return;
     item.status = "failed";
-    item.error = "服务重启中断了本次生成，请在原位置重试。";
+    item.failedGroupNumber = Math.min(item.groupCount, item.generatedGroupCount + 1);
+    item.error = `服务重启中断了第 ${item.failedGroupNumber} 组生成，请在原位置重试。`;
     item.updatedAt = now;
     aiPractice.updatedAt = now;
     changed = true;
@@ -2729,11 +2731,14 @@ function publicAiOptions(user) {
 
 function publicAiGenerationFailure(error) {
   const providerStatus = Number(error && error.providerStatus) || null;
+  const localStatus = Number(error && error.statusCode) || null;
   const detail = String(error && error.message || "");
   let message = "AI 生成题目失败，请稍后重试或更换模型";
   let statusCode = 502;
 
-  if ([401, 403].includes(providerStatus)) message = "AI 上游拒绝了请求，请检查 API Key 和模型权限";
+  if (localStatus === 429) message = "AI 请求过于频繁，本组已暂停，请稍后原位重试";
+  else if (localStatus === 409 && /no learned words/i.test(detail)) message = "目前没有可用于出题的已学单词";
+  else if ([401, 403].includes(providerStatus)) message = "AI 上游拒绝了请求，请检查 API Key 和模型权限";
   else if ([404, 405, 501].includes(providerStatus)) message = "AI 上游不支持该模型的生成接口，请更换模型";
   else if (providerStatus === 429) message = "AI 上游请求过多或额度不足，请稍后再试";
   else if ([400, 422].includes(providerStatus)) message = "AI 上游拒绝了当前模型或强度参数，请更换模型或降低强度";
@@ -4061,6 +4066,182 @@ async function handleAiGrade(req, res, user) {
   }
 }
 
+function nextRunnableAiGenerationItem(practice) {
+  for (const item of practice.generationQueue) {
+    if (item.status === "failed") return null;
+    if (item.status === "pending" && item.generatedGroupCount < item.groupCount) return item;
+  }
+  return null;
+}
+
+function normalizeGeneratedAiQuestionGroup(questions, currentPool) {
+  return questions.map(question => {
+    const sourceChinese = String(question && question.chinese || "").trim();
+    const chinese = prioritizeRegisteredChineseMeanings(content, question && question.english, sourceChinese);
+    const poolVariant = currentPool.variants.find(item => normalizeVariantEnglish(item.english) === normalizeVariantEnglish(question && question.english));
+    return {
+      ...question,
+      poolVariantId: poolVariant ? poolVariant.id : "",
+      chinese,
+      acceptedChinese: expandRegisteredChineseAnswers(content, question && question.english, [
+        chinese,
+        ...(Array.isArray(question && question.acceptedChinese) ? question.acceptedChinese : [])
+          .map(answer => prioritizeRegisteredChineseMeanings(content, question && question.english, answer))
+      ].filter(answer => answer && !registeredChineseMeaningConflicts(content, question && question.english, answer).length), 16)
+    };
+  });
+}
+
+async function prepareNextAiGenerationGroup(user) {
+  refreshContent();
+  return withFormalPracticeLock(user.id, async () => {
+    const state = getUserState(user);
+    let practice = sanitizeAiPractice(state.aiPractice);
+    let changed = false;
+    for (const item of practice.generationQueue) {
+      if (item.status === "failed") break;
+      if (item.status === "pending" && item.generatedGroupCount >= item.groupCount) {
+        item.status = item.setIds.length ? "ready" : "consumed";
+        item.updatedAt = new Date().toISOString();
+        practice.updatedAt = item.updatedAt;
+        changed = true;
+      }
+    }
+    state.aiPractice = practice;
+    const runnable = nextRunnableAiGenerationItem(practice);
+    if (!runnable) {
+      if (changed) {
+        userStates.users[user.id] = sanitizeState(state);
+        persistUserStates();
+      }
+      return null;
+    }
+    const selection = aiSelectionForState(state, {
+      model: runnable.model,
+      reasoningEffort: runnable.reasoningEffort,
+      count: runnable.count,
+      groupCount: runnable.groupCount
+    });
+    practice = selection.practice;
+    const item = practice.generationQueue.find(candidate => candidate.requestId === runnable.requestId);
+    if (!item || item.status !== "pending") return null;
+    const groupIndex = item.generatedGroupCount;
+    return {
+      requestId: item.requestId,
+      batchId: item.batchId,
+      groupIndex,
+      plannedSetId: item.plannedSetIds[groupIndex],
+      createdAt: item.createdAt,
+      currentPool: sanitizeReviewVariantPool(state.reviewVariantPool),
+      profile: buildLearningProfile(content, state, today()),
+      selection
+    };
+  });
+}
+
+async function storeGeneratedAiQuestionGroup(user, prepared, routed) {
+  const normalizedQuestions = normalizeGeneratedAiQuestionGroup(routed.value, prepared.currentPool);
+  const set = createQuestionSet(normalizedQuestions, routed.config, {
+    id: prepared.plannedSetId,
+    batchId: prepared.batchId,
+    generationRequestId: prepared.requestId,
+    questionVersion: 1,
+    requestedCount: prepared.selection.count,
+    createdAt: prepared.createdAt,
+    groupNumber: prepared.groupIndex + 1,
+    groupCount: prepared.selection.groupCount
+  });
+  return withFormalPracticeLock(user.id, async () => {
+    const latest = getUserState(user);
+    const practice = sanitizeAiPractice(latest.aiPractice);
+    const item = practice.generationQueue.find(candidate => candidate.requestId === prepared.requestId);
+    if (!item) return false;
+    if (item.generatedGroupCount > prepared.groupIndex) return true;
+    if (item.status !== "pending" || item.generatedGroupCount !== prepared.groupIndex || item.plannedSetIds[prepared.groupIndex] !== prepared.plannedSetId) return false;
+    const itemIndex = practice.generationQueue.findIndex(candidate => candidate.requestId === prepared.requestId);
+    const earlierUnfinished = itemIndex > 0 && practice.generationQueue.slice(0, itemIndex).some(candidate => candidate.status !== "consumed");
+    const becomesCurrent = !practice.currentSet && !earlierUnfinished;
+    if (becomesCurrent) {
+      practice.currentSet = set;
+      practice.tutor = null;
+    } else if (!practice.queuedSets.some(candidate => candidate.id === set.id)) {
+      practice.queuedSets.push(set);
+      if (!item.setIds.includes(set.id)) item.setIds.push(set.id);
+    }
+    item.generatedGroupCount = prepared.groupIndex + 1;
+    item.failedGroupNumber = 0;
+    item.status = item.generatedGroupCount >= item.groupCount
+      ? (item.setIds.length ? "ready" : "consumed")
+      : "pending";
+    item.providerId = routed.config.providerId;
+    item.providerName = routed.config.providerName;
+    item.model = routed.config.model;
+    item.reasoningEffort = prepared.selection.route.reasoningEffort;
+    item.updatedAt = new Date().toISOString();
+    item.error = "";
+    practice.updatedAt = item.updatedAt;
+    latest.aiPractice = practice;
+    userStates.users[user.id] = sanitizeState(latest);
+    persistUserStates();
+    return true;
+  });
+}
+
+async function failAiGenerationGroup(user, prepared, error) {
+  return withFormalPracticeLock(user.id, async () => {
+    const latest = getUserState(user);
+    const practice = sanitizeAiPractice(latest.aiPractice);
+    const item = practice.generationQueue.find(candidate => candidate.requestId === prepared.requestId);
+    if (!item || item.status !== "pending" || item.generatedGroupCount !== prepared.groupIndex) return false;
+    item.status = "failed";
+    item.failedGroupNumber = prepared.groupIndex + 1;
+    item.updatedAt = new Date().toISOString();
+    item.error = publicAiGenerationFailure(error).message;
+    practice.updatedAt = item.updatedAt;
+    latest.aiPractice = practice;
+    userStates.users[user.id] = sanitizeState(latest);
+    persistUserStates();
+    return true;
+  });
+}
+
+async function runAiGenerationWorker(user) {
+  while (true) {
+    const prepared = await prepareNextAiGenerationGroup(user);
+    if (!prepared) return;
+    try {
+      if (!prepared.profile.allowedWords.length) throw Object.assign(new Error("no learned words are available"), { statusCode: 409 });
+      const rate = takeAiRequest(user.id);
+      if (!rate.allowed) throw Object.assign(new Error("AI rate limit reached"), { statusCode: 429, retryAfterSeconds: rate.retryAfterSeconds });
+      const routed = await runAiRoute(prepared.selection.route, config => createAiQuestionGenerator(config).generate(prepared.profile, prepared.selection.count));
+      const stored = await storeGeneratedAiQuestionGroup(user, prepared, routed);
+      if (!stored) return;
+    } catch (error) {
+      await failAiGenerationGroup(user, prepared, error);
+      console.warn(`AI question group ${prepared.groupIndex + 1} generation failed: ${error && error.message ? error.message : "unknown error"}`);
+      return;
+    }
+  }
+}
+
+function startAiGenerationWorker(user) {
+  const existing = activeAiGenerationJobsByUserId.get(user.id);
+  if (existing) return existing;
+  const job = runAiGenerationWorker(user).catch(error => {
+    console.warn(`AI question generation worker failed: ${error && error.message ? error.message : "unknown error"}`);
+  });
+  activeAiGenerationJobsByUserId.set(user.id, job);
+  job.finally(() => {
+    if (activeAiGenerationJobsByUserId.get(user.id) !== job) return;
+    activeAiGenerationJobsByUserId.delete(user.id);
+    const state = userStates.users[user.id];
+    if (state && nextRunnableAiGenerationItem(sanitizeAiPractice(state.aiPractice))) {
+      queueMicrotask(() => startAiGenerationWorker(user));
+    }
+  });
+  return job;
+}
+
 async function handleAiGenerate(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI generation endpoint not found");
@@ -4068,18 +4249,18 @@ async function handleAiGenerate(req, res, user) {
   try {
     const body = await readBody(req);
     const requestId = String(body.requestId || "").trim().slice(0, 180) || `aigen-${crypto.randomUUID()}`;
-    refreshContent();
     const prepared = await withFormalPracticeLock(user.id, async () => {
       const state = getUserState(user);
       const storedPractice = sanitizeAiPractice(state.aiPractice);
       let queueItem = storedPractice.generationQueue.find(item => item.requestId === requestId);
+      const reusedExisting = Boolean(queueItem);
       if (queueItem && ["ready", "consumed"].includes(queueItem.status)) {
         state.aiPractice = storedPractice;
-        return { response: { statusCode: 200, body: { practice: publicAiPractice(storedPractice), settings: storedPractice.settings, requestId, reused: true } } };
+        return { statusCode: 200, body: { practice: publicAiPractice(storedPractice), settings: storedPractice.settings, requestId, reused: true } };
       }
       if (queueItem && queueItem.status === "pending") {
         state.aiPractice = storedPractice;
-        return { response: { statusCode: 202, body: { practice: publicAiPractice(storedPractice), settings: storedPractice.settings, requestId, reused: true, pending: true } } };
+        return { statusCode: 202, startWorker: true, body: { practice: publicAiPractice(storedPractice), settings: storedPractice.settings, requestId, reused: true, pending: true, staged: true } };
       }
       state.aiPractice = storedPractice;
       const selection = aiSelectionForState(state, queueItem ? {
@@ -4110,6 +4291,8 @@ async function handleAiGenerate(req, res, user) {
           groupCount: selection.groupCount,
           plannedSetIds: Array.from({ length: selection.groupCount }, () => `aiset-${crypto.randomUUID()}`),
           setIds: [],
+          generatedGroupCount: 0,
+          failedGroupNumber: 0,
           error: ""
         };
         practice.generationQueue.push(queueItem);
@@ -4118,6 +4301,7 @@ async function handleAiGenerate(req, res, user) {
           queueItem.plannedSetIds = Array.from({ length: queueItem.groupCount }, (_, index) => queueItem.plannedSetIds && queueItem.plannedSetIds[index] || `aiset-${crypto.randomUUID()}`);
         }
         queueItem.status = "pending";
+        queueItem.failedGroupNumber = 0;
         queueItem.updatedAt = now;
         queueItem.error = "";
       }
@@ -4126,98 +4310,16 @@ async function handleAiGenerate(req, res, user) {
       userStates.users[user.id] = sanitizeState(state);
       persistUserStates();
       return {
-        batchId: queueItem.batchId,
-        currentPool: sanitizeReviewVariantPool(state.reviewVariantPool),
-        profile: buildLearningProfile(content, state, today()),
-        plannedSetIds: [...queueItem.plannedSetIds],
-        createdAt: queueItem.createdAt,
-        selection
+        statusCode: 202,
+        startWorker: true,
+        body: { practice: publicAiPractice(practice), settings: practice.settings, requestId, reused: reusedExisting, pending: true, staged: true }
       };
     });
-    if (prepared.response) return sendJson(res, prepared.response.statusCode, prepared.response.body);
-    try {
-      if (!prepared.profile.allowedWords.length) throw Object.assign(new Error("no learned words are available"), { statusCode: 409 });
-      const rate = takeAiRequest(user.id);
-      if (!rate.allowed) throw Object.assign(new Error("AI rate limit reached"), { statusCode: 429, retryAfterSeconds: rate.retryAfterSeconds });
-      const routed = await runAiRoute(prepared.selection.route, config => createAiQuestionGenerator(config).generateGroups(prepared.profile, prepared.selection.count, prepared.selection.groupCount));
-      const normalizedGroups = routed.value.map(group => group.map(question => {
-        const sourceChinese = String(question && question.chinese || "").trim();
-        const chinese = prioritizeRegisteredChineseMeanings(content, question && question.english, sourceChinese);
-        const poolVariant = prepared.currentPool.variants.find(item => normalizeVariantEnglish(item.english) === normalizeVariantEnglish(question && question.english));
-        return {
-          ...question,
-          poolVariantId: poolVariant ? poolVariant.id : "",
-          chinese,
-          acceptedChinese: expandRegisteredChineseAnswers(content, question && question.english, [
-            chinese,
-            ...(Array.isArray(question && question.acceptedChinese) ? question.acceptedChinese : [])
-              .map(answer => prioritizeRegisteredChineseMeanings(content, question && question.english, answer))
-          ].filter(answer => answer && !registeredChineseMeaningConflicts(content, question && question.english, answer).length), 16)
-        };
-      }));
-      const sets = normalizedGroups.map((questions, index) => createQuestionSet(questions, routed.config, {
-        id: prepared.plannedSetIds[index],
-        batchId: prepared.batchId,
-        generationRequestId: requestId,
-        questionVersion: 1,
-        requestedCount: prepared.selection.count,
-        createdAt: prepared.createdAt,
-        groupNumber: index + 1,
-        groupCount: prepared.selection.groupCount
-      }));
-      return await withFormalPracticeLock(user.id, async () => {
-        const latest = getUserState(user);
-        const latestPractice = sanitizeAiPractice(latest.aiPractice);
-        const latestItem = latestPractice.generationQueue.find(item => item.requestId === requestId);
-        if (!latestItem) throw Object.assign(new Error("AI generation queue item was lost"), { statusCode: 409 });
-        if (["ready", "consumed"].includes(latestItem.status)) {
-          return sendJson(res, 200, { practice: publicAiPractice(latestPractice), settings: latestPractice.settings, requestId, reused: true });
-        }
-        let queued = sets;
-        let currentSet = latestPractice.currentSet;
-        const itemIndex = latestPractice.generationQueue.findIndex(item => item.requestId === requestId);
-        const earlierUnfinished = itemIndex > 0 && latestPractice.generationQueue.slice(0, itemIndex).some(item => item.status !== "consumed");
-        if (!currentSet && !earlierUnfinished) {
-          currentSet = sets[0];
-          queued = sets.slice(1);
-        }
-        latestPractice.currentSet = currentSet;
-        latestPractice.queuedSets = [...latestPractice.queuedSets, ...queued];
-        latestItem.status = queued.length ? "ready" : "consumed";
-        latestItem.setIds = queued.map(set => set.id);
-        latestItem.providerId = routed.config.providerId;
-        latestItem.providerName = routed.config.providerName;
-        latestItem.model = routed.config.model;
-        latestItem.reasoningEffort = prepared.selection.route.reasoningEffort;
-        latestItem.updatedAt = new Date().toISOString();
-        latestItem.error = "";
-        latestPractice.tutor = currentSet === sets[0] ? null : latestPractice.tutor;
-        latestPractice.updatedAt = latestItem.updatedAt;
-        latest.aiPractice = latestPractice;
-        userStates.users[user.id] = sanitizeState(latest);
-        persistUserStates();
-        return sendJson(res, 201, { practice: publicAiPractice(latestPractice), settings: latestPractice.settings, requestId, reused: false, started: currentSet === sets[0] });
-      });
-    } catch (error) {
-      await withFormalPracticeLock(user.id, async () => {
-        const latest = getUserState(user);
-        const failedPractice = sanitizeAiPractice(latest.aiPractice);
-        const failedItem = failedPractice.generationQueue.find(item => item.requestId === requestId);
-        if (failedItem && !["ready", "consumed"].includes(failedItem.status)) {
-          failedItem.status = "failed";
-          failedItem.updatedAt = new Date().toISOString();
-          failedItem.error = publicAiGenerationFailure(error).message;
-          failedPractice.updatedAt = failedItem.updatedAt;
-          latest.aiPractice = failedPractice;
-          userStates.users[user.id] = sanitizeState(latest);
-          persistUserStates();
-        }
-      });
-      throw error;
-    }
+    if (prepared.startWorker) startAiGenerationWorker(user);
+    return sendJson(res, prepared.statusCode, prepared.body);
   } catch (error) {
     if (error && [400, 404, 409, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
-    console.warn(`AI question generation failed: ${error && error.message ? error.message : "unknown error"}`);
+    console.warn(`AI question generation request failed: ${error && error.message ? error.message : "unknown error"}`);
     const failure = publicAiGenerationFailure(error);
     return sendJson(res, failure.statusCode, { error: failure.message, providerStatus: failure.providerStatus });
   }
@@ -4237,7 +4339,7 @@ async function handleAiNextSet(req, res, user) {
       if (expectedSetId && current && current.id === expectedSetId) {
         return sendJson(res, 200, {
           set: publicQuestionSet(current),
-          remainingGroups: practice.generationQueue.filter(item => item.status !== "consumed").reduce((sum, item) => sum + (item.status === "ready" ? item.setIds.length : item.groupCount), 0),
+          remainingGroups: publicAiPractice(practice).generationQueue.reduce((sum, item) => sum + item.groups.length, 0),
           practice: publicAiPractice(practice),
           nextRequestId,
           reused: true
@@ -4246,16 +4348,19 @@ async function handleAiNextSet(req, res, user) {
       if (!current || current.phase !== "completed" || !current.questions.every(question => typeof question.correct === "boolean")) return sendError(res, 409, "current AI question set is not complete");
       const queueItem = practice.generationQueue.find(item => item.status !== "consumed");
       if (!queueItem) return sendError(res, 409, "no prepared AI question set is available");
-      if (queueItem.status === "pending") return sendJson(res, 409, { error: "队首题组仍在生成，请稍后再试", practice: publicAiPractice(practice) });
-      if (queueItem.status === "failed") return sendJson(res, 409, { error: queueItem.error || "队首题组生成失败，请原位重试", requestId: queueItem.requestId, practice: publicAiPractice(practice) });
       const nextSetId = queueItem.setIds[0];
+      if (!nextSetId && queueItem.status === "pending") return sendJson(res, 409, { error: `第 ${queueItem.generatedGroupCount + 1} 组仍在生成，请稍后再试`, practice: publicAiPractice(practice) });
+      if (!nextSetId && queueItem.status === "failed") return sendJson(res, 409, { error: queueItem.error || `第 ${queueItem.failedGroupNumber || queueItem.generatedGroupCount + 1} 组生成失败，请原位重试`, requestId: queueItem.requestId, practice: publicAiPractice(practice) });
+      if (!nextSetId) return sendError(res, 409, "no prepared AI question set is available");
       if (expectedSetId && nextSetId !== expectedSetId) return sendJson(res, 409, { error: "待进入题组与队首快照不一致，请刷新后重试", expectedSetId: nextSetId, practice: publicAiPractice(practice) });
       const nextSet = practice.queuedSets.find(set => set.id === nextSetId);
       if (!nextSet) return sendJson(res, 409, { error: "队首题组快照暂不可用，请重试原生成请求", requestId: queueItem.requestId, practice: publicAiPractice(practice) });
       practice.currentSet = nextSet;
       practice.queuedSets = practice.queuedSets.filter(set => set.id !== nextSetId);
       queueItem.setIds = queueItem.setIds.slice(1);
-      queueItem.status = queueItem.setIds.length ? "ready" : "consumed";
+      if (queueItem.generatedGroupCount >= queueItem.groupCount && queueItem.status !== "failed") {
+        queueItem.status = queueItem.setIds.length ? "ready" : "consumed";
+      }
       queueItem.updatedAt = new Date().toISOString();
       practice.tutor = null;
       practice.updatedAt = new Date().toISOString();
@@ -4264,7 +4369,7 @@ async function handleAiNextSet(req, res, user) {
       persistUserStates();
       return sendJson(res, 200, {
         set: publicQuestionSet(practice.currentSet),
-        remainingGroups: practice.generationQueue.filter(item => item.status !== "consumed").reduce((sum, item) => sum + (item.status === "ready" ? item.setIds.length : item.groupCount), 0),
+        remainingGroups: publicAiPractice(practice).generationQueue.reduce((sum, item) => sum + item.groups.length, 0),
         practice: publicAiPractice(practice),
         nextRequestId,
         reused: false

@@ -32,10 +32,11 @@ test("AI tutor Enter handling is wired to form submission", () => {
   assert.match(app, /旧问答仍保留为学习记录/);
 });
 
-test("AI practice can prepare independent groups and continue without another generation request", () => {
+test("AI practice prepares five-question groups sequentially and continues without another generation request", () => {
   const app = read("app.js");
   const html = read("index.html");
   const css = read("styles.css");
+  const server = read("server.js");
   assert.match(html, /<span>每组题数<\/span>[\s\S]*id="aiQuestionCount"/);
   assert.match(html, /<span>生成组数<\/span>[\s\S]*id="aiGroupCount"[\s\S]*value="1"[\s\S]*value="2"[\s\S]*value="3"[\s\S]*value="5"/);
   assert.match(app, /groupCount: AI_GROUP_COUNTS\.includes\(Number\(settings\.groupCount\)\)/);
@@ -53,6 +54,12 @@ test("AI practice can prepare independent groups and continue without another ge
   assert.match(html, /id="aiQueuePanel"/);
   assert.match(html, /id="startNextAiBatch"/);
   assert.match(app, /function renderAiQueue\(practice\)/);
+  assert.match(app, /async function pollAiGenerationProgress\(\)/);
+  assert.match(app, /首组 \$\{practice\.currentSet\.questions\.length\} 题已生成/);
+  assert.match(app, /只重试本组/);
+  assert.match(server, /activeAiGenerationJobsByUserId/);
+  assert.match(server, /createAiQuestionGenerator\(config\)\.generate\(prepared\.profile, prepared\.selection\.count\)/);
+  assert.doesNotMatch(server, /createAiQuestionGenerator\(config\)\.generateGroups/);
   assert.match(app, /data-queue-group-id/);
   assert.match(app, /group\.createdAt \? formatAiHistoryTime/);
   assert.match(app, /开始下一组（等待 \$\{queuedCount\} 组）/);
@@ -99,8 +106,8 @@ test("formal review batch start has bounded recovery and an explicit retry gate"
   const css = read("styles.css");
   const serviceWorker = read("sw.js");
   const server = read("server.js");
-  assert.match(html, /review-batch-client\.js\?v=69/);
-  assert.match(serviceWorker, /review-batch-client\.js\?v=69/);
+  assert.match(html, /review-batch-client\.js\?v=70/);
+  assert.match(serviceWorker, /review-batch-client\.js\?v=70/);
   assert.match(html, /id="reviewBatchStartRetryActions"[\s\S]*id="reviewBatchStartRetryButton"[\s\S]*重试保存题目快照/);
   assert.match(app, /REVIEW_BATCH_START_TIMEOUT_MS = Number\(REVIEW_BATCH_CLIENT\.DEFAULT_START_TIMEOUT_MS\) \|\| 12000/);
   assert.match(app, /REVIEW_BATCH_RECOVERY_TIMEOUT_MS = Number\(REVIEW_BATCH_CLIENT\.DEFAULT_RECOVERY_TIMEOUT_MS\) \|\| 6000/);
@@ -234,14 +241,14 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=69/);
+  assert.match(html, /pronunciation-data\.js\?v=70/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /phonemeSoundButtonHtml\(item\)/);
   assert.match(app, /speechButtonHtml\(item\.example, `慢速播放完整示范词/);
   assert.match(app, /data-pronunciation-sound/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=69/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=70/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -489,8 +496,8 @@ test("remote state saves are narrow, serialized, and skip server-authoritative r
   const serviceWorker = read("sw.js");
   const server = read("server.js");
   const stateSync = read("state-sync-client.js");
-  assert.match(html, /state-sync-client\.js\?v=69/);
-  assert.match(serviceWorker, /state-sync-client\.js\?v=69/);
+  assert.match(html, /state-sync-client\.js\?v=70/);
+  assert.match(serviceWorker, /state-sync-client\.js\?v=70/);
   assert.match(app, /STATE_SYNC\.createStateSaveQueue/);
   assert.match(app, /remoteStateQueue\.scheduleState\(model/);
   assert.match(app, /remoteStateQueue\?\.markServerState\(remote\)/);
@@ -620,7 +627,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 69", () => {
+test("PWA client assets consistently use the displayed cache version 70", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -631,8 +638,8 @@ test("PWA client assets consistently use the displayed cache version 69", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "69");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v69"/);
+  assert.equal(displayedVersion[1], "70");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v70"/);
 });
 
 test("complete self-study exposes one-step teaching, recovery, questions, and explicit continuation controls", () => {
@@ -677,10 +684,10 @@ test("offline travel mode is explicit, account-bound, FIFO replayed, and never c
   assert.match(html, /id="deleteOfflinePack"/);
   assert.match(html, /id="offlinePackStatus"/);
   assert.match(html, /id="startNextOfflineAiBatch"/);
-  assert.match(html, /offline-store\.js\?v=69/);
-  assert.match(html, /offline-learning\.js\?v=69/);
-  assert.match(html, /offline-ai\.js\?v=69/);
-  assert.match(html, /offline-replay\.js\?v=69/);
+  assert.match(html, /offline-store\.js\?v=70/);
+  assert.match(html, /offline-learning\.js\?v=70/);
+  assert.match(html, /offline-ai\.js\?v=70/);
+  assert.match(html, /offline-replay\.js\?v=70/);
   assert.match(app, /function enterPreparedOfflineSession\(\)/);
   assert.match(app, /offlineStore\.activeAccountId\(\) !== accountId/);
   assert.match(app, /async function replayOfflineOutbox\(\)/);
@@ -697,8 +704,8 @@ test("offline travel mode is explicit, account-bound, FIFO replayed, and never c
   assert.doesNotMatch(`${app}\n${server}`, /\/api\/offline\/replay/);
   assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)\) return/);
   assert.doesNotMatch(serviceWorker, /\/api\/state/);
-  assert.match(serviceWorker, /offline-store\.js\?v=69/);
-  assert.match(serviceWorker, /offline-replay\.js\?v=69/);
+  assert.match(serviceWorker, /offline-store\.js\?v=70/);
+  assert.match(serviceWorker, /offline-replay\.js\?v=70/);
   assert.match(css, /@media \(max-width: 520px\)[\s\S]*\.self-study-mode-actions button:not\(\.offline-pack-delete\)/);
 });
 
@@ -732,6 +739,6 @@ test("daily study plan offers six free-choice projects and records sixty minutes
   assert.doesNotMatch(app, /String\(stage\.index \+ 1\)/);
   assert.doesNotMatch(app, /按顺序完成/);
   assert.doesNotMatch(html, /按顺序学习/);
-  assert.match(html, /study-time\.js\?v=69/);
-  assert.match(serviceWorker, /study-time\.js\?v=69/);
+  assert.match(html, /study-time\.js\?v=70/);
+  assert.match(serviceWorker, /study-time\.js\?v=70/);
 });
