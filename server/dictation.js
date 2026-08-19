@@ -101,13 +101,38 @@ function weightedCycle(words, weights, random) {
   }).sort((left, right) => right.key - left.key).map(item => item.word);
 }
 
-function selectDictationWords(wordsValue, weightsValue, countValue, random = Math.random) {
+function priorityOrder(words, priorityIdsValue) {
+  const wordsById = new Map(words.map(word => [String(word.id), word]));
+  const seen = new Set();
+  const ordered = [];
+  (Array.isArray(priorityIdsValue) ? priorityIdsValue : []).forEach(value => {
+    const id = String(value || "");
+    if (!id || seen.has(id) || !wordsById.has(id)) return;
+    seen.add(id);
+    ordered.push(wordsById.get(id));
+  });
+  words.forEach(word => {
+    const id = String(word.id);
+    if (seen.has(id)) return;
+    seen.add(id);
+    ordered.push(word);
+  });
+  return ordered;
+}
+
+function selectDictationWords(wordsValue, weightsValue, countValue, random = Math.random, priorityIdsValue = []) {
   const words = (Array.isArray(wordsValue) ? wordsValue : []).filter(word => word && word.id && word.english);
   const weights = sanitizeWeights(weightsValue);
   const count = normalizeCount(countValue);
   if (!words.length) return [];
+  const prioritized = priorityOrder(words, priorityIdsValue);
+  const hasPriority = Array.isArray(priorityIdsValue) && priorityIdsValue.some(id => prioritized.some(word => String(word.id) === String(id)));
   const selected = [];
-  while (selected.length < count) selected.push(...weightedCycle(words, weights, random).slice(0, count - selected.length));
+  while (selected.length < count) {
+    const remaining = count - selected.length;
+    const candidates = hasPriority && remaining < prioritized.length ? prioritized.slice(0, remaining) : prioritized;
+    selected.push(...weightedCycle(candidates, weights, random).slice(0, remaining));
+  }
   return selected;
 }
 

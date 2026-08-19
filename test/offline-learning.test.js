@@ -193,7 +193,7 @@ test("AI-graded offline steps and tutor questions stay pending without formal ev
   assert.equal(asked.operation.id, "self-question:question-1");
 });
 
-test("a required summary stays incomplete when empty, including after an offline pack restart", async () => {
+test("an offline summary is generated from evidence, survives restart, and replays the same snapshot", async () => {
   let pack = (await operate(initialPack(), "/start", { lessonId: "offline-day-9" }, 1)).pack;
   const progress = pack.selfStudy.progress["offline-day-9"];
   progress.stageIndex = 5;
@@ -202,17 +202,30 @@ test("a required summary stays incomplete when empty, including after an offline
   await store.savePack(pack, "account-a");
   pack = await store.loadPack("account-a");
 
-  await assert.rejects(
-    () => operate(pack, "/submit", { lessonId: "offline-day-9", stepId: "summary-1", answer: "", attemptId: "empty-summary" }, 2),
-    /填写今天的中文总结/
-  );
-  const unchanged = publicSelfStudyState(pack.selfStudy, new Date("2026-08-15T00:03:00.000Z"));
-  assert.equal(unchanged.current.step.stepId, "summary-1");
-  assert.equal(unchanged.current.step.status, "unattempted");
-  assert.equal(pack.selfStudy.progress["offline-day-9"].status, "in-progress");
-
-  const completed = await operate(pack, "/submit", { lessonId: "offline-day-9", stepId: "summary-1", answer: "我学会了 dog。", attemptId: "valid-summary" }, 3);
+  const completed = await operate(pack, "/submit", { lessonId: "offline-day-9", stepId: "summary-1", answer: "", attemptId: "automatic-summary" }, 2);
   assert.equal(completed.courseReadyToSync, true);
   assert.equal(completed.pack.selfStudy.progress["offline-day-9"].status, "pending-sync");
-  assert.equal(completed.operation.body.answer, "我学会了 dog。");
+  assert.match(completed.operation.body.answer, /今天学习了 1 个新词、1 个新句型或句子/);
+  assert.match(completed.operation.body.answer, /实际完成 0\/11 道题/);
+  assert.equal(completed.operation.body.answer, completed.pack.selfStudy.progress["offline-day-9"].steps["summary-1"].automaticSummary.text);
+
+  await store.savePack(completed.pack, "account-a");
+  await store.enqueue(completed.operation, "account-a");
+  const restored = await store.loadPack("account-a");
+  assert.equal(restored.selfStudy.progress["offline-day-9"].steps["summary-1"].automaticSummary.text, completed.operation.body.answer);
+
+  const replayedBodies = [];
+  const response = (status, value) => ({ ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(value) });
+  const replay = await replayOutbox({
+    store,
+    accountId: "account-a",
+    fetch: async (path, options = {}) => {
+      if (path === "/api/auth/status") return response(200, { authenticated: true, user: { id: "account-a" } });
+      if (path === "/api/offline/pack") return response(200, completed.pack);
+      replayedBodies.push(JSON.parse(options.body));
+      return response(200, { ok: true });
+    }
+  });
+  assert.equal(replay.replayed, 1);
+  assert.deepEqual(replayedBodies.map(body => body.answer), [completed.operation.body.answer]);
 });

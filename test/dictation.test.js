@@ -32,6 +32,20 @@ test("dictation draft hides English while speech stays available to its private 
   assert.equal(dictationSpeech(session, session.items[0].id).length > 0, true);
 });
 
+test("dictation selection uses unified coverage priority before legacy error weights", () => {
+  const candidates = [
+    ...words,
+    { id: "man", day: 1, english: "man", chinese: "男人" },
+    { id: "dog", day: 3, english: "dog", chinese: "狗" },
+    { id: "pool", day: 8, english: "pool", chinese: "水池" },
+    { id: "bee", day: 9, english: "bee", chinese: "蜜蜂" }
+  ];
+  const priority = ["bee", "pool", "dog", "man", "pig", "cat"];
+  const selected = selectDictationWords(candidates, { cat: 20, pig: 1 }, 5, () => 0.5, priority);
+  assert.deepEqual(new Set(selected.map(word => word.id)), new Set(priority.slice(0, 5)));
+  assert.equal(selected.some(word => word.id === "cat"), false, "a high legacy weight cannot displace a higher-priority uncovered word");
+});
+
 test("dictation saves a full draft, grades exact spelling, and increases repeated error weight", () => {
   let session = createDictationSession(words, provider);
   session = saveDictationAnswers(session, { [session.items[0].id]: "kat", [session.items[1].id]: "pig" });

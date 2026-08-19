@@ -6,6 +6,7 @@ const { sanitizeAiExamState } = require("./ai-exam");
 const { teachingProfileForAi } = require("./teaching-profile");
 const { sanitizeDictationState } = require("./dictation");
 const { sanitizeFocusedState } = require("./focused-practice");
+const { rankedWordIds } = require("./word-memory");
 
 const MAX_AI_HISTORY = 1000;
 const MAX_QUESTION_COUNT = 10;
@@ -19,6 +20,8 @@ const MAX_TUTOR_RESETS = 1000;
 const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const QUESTION_SET_PHASES = ["answering", "review", "grading", "completed"];
 const QUESTION_SET_VERSION = 1;
+const AI_CONTENT_TYPES = ["word", "sentence"];
+const AI_DIRECTIONS = ["mixed", "en-zh", "zh-en"];
 
 function cleanText(value, maximum = 300) {
   return Array.from(String(value || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim()).slice(0, maximum).join("");
@@ -149,20 +152,24 @@ function legacyTutorHistory(tutor) {
 
 function sanitizeQuestion(value) {
   const source = value && typeof value === "object" ? value : {};
+  const contentType = source.contentType === "word" || source.wordId ? "word" : "sentence";
+  const wordId = contentType === "word" ? cleanText(source.wordId, 120) : "";
   const direction = source.direction === "zh-en" ? "zh-en" : "en-zh";
   const english = cleanText(source.english);
   const chinese = cleanText(source.chinese);
-  if (!english || !chinese) return null;
+  if (!english || !chinese || (contentType === "word" && !wordId)) return null;
   const correct = typeof source.correct === "boolean" ? source.correct : null;
   return {
     id: cleanText(source.id, 80) || `aiq-${crypto.randomUUID()}`,
+    contentType,
+    wordId,
     poolVariantId: cleanText(source.poolVariantId, 180),
     direction,
     english,
     chinese,
     acceptedEnglish: sanitizeStringArray(source.acceptedEnglish, [english]),
     acceptedChinese: sanitizeStringArray(source.acceptedChinese, [chinese]),
-    focus: safeQuestionFocus(english),
+    focus: contentType === "word" ? "单词回忆" : safeQuestionFocus(english),
     userAnswer: cleanText(source.userAnswer, 500),
     correct,
     score: correct === null ? null : boundedScore(source.score, correct),
@@ -182,11 +189,19 @@ function sanitizeQuestionSet(value) {
   const index = Math.min(Math.max(Number(value.index) || 0, 0), questions.length);
   const completed = Boolean(value.completed || questions.every(question => typeof question.correct === "boolean"));
   const phase = QUESTION_SET_PHASES.includes(value.phase) ? value.phase : (completed ? "completed" : "answering");
+  const contentType = AI_CONTENT_TYPES.includes(value.contentType)
+    ? value.contentType
+    : questions.every(question => question.contentType === "word") ? "word" : "sentence";
+  const direction = AI_DIRECTIONS.includes(value.direction)
+    ? value.direction
+    : new Set(questions.map(question => question.direction)).size > 1 ? "mixed" : questions[0].direction;
   return {
     id: cleanText(value.id, 80) || `aiset-${crypto.randomUUID()}`,
     batchId: cleanText(value.batchId, 80),
     generationRequestId: cleanText(value.generationRequestId, 180),
     questionVersion: Math.max(1, Number(value.questionVersion) || QUESTION_SET_VERSION),
+    contentType,
+    direction,
     requestedCount: [5, 10].includes(Number(value.requestedCount)) ? Number(value.requestedCount) : questions.length,
     groupNumber: Math.min(Math.max(Number(value.groupNumber) || 1, 1), MAX_AI_GROUPS),
     groupCount: Math.min(Math.max(Number(value.groupCount) || 1, 1), MAX_AI_GROUPS),
@@ -242,6 +257,8 @@ function publicQuestion(value, completed = false) {
   const prompt = question.direction === "en-zh" ? question.english : question.chinese;
   return {
     id: question.id,
+    contentType: question.contentType,
+    wordId: question.wordId,
     poolVariantId: question.poolVariantId,
     direction: question.direction,
     prompt,
@@ -272,6 +289,8 @@ function publicQuestionSet(value) {
     batchId: set.batchId,
     generationRequestId: set.generationRequestId,
     questionVersion: set.questionVersion,
+    contentType: set.contentType,
+    direction: set.direction,
     requestedCount: set.requestedCount,
     groupNumber: set.groupNumber,
     groupCount: set.groupCount,
@@ -315,6 +334,8 @@ function publicAiPractice(value) {
           questionCount: set ? set.questions.length : item.count,
           model: set ? set.model : item.model,
           reasoningEffort: set ? set.reasoningEffort : item.reasoningEffort,
+          contentType: set ? set.contentType : item.contentType,
+          direction: set ? set.direction : item.direction,
           createdAt: set ? set.createdAt : item.createdAt,
           questionVersion: set ? set.questionVersion : QUESTION_SET_VERSION,
           status: ready ? "ready" : failed ? "failed" : "pending"
@@ -343,6 +364,7 @@ function sanitizeHistoryItem(value) {
   const id = cleanText(source.id, 180) || `aihistory-${crypto.randomUUID()}`;
   const legacySetId = id.includes(":") ? id.slice(0, id.indexOf(":")) : "";
   const direction = source.direction === "zh-en" ? "zh-en" : "en-zh";
+  const contentType = source.contentType === "word" || source.wordId ? "word" : "sentence";
   const english = direction === "zh-en" ? source.correctAnswer : source.prompt;
   const questionNumber = Math.min(Math.max(Number(source.questionNumber) || 0, 0), MAX_QUESTION_COUNT);
   const questionCount = Math.min(Math.max(Number(source.questionCount) || 0, 0), MAX_QUESTION_COUNT);
@@ -361,6 +383,8 @@ function sanitizeHistoryItem(value) {
     questionNumber,
     questionCount,
     poolVariantId: cleanText(source.poolVariantId, 180),
+    contentType,
+    wordId: contentType === "word" ? cleanText(source.wordId, 120) : "",
     direction,
     prompt: cleanText(source.prompt),
     userAnswer: cleanText(source.userAnswer, 500),
@@ -404,6 +428,8 @@ function sanitizeGenerationQueueItem(value) {
     providerName: cleanText(value.providerName, 60),
     model: cleanText(value.model, 120),
     reasoningEffort: AI_EFFORTS.includes(value.reasoningEffort) ? value.reasoningEffort : "medium",
+    contentType: AI_CONTENT_TYPES.includes(value.contentType) ? value.contentType : "sentence",
+    direction: AI_DIRECTIONS.includes(value.direction) ? value.direction : "mixed",
     count: [5, 10].includes(Number(value.count)) ? Number(value.count) : 5,
     groupCount,
     plannedSetIds: sanitizeStringArray(value.plannedSetIds, []).slice(0, MAX_AI_GROUPS),
@@ -446,6 +472,8 @@ function sanitizeAiPractice(value) {
       updatedAt: queuedSets[queuedSets.length - 1].createdAt,
       model: queuedSets[0].model,
       reasoningEffort: queuedSets[0].reasoningEffort,
+      contentType: queuedSets[0].contentType,
+      direction: queuedSets[0].direction,
       count: queuedSets[0].questions.length,
       groupCount: queuedSets.length,
       plannedSetIds: queuedSets.map(set => set.id),
@@ -457,7 +485,9 @@ function sanitizeAiPractice(value) {
       model: cleanText(settings.model, 120),
       reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
       count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5,
-      groupCount: [1, 2, 3, 5].includes(Number(settings.groupCount)) ? Number(settings.groupCount) : 1
+      groupCount: [1, 2, 3, 5].includes(Number(settings.groupCount)) ? Number(settings.groupCount) : 1,
+      contentType: AI_CONTENT_TYPES.includes(settings.contentType) ? settings.contentType : "sentence",
+      direction: AI_DIRECTIONS.includes(settings.direction) ? settings.direction : "mixed"
     },
     tutorSettings: {
       providerId: cleanText(tutorSettings.providerId, 64),
@@ -517,10 +547,13 @@ function buildLearningProfile(content, state, studyDate = "") {
   const taskStates = state.taskStates && typeof state.taskStates === "object" ? state.taskStates : {};
   const learnedWords = content.words.filter(item => !item.preview && (!studyDate || !item.learned || String(item.learned) <= studyDate));
   const learnedSentences = content.sentences.filter(item => !item.preview && (!studyDate || !item.learned || String(item.learned) <= studyDate));
+  const usageRank = new Map((state.wordUsage && Array.isArray(state.wordUsage.events) ? rankedWordIds(state.wordUsage, content, { date: studyDate, limit: learnedWords.length }) : []).map((id, index) => [id, index]));
   const rankedWords = [...learnedWords].sort((a, b) => {
     const weakA = itemWeakness(a, taskStates);
     const weakB = itemWeakness(b, taskStates);
-    return weakA.incorrect - weakB.incorrect || weakA.level - weakB.level || Number(b.day || 0) - Number(a.day || 0);
+    const rankA = usageRank.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+    const rankB = usageRank.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+    return rankA - rankB || weakA.incorrect - weakB.incorrect || weakA.level - weakB.level || Number(b.day || 0) - Number(a.day || 0);
   }).slice(0, 120);
   const allowedWords = Array.from(new Set(rankedWords.flatMap(item => englishTokens(item.english))));
   const allowedSet = new Set(allowedWords);
@@ -579,7 +612,14 @@ function buildLearningProfile(content, state, studyDate = "") {
     currentDay: Number(content.currentDay) || 1,
     allowedWords,
     wordMeanings,
-    learnedWords: rankedWords.map(item => ({ english: item.english, chinese: item.chinese, day: item.day })),
+    learnedWords: rankedWords.map(item => ({
+      id: item.id,
+      english: item.english,
+      chinese: item.chinese,
+      acceptedChinese: wordChineseMeanings(item),
+      directions: Array.isArray(item.directions) && item.directions.length ? item.directions : ["en-zh", "zh-en"],
+      day: item.day
+    })),
     learnedSentences: rankedSentences.map(item => ({ english: item.english, chinese: item.chinese, day: item.day })),
     weakItems,
     recentMistakes: recentMistakes.map(item => ({ prompt: cleanText(item.prompt), userAnswer: cleanText(item.userAnswer), correctAnswer: cleanText(item.correctAnswer), note: cleanText(item.note, 100) })),
@@ -598,6 +638,8 @@ function createQuestionSet(questions, selection, metadata = {}) {
     batchId: metadata.batchId,
     generationRequestId: metadata.generationRequestId,
     questionVersion: metadata.questionVersion || QUESTION_SET_VERSION,
+    contentType: AI_CONTENT_TYPES.includes(metadata.contentType) ? metadata.contentType : "sentence",
+    direction: AI_DIRECTIONS.includes(metadata.direction) ? metadata.direction : "mixed",
     requestedCount: metadata.requestedCount || questions.length,
     groupNumber: metadata.groupNumber,
     groupCount: metadata.groupCount,
@@ -613,7 +655,35 @@ function createQuestionSet(questions, selection, metadata = {}) {
   });
 }
 
+function createDeterministicWordQuestions(profile, count, direction = "mixed", groupNumber = 1) {
+  const words = (Array.isArray(profile && profile.learnedWords) ? profile.learnedWords : []).filter(item => item && item.id && item.english && item.chinese);
+  const requestedCount = Math.max(1, Math.min(MAX_QUESTION_COUNT, Number(count) || 5));
+  if (!words.length) return [];
+  const normalizedDirection = AI_DIRECTIONS.includes(direction) ? direction : "mixed";
+  const offset = ((Math.max(1, Number(groupNumber) || 1) - 1) * requestedCount) % words.length;
+  return Array.from({ length: Math.min(requestedCount, words.length) }, (_, index) => {
+    const word = words[(offset + index) % words.length];
+    const availableDirections = (Array.isArray(word.directions) ? word.directions : []).filter(item => ["en-zh", "zh-en"].includes(item));
+    const fallbackDirections = availableDirections.length ? availableDirections : ["en-zh", "zh-en"];
+    const questionDirection = normalizedDirection === "mixed"
+      ? (fallbackDirections.includes(index % 2 ? "zh-en" : "en-zh") ? (index % 2 ? "zh-en" : "en-zh") : fallbackDirections[0])
+      : (fallbackDirections.includes(normalizedDirection) ? normalizedDirection : fallbackDirections[0]);
+    return {
+      contentType: "word",
+      wordId: word.id,
+      direction: questionDirection,
+      english: word.english,
+      chinese: word.chinese,
+      acceptedEnglish: [word.english],
+      acceptedChinese: Array.from(new Set([word.chinese, ...(Array.isArray(word.acceptedChinese) ? word.acceptedChinese : [])])).filter(Boolean).slice(0, 16),
+      focus: "单词回忆"
+    };
+  });
+}
+
 module.exports = {
+  AI_CONTENT_TYPES,
+  AI_DIRECTIONS,
   MAX_AI_HISTORY,
   MAX_AI_GROUPS,
   MAX_QUEUED_SETS,
@@ -622,6 +692,7 @@ module.exports = {
   MAX_TUTOR_RESETS,
   buildLearningProfile,
   createQuestionSet,
+  createDeterministicWordQuestions,
   offlineAiPractice,
   publicAiPractice,
   publicQuestionSet,

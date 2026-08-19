@@ -10,6 +10,7 @@ const { sanitizePreviewPracticeHistory } = require("./preview-practice");
 const { selfStudyHistory } = require("./self-study");
 const { formalPracticeSummary } = require("./formal-practice");
 const { publicTeachingProfile } = require("./teaching-profile");
+const { usageRows: wordUsageRows } = require("./word-memory");
 const { DAILY_STUDY_PLAN, normalizeStudyTime, STUDY_TIME_TARGET_SECONDS } = require("../study-time");
 
 function accuracy(correct, total) {
@@ -381,6 +382,7 @@ function buildLearningSyncProfile(content, state, user) {
   const studyTime = normalizeStudyTime(state.studyTime);
   const selfStudy = selfStudyHistory(state.selfStudy);
   const reviewBatches = formalPracticeSummary(state.formalPractice);
+  const wordUsage = wordUsageRows(state.wordUsage, content, { capacity: 10 });
   const aiCurrentSet = aiPractice.currentSet ? {
     id: aiPractice.currentSet.id,
     batchId: aiPractice.currentSet.batchId,
@@ -430,6 +432,11 @@ function buildLearningSyncProfile(content, state, user) {
       selfStudyUnattempted: selfStudy.summary.unattempted,
       selfStudyPending: selfStudy.summary.pending,
       selfStudyLastStudiedAt: selfStudy.summary.lastStudiedAt,
+      wordUsageEvents: wordUsage.summary.events,
+      wordsCoveredToday: wordUsage.summary.coveredToday,
+      wordsUncoveredToday: wordUsage.summary.uncoveredToday,
+      wordsUrgentCoverage: wordUsage.summary.urgentCoverage,
+      wordCoverageCapacityLimited: wordUsage.summary.capacityLimited,
       reviewBatchDrafts: reviewBatches.filter(batch => ["answering", "review"].includes(batch.phase)).length,
       reviewBatchesGrading: reviewBatches.filter(batch => batch.phase === "grading").length,
       reviewBatchesCompleted: reviewBatches.filter(batch => batch.phase === "completed").length,
@@ -479,6 +486,7 @@ function buildLearningSyncProfile(content, state, user) {
       focusedSessions: focused.sessions.map(session => ({ id: session.id, focusedType: session.focusedType, completedAt: session.completedAt, levelScore: session.levelScore }))
     },
     learnedContent: itemProgress,
+    wordUsage,
     abilities,
     formalReviewAttempts,
     localTeachingProfile: publicTeachingProfile(state.teachingProfile),

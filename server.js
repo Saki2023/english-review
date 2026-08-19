@@ -7,7 +7,7 @@ const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
 const { NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults, mistakeIsResolved, repairReviewEvidence } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
-const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createQuestionSet, offlineAiPractice, publicAiPractice, publicQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
+const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createDeterministicWordQuestions, createQuestionSet, offlineAiPractice, publicAiPractice, publicQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { createReviewBatch, publicFormalPractice, publicReviewBatch, sanitizeFormalPractice, sanitizeReviewBatch, sanitizeReviewResult } = require("./server/formal-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
 const { buildLearningSyncProfile } = require("./server/learning-sync");
@@ -33,6 +33,17 @@ const { expandPreviewAcceptedChinese, normalizePreviewSchoolSentence, sanitizePr
 const { learningEvidenceRepairSignature, repairLearningEvidence } = require("./server/evidence-repair");
 const { mergeStudyTime, normalizeStudyTime } = require("./study-time");
 const {
+  WORD_USAGE_MIGRATION_VERSION,
+  activityEvents: buildWordUsageEvents,
+  appendEvents: appendWordUsageEvents,
+  migrateWordUsage,
+  publicWordUsage,
+  rankedWordIds: rankedWordUsageIds,
+  sanitizeWordUsage,
+  usageRows: wordUsageRows,
+  validDate: validWordUsageDate
+} = require("./server/word-memory");
+const {
   addTutorQuestion,
   continueSelfStudyStep,
   localStepGrade,
@@ -42,6 +53,7 @@ const {
   pauseSelfStudy,
   publicSelfStudyState,
   referenceLeaked,
+  requestSelfStudyHint,
   resolveTutorQuestion,
   resumeSelfStudy,
   sanitizeSelfStudyState,
@@ -384,8 +396,10 @@ function migrateAccountState(value, signature = currentLearningEvidenceRepairSig
   const normalized = sanitizeState(value);
   const repaired = repairLearningEvidence(content, normalized);
   const repairedWordMeanings = repairStoredPracticeWordMeanings(repaired.state);
+  const wordUsageMigration = migrateWordUsage(repaired.state.wordUsage, repaired.state, content, { date: today(), timeZone: APP_TIMEZONE });
+  repaired.state.wordUsage = wordUsageMigration.state;
   markLearningEvidenceRepaired(repaired.state, signature);
-  return { state: repaired.state, changed: repaired.changed || repairedWordMeanings || normalized.repairSignature !== signature };
+  return { state: repaired.state, changed: repaired.changed || repairedWordMeanings || wordUsageMigration.changed || normalized.repairSignature !== signature };
 }
 
 function sanitizeState(value) {
@@ -400,6 +414,7 @@ function sanitizeState(value) {
     sessions: source.sessions && typeof source.sessions === "object" ? source.sessions : {},
     mistakes: Array.isArray(source.mistakes) ? source.mistakes.slice(-80) : [],
     sentencePracticeEvents: sanitizeSentencePracticeEvents(source.sentencePracticeEvents),
+    wordUsage: sanitizeWordUsage(source.wordUsage),
     studyTime: normalizeStudyTime(source.studyTime),
     previewPractice: sanitizePreviewPractice(source.previewPractice, content),
     previewPracticeHistory: sanitizePreviewPracticeHistory(source.previewPracticeHistory, content),
@@ -443,6 +458,7 @@ function publicReviewState(value) {
     attempts: Array.isArray(state.attempts) ? state.attempts : [],
     sessions: publicReviewSessions(state),
     mistakes: Array.isArray(state.mistakes) ? state.mistakes : [],
+    wordUsage: publicWordUsage(state.wordUsage, content, { date: today(), timeZone: APP_TIMEZONE, capacity: 10 }),
     studyTime: state.studyTime,
     previewPractice: state.previewPractice,
     previewPracticeHistory: state.previewPracticeHistory,
@@ -462,6 +478,7 @@ function publicFormalEvidenceState(value) {
     attempts: Array.isArray(state.attempts) ? state.attempts : [],
     sessions: publicReviewSessions(state),
     mistakes: Array.isArray(state.mistakes) ? state.mistakes : [],
+    wordUsage: publicWordUsage(state.wordUsage, content, { date: today(), timeZone: APP_TIMEZONE, capacity: 10 }),
     studyTime: state.studyTime,
     previewPractice: state.previewPractice,
     previewPracticeHistory: state.previewPracticeHistory
@@ -469,7 +486,9 @@ function publicFormalEvidenceState(value) {
 }
 
 function defaultState() {
-  return markLearningEvidenceRepaired(repairLearningEvidence(content, sanitizeState({})).state);
+  const state = markLearningEvidenceRepaired(repairLearningEvidence(content, sanitizeState({})).state);
+  state.wordUsage = migrateWordUsage(state.wordUsage, state, content, { date: today(), timeZone: APP_TIMEZONE }).state;
+  return state;
 }
 function isEmptyState(value) {
   const studyTime = normalizeStudyTime(value && value.studyTime);
@@ -646,7 +665,8 @@ function getUserState(user) {
     const canMigrate = user.role === "admin" && users.users.length === 1 && !isEmptyState(legacyState);
     userStates.users[user.id] = canMigrate ? markLearningEvidenceRepaired(legacyState) : defaultState();
     changed = true;
-  } else if (userStates.users[user.id].repairSignature !== currentLearningEvidenceRepairSignature()) {
+  } else if (userStates.users[user.id].repairSignature !== currentLearningEvidenceRepairSignature()
+    || sanitizeWordUsage(userStates.users[user.id].wordUsage).migrationVersion < WORD_USAGE_MIGRATION_VERSION) {
     const migrated = migrateAccountState(userStates.users[user.id]);
     userStates.users[user.id] = migrated.state;
     changed = true;
@@ -1175,6 +1195,42 @@ function selfStudyAiGrade(accountState, user, context) {
   }));
 }
 
+function appendSelfStudyWordUsage(accountState, selfStudyState, body, submission) {
+  const progress = selfStudyState && selfStudyState.progress && selfStudyState.progress[String(body && body.lessonId || "")];
+  if (!progress || !progress.snapshot) return { added: [], reused: true };
+  const step = progress.snapshot.stages.flatMap(stage => stage.steps).find(item => item.stepId === String(body && body.stepId || ""));
+  const stepState = step && progress.steps && progress.steps[step.stepId];
+  if (!step || !stepState || !["completed", "needs-correction"].includes(stepState.status)) return { added: [], reused: true };
+  const attemptId = String(body && body.attemptId || "").trim();
+  if (!attemptId) return { added: [], reused: true };
+  const attempt = stepState.attempts && stepState.attempts.find(item => item.attemptId === attemptId);
+  if (attempt && attempt.status !== "graded") return { added: [], reused: true };
+  const plannedWords = progress.snapshot.plannedContent && Array.isArray(progress.snapshot.plannedContent.words) ? progress.snapshot.plannedContent.words : [];
+  const plannedSentences = progress.snapshot.plannedContent && Array.isArray(progress.snapshot.plannedContent.sentences) ? progress.snapshot.plannedContent.sentences : [];
+  const usageContent = { ...content, words: [...content.words, ...plannedWords], sentences: [...content.sentences, ...plannedSentences] };
+  const globalWord = content.words.find(item => item.id === step.contentId && item.preview !== true && item.learned && String(item.learned) <= today());
+  const directRecall = Boolean(globalWord && step.contentId && step.type !== "reading-question");
+  const assistance = attempt && attempt.assistance || stepState.assistance || "";
+  const result = attempt
+    ? (directRecall ? wordUsageResult(attempt, assistance) : assistance === "revealed" ? "revealed" : assistance === "assisted" ? "assisted" : attempt.correct === true ? "completed" : "wrong")
+    : "completed";
+  const events = buildWordUsageEvents({
+    eventId: `self-study:${attemptId}`,
+    source: "self-study",
+    taskId: `${progress.lessonId}:${step.stepId}`,
+    wordIds: directRecall ? [globalWord.id] : (step.contentId && plannedWords.some(item => item.id === step.contentId) ? [step.contentId] : []),
+    english: directRecall ? "" : [step.english, step.prompt, step.passage, step.content].filter(Boolean).join(" "),
+    kind: directRecall ? "recall" : "exposure",
+    result,
+    formalEvidence: directRecall,
+    date: studyDateForTimestamp(attempt && (attempt.gradedAt || attempt.submittedAt) || new Date().toISOString()),
+    occurredAt: attempt && (attempt.gradedAt || attempt.submittedAt) || new Date().toISOString()
+  }, usageContent, { timeZone: APP_TIMEZONE });
+  const appended = appendWordUsageEvents(accountState.wordUsage, events, usageContent);
+  accountState.wordUsage = appended.state;
+  return appended;
+}
+
 function selfStudyTutorInput(accountState, context, message) {
   const stepState = context.progress.steps[context.step.stepId] || { attempts: [], questions: [], status: "unattempted" };
   const allowedWords = Array.from(new Set([
@@ -1261,6 +1317,14 @@ async function handleSelfStudy(req, res, url, user) {
       } else if (url.pathname === "/api/self-study/resume" && req.method === "POST") {
         if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
         selfStudy = resumeSelfStudy(selfStudy, await readBody(req));
+      } else if (url.pathname === "/api/self-study/hint" && req.method === "POST") {
+        if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
+        const hinted = requestSelfStudyHint(selfStudy, await readBody(req));
+        selfStudy = hinted.state;
+        accountState.selfStudy = selfStudy;
+        userStates.users[user.id] = sanitizeState(accountState);
+        persistUserStates();
+        return sendJson(res, 200, { ...publicSelfStudyState(selfStudy), duplicate: hinted.duplicate, hintLevel: hinted.level });
       } else if (url.pathname === "/api/self-study/submit" && req.method === "POST") {
         if (!selfStudy.enabled) return sendError(res, 409, "self-study mode is disabled");
         const body = await readBody(req);
@@ -1275,6 +1339,7 @@ async function handleSelfStudy(req, res, url, user) {
         });
         selfStudy = submission.state;
         accountState.selfStudy = selfStudy;
+        appendSelfStudyWordUsage(accountState, selfStudy, body, submission);
         if (submission.completionReady) {
           const completion = completeSelfStudyLesson(user, accountState, selfStudy, body.lessonId);
           prepareReviewVariantPoolsAfterCourseSync(true);
@@ -1457,6 +1522,18 @@ function buildOfflinePack(user) {
     revision: [content.updatedAt, state.selfStudy && state.selfStudy.updatedAt, state.aiPractice && state.aiPractice.updatedAt].filter(Boolean).join(":"),
     limits: { courseDays: OFFLINE_PACK_DAYS, aiGroups: 20, maxBytes: OFFLINE_PACK_MAX_BYTES },
     content: { currentDay: content.currentDay, updatedAt: content.updatedAt },
+    wordLibrary: content.words.filter(item => item.preview !== true && item.learned && String(item.learned) <= today()).map(item => ({
+      id: item.id,
+      day: item.day,
+      english: item.english,
+      chinese: item.chinese,
+      acceptedChinese: Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [],
+      phonetic: item.phonetic,
+      pronunciation: item.pronunciation,
+      directions: Array.isArray(item.directions) ? item.directions : ["en-zh", "zh-en"],
+      learned: item.learned
+    })),
+    wordUsage: publicWordUsage(state.wordUsage, content, { date: today(), timeZone: APP_TIMEZONE, capacity: 10 }),
     selfStudy: offlineSelfStudyPackage(state.selfStudy, { limit: OFFLINE_PACK_DAYS, nonce: `${user.id}:${generatedAt.getTime()}:${crypto.randomBytes(12).toString("hex")}` }),
     selfStudyPublic: publicSelfStudyState(state.selfStudy),
     preview: {
@@ -1717,7 +1794,7 @@ async function handlePreviewPracticeGrade(req, res, user) {
       const explanation = acceptedAmbiguousSchoolMeaning
         ? "中文“在学校”可能表示“在上学”，也可能表示“在一所学校里面”；两种合理英文均已接受。"
         : localGrade.explanation;
-      return sendJson(res, 200, {
+      const completedGrade = {
         ...localGrade,
         explanation,
         referenceAnswer: task.direction === "zh-en" ? task.english : task.chinese,
@@ -1731,7 +1808,9 @@ async function handlePreviewPracticeGrade(req, res, user) {
           gradingStatus: localGrade.gradingStatus,
           explanation
         })
-      });
+      };
+      await recordPreviewPracticeWordUsage(user, task, body.eventId, completedGrade);
+      return sendJson(res, 200, completedGrade);
     }
     if (!aiConfigured()) return unavailable("AI 尚未配置，答案已保存；配置完成后可重试判题");
     const rate = takeAiRequest(user.id);
@@ -1742,16 +1821,45 @@ async function handlePreviewPracticeGrade(req, res, user) {
     const sourceText = task.direction === "zh-en" ? task.chinese : task.english;
     const routed = await runAiRoute(selection.route, config => createAiGrader(config).grade({ answer, acceptedAnswers, direction: task.direction, sourceText }));
     const referenceAnswer = task.direction === "zh-en" ? task.english : task.chinese;
-    return sendJson(res, 200, {
+    const completedGrade = {
       ...completeTranslationGrade(task.direction, task.english, answer, routed.value, referenceAnswer),
       referenceAnswer,
       source: "ai"
-    });
+    };
+    await recordPreviewPracticeWordUsage(user, task, body.eventId, completedGrade);
+    return sendJson(res, 200, completedGrade);
   } catch (error) {
     if (error && [400, 413].includes(error.statusCode)) return sendError(res, error.statusCode, error.message);
     console.warn(`AI preview practice grading failed; answer will remain saved: ${error && error.message ? error.message : "unknown error"}`);
     return unavailable("AI 预习判题暂不可用，答案已保存，请稍后重试");
   }
+}
+
+async function recordPreviewPracticeWordUsage(user, task, eventId, result) {
+  const stableId = String(eventId || "").trim().slice(0, 180);
+  if (!stableId) return { reused: true, added: 0 };
+  return withFormalPracticeLock(user.id, async () => {
+    const state = getUserState(user);
+    const events = buildWordUsageEvents({
+      eventId: stableId,
+      source: "preview",
+      taskId: task.id,
+      wordIds: task.kind === "word" ? [task.wordId] : [],
+      english: task.kind === "sentence" ? task.english : "",
+      kind: "exposure",
+      result: result && result.correct === true && result.gradingStatus === "correct" ? "completed" : "wrong",
+      formalEvidence: false,
+      date: today(),
+      occurredAt: new Date().toISOString()
+    }, previewContentForAccount(accountPreviewData(user, state)), { timeZone: APP_TIMEZONE });
+    const appended = appendWordUsageEvents(state.wordUsage, events, content);
+    state.wordUsage = appended.state;
+    if (appended.added.length) {
+      userStates.users[user.id] = sanitizeState(state);
+      persistUserStates();
+    }
+    return { reused: appended.reused, added: appended.added.length };
+  }, "preview-word-usage");
 }
 
 function handleAbilities(req, res, user) {
@@ -1850,6 +1958,33 @@ function handleReviewSentenceStats(req, res, url, user) {
     generatedAt: new Date().toISOString(),
     stats: rows
   });
+}
+
+function handleWordUsage(req, res, url, user) {
+  if (!user) return sendError(res, 401, "login required");
+  if (req.method !== "GET") return sendError(res, 404, "word usage endpoint not found");
+  refreshContent();
+  const requestedFrom = String(url.searchParams.get("from") || "").trim();
+  const requestedTo = String(url.searchParams.get("to") || "").trim();
+  const from = validWordUsageDate(requestedFrom);
+  const to = validWordUsageDate(requestedTo);
+  if (requestedFrom && !from) return sendError(res, 400, "开始日期格式不正确");
+  if (requestedTo && !to) return sendError(res, 400, "结束日期格式不正确");
+  if (from && to && from > to) return sendError(res, 400, "开始日期不能晚于结束日期");
+  const sort = ["index", "usage", "correct", "wrong", "accuracy", "recent", "due"].includes(url.searchParams.get("sort"))
+    ? url.searchParams.get("sort")
+    : "index";
+  const order = url.searchParams.get("order") === "desc" ? "desc" : "asc";
+  const state = getUserState(user);
+  return sendJson(res, 200, wordUsageRows(state.wordUsage, content, {
+    date: today(),
+    from,
+    to,
+    sort,
+    order,
+    timeZone: APP_TIMEZONE,
+    capacity: 10
+  }));
 }
 
 function findSentenceTask(taskId, variantId = "", suppliedVariant = null) {
@@ -2688,7 +2823,7 @@ async function handleReviewSentenceVariants(req, res, user) {
   }
 }
 
-function aiSelectionForState(state, requested = {}) {
+function aiSelectionForState(state, requested = {}, options = {}) {
   const practice = sanitizeAiPractice(state.aiPractice);
   const availableModels = getAvailableModels(aiSettings);
   const storedModel = String(practice.settings.model || "").trim();
@@ -2696,11 +2831,20 @@ function aiSelectionForState(state, requested = {}) {
   const reasoningEffort = AI_EFFORTS.includes(requested.reasoningEffort) ? requested.reasoningEffort : practice.settings.reasoningEffort;
   const count = [5, 10].includes(Number(requested.count)) ? Number(requested.count) : practice.settings.count;
   const groupCount = [1, 2, 3, 5].includes(Number(requested.groupCount)) ? Number(requested.groupCount) : practice.settings.groupCount;
-  const route = selectAiCandidates(aiSettings, { model, reasoningEffort });
-  practice.settings = { model: route.model, reasoningEffort: route.reasoningEffort, count, groupCount };
+  const contentType = options.generation && ["word", "sentence"].includes(requested.contentType) ? requested.contentType : options.generation ? practice.settings.contentType : "sentence";
+  const direction = options.generation && ["mixed", "en-zh", "zh-en"].includes(requested.direction) ? requested.direction : options.generation ? practice.settings.direction : "mixed";
+  const route = contentType === "word"
+    ? {
+        mode: "local",
+        model: model || "local-word-bank",
+        reasoningEffort,
+        candidates: [{ configured: true, providerId: "local-word-bank", providerName: "本地词库", model: model || "local-word-bank", reasoningEffort }]
+      }
+    : selectAiCandidates(aiSettings, { model, reasoningEffort });
+  practice.settings = { model: route.model, reasoningEffort: route.reasoningEffort, count, groupCount, contentType, direction };
   practice.updatedAt = new Date().toISOString();
   state.aiPractice = practice;
-  return { route, count, groupCount, practice };
+  return { route, count, groupCount, contentType, direction, practice };
 }
 
 function publicAiOptions(user) {
@@ -2733,6 +2877,8 @@ function publicAiOptions(user) {
     selectedTutorEffort: practice.tutorSettings.reasoningEffort,
     selectedCount: practice.settings.count,
     selectedGroupCount: practice.settings.groupCount,
+    selectedContentType: practice.settings.contentType,
+    selectedDirection: practice.settings.direction,
     routingMode: current.mode,
     admin: Boolean(user && user.role === "admin")
   };
@@ -2972,8 +3118,39 @@ function cloneFormalMutationState(value) {
     sessions: { ...(state.sessions && typeof state.sessions === "object" ? state.sessions : {}) },
     mistakes: Array.isArray(state.mistakes) ? [...state.mistakes] : [],
     sentencePracticeEvents: Array.isArray(state.sentencePracticeEvents) ? [...state.sentencePracticeEvents] : [],
+    wordUsage: sanitizeWordUsage(state.wordUsage),
     formalPractice: cloneFormalPractice(state.formalPractice)
   };
+}
+
+function wordUsageResult(result, assistance = "") {
+  if (assistance === "revealed") return "revealed";
+  if (assistance === "assisted") return "assisted";
+  return result && result.correct === true && result.gradingStatus !== "partial" && Number(result.score) >= 1
+    ? "independent-correct"
+    : "wrong";
+}
+
+function appendQuestionWordUsage(state, { eventId, source, taskId, question, result, occurredAt, date, assistance = "", formalEvidence = true } = {}) {
+  const directWord = Boolean(question && (question.itemType === "word" || question.contentType === "word"));
+  const taskValue = String(taskId || question && question.taskId || "");
+  const separator = taskValue.lastIndexOf(":");
+  const taskWordId = separator > 0 ? taskValue.slice(0, separator) : taskValue;
+  const events = buildWordUsageEvents({
+    eventId,
+    source,
+    taskId: taskValue || question && question.id,
+    wordIds: directWord ? [question && question.wordId || taskWordId] : [],
+    english: directWord ? "" : question && question.english,
+    kind: directWord ? "recall" : "exposure",
+    result: directWord ? wordUsageResult(result, assistance) : (assistance === "revealed" ? "revealed" : assistance === "assisted" ? "assisted" : "completed"),
+    formalEvidence,
+    date,
+    occurredAt
+  }, content, { timeZone: APP_TIMEZONE });
+  const appended = appendWordUsageEvents(state.wordUsage, events, content);
+  state.wordUsage = appended.state;
+  return appended;
 }
 
 function saveFormalPracticeState(user, state, practice) {
@@ -3193,6 +3370,16 @@ function applyCompletedReviewBatch(user, expectedBatch, results) {
       formalEvidence: true
     };
     newAttempts.push(attempt);
+    appendQuestionWordUsage(next, {
+      eventId: attempt.id,
+      source: "review",
+      taskId: question.taskId,
+      question,
+      result,
+      occurredAt: completedAt,
+      date: studyDate,
+      formalEvidence: true
+    });
     if (result.gradingStatus !== "correct") newMistakes.push({
       id: `mistake-${attemptId}`,
       attemptId,
@@ -3364,6 +3551,16 @@ function applyImmediateReviewAttempt(user, expectedBatch, questionId, attemptId,
   updateFormalSchedule(next, question, result, studyDate);
   const existingAttemptIds = new Set(next.attempts.map(item => String(item && item.id || "")));
   if (!existingAttemptIds.has(attempt.id)) next.attempts = [...next.attempts, attempt].slice(-120);
+  appendQuestionWordUsage(next, {
+    eventId: attempt.id,
+    source: "review",
+    taskId: question.taskId,
+    question,
+    result,
+    occurredAt: submittedAt,
+    date: studyDate,
+    formalEvidence: true
+  });
   if (question.variantId) appendSentencePracticeEvents(next, [{
     id: attempt.id,
     variantId: question.variantId,
@@ -3804,6 +4001,8 @@ function saveAiQuestionResult(state, setId, questionId, answer, result) {
     reasoningEffort: set.reasoningEffort,
     questionNumber,
     questionCount: set.questions.length,
+    contentType: question.contentType,
+    wordId: question.wordId,
     direction: question.direction,
     prompt,
     userAnswer: answer,
@@ -3830,7 +4029,7 @@ async function gradeAiQuestionSet(user, set) {
     question.userAnswer,
     question.direction === "zh-en" ? question.acceptedEnglish : question.acceptedChinese
   ));
-  const needsAi = localResults.some(result => !result);
+  const needsAi = localResults.some((result, index) => !result && set.questions[index].contentType !== "word");
   let route = null;
   if (needsAi) {
     if (!aiConfigured()) throw Object.assign(new Error("AI 批改暂不可用，整组答案已保留，请稍后重试"), { statusCode: 503 });
@@ -3841,7 +4040,7 @@ async function gradeAiQuestionSet(user, set) {
   const results = [];
   for (let index = 0; index < set.questions.length; index += 1) {
     const question = set.questions[index];
-    results.push(localResults[index] || await gradeFormalQuestion({ ...question, itemType: "sentence" }, question.userAnswer, route));
+    results.push(localResults[index] || await gradeFormalQuestion({ ...question, itemType: question.contentType === "word" ? "word" : "sentence" }, question.userAnswer, route));
   }
   return results;
 }
@@ -3888,6 +4087,8 @@ function applyCompletedAiQuestionSet(user, expectedSet, results) {
       questionNumber: index + 1,
       questionCount: set.questions.length,
       poolVariantId: question.poolVariantId,
+      contentType: question.contentType,
+      wordId: question.wordId,
       direction: question.direction,
       prompt,
       userAnswer: question.userAnswer,
@@ -3901,6 +4102,16 @@ function applyCompletedAiQuestionSet(user, expectedSet, results) {
       explanation: result.explanation,
       detailedExplanation: question.detailedExplanation,
       batchId: set.batchId,
+      formalEvidence: true
+    });
+    appendQuestionWordUsage(latest, {
+      eventId: `${set.id}:${question.id}`,
+      source: "ai",
+      taskId: question.wordId || question.id,
+      question,
+      result,
+      occurredAt: completedAt,
+      date: today(),
       formalEvidence: true
     });
   });
@@ -4129,8 +4340,10 @@ async function prepareNextAiGenerationGroup(user) {
       model: runnable.model,
       reasoningEffort: runnable.reasoningEffort,
       count: runnable.count,
-      groupCount: runnable.groupCount
-    });
+      groupCount: runnable.groupCount,
+      contentType: runnable.contentType,
+      direction: runnable.direction
+    }, { generation: true });
     practice = selection.practice;
     const item = practice.generationQueue.find(candidate => candidate.requestId === runnable.requestId);
     if (!item || item.status !== "pending") return null;
@@ -4149,12 +4362,16 @@ async function prepareNextAiGenerationGroup(user) {
 }
 
 async function storeGeneratedAiQuestionGroup(user, prepared, routed) {
-  const normalizedQuestions = normalizeGeneratedAiQuestionGroup(routed.value, prepared.currentPool);
+  const normalizedQuestions = prepared.selection.contentType === "word"
+    ? routed.value
+    : normalizeGeneratedAiQuestionGroup(routed.value, prepared.currentPool);
   const set = createQuestionSet(normalizedQuestions, routed.config, {
     id: prepared.plannedSetId,
     batchId: prepared.batchId,
     generationRequestId: prepared.requestId,
     questionVersion: 1,
+    contentType: prepared.selection.contentType,
+    direction: prepared.selection.direction,
     requestedCount: prepared.selection.count,
     createdAt: prepared.createdAt,
     groupNumber: prepared.groupIndex + 1,
@@ -4220,9 +4437,16 @@ async function runAiGenerationWorker(user) {
     if (!prepared) return;
     try {
       if (!prepared.profile.allowedWords.length) throw Object.assign(new Error("no learned words are available"), { statusCode: 409 });
-      const rate = takeAiRequest(user.id);
-      if (!rate.allowed) throw Object.assign(new Error("AI rate limit reached"), { statusCode: 429, retryAfterSeconds: rate.retryAfterSeconds });
-      const routed = await runAiRoute(prepared.selection.route, config => createAiQuestionGenerator(config).generate(prepared.profile, prepared.selection.count));
+      let routed;
+      if (prepared.selection.contentType === "word") {
+        const questions = createDeterministicWordQuestions(prepared.profile, prepared.selection.count, prepared.selection.direction, prepared.groupIndex + 1);
+        if (questions.length < prepared.selection.count) throw Object.assign(new Error(`已学单词不足，当前只能生成 ${questions.length} 道不重复单词题`), { statusCode: 409 });
+        routed = { value: questions, config: prepared.selection.route.candidates[0] };
+      } else {
+        const rate = takeAiRequest(user.id);
+        if (!rate.allowed) throw Object.assign(new Error("AI rate limit reached"), { statusCode: 429, retryAfterSeconds: rate.retryAfterSeconds });
+        routed = await runAiRoute(prepared.selection.route, config => createAiQuestionGenerator(config).generate(prepared.profile, prepared.selection.count, { direction: prepared.selection.direction }));
+      }
       const stored = await storeGeneratedAiQuestionGroup(user, prepared, routed);
       if (!stored) return;
     } catch (error) {
@@ -4322,10 +4546,15 @@ function clearAiGenerationQueue(user) {
 async function handleAiGenerate(req, res, user) {
   if (!user) return sendError(res, 401, "login required");
   if (req.method !== "POST") return sendError(res, 404, "AI generation endpoint not found");
-  if (!aiConfigured()) return sendJson(res, 503, { error: "AI 尚未配置，请先保存可用的供应商和模型", reasonCode: "not_configured" });
   try {
     const body = await readBody(req);
     const requestId = String(body.requestId || "").trim().slice(0, 180) || `aigen-${crypto.randomUUID()}`;
+    const existingPractice = sanitizeAiPractice(getUserState(user).aiPractice);
+    const existingQueueItem = existingPractice.generationQueue.find(item => item.requestId === requestId);
+    const requestedContentType = existingQueueItem
+      ? existingQueueItem.contentType
+      : (["word", "sentence"].includes(body.contentType) ? body.contentType : existingPractice.settings.contentType);
+    if (requestedContentType !== "word" && !aiConfigured()) return sendJson(res, 503, { error: "AI 尚未配置，请先保存可用的供应商和模型", reasonCode: "not_configured" });
     const prepared = await withFormalPracticeLock(user.id, async () => {
       const state = getUserState(user);
       const storedPractice = sanitizeAiPractice(state.aiPractice);
@@ -4344,8 +4573,10 @@ async function handleAiGenerate(req, res, user) {
         model: queueItem.model,
         reasoningEffort: queueItem.reasoningEffort,
         count: queueItem.count,
-        groupCount: queueItem.groupCount
-      } : body);
+        groupCount: queueItem.groupCount,
+        contentType: queueItem.contentType,
+        direction: queueItem.direction
+      } : body, { generation: true });
       const practice = selection.practice;
       queueItem = practice.generationQueue.find(item => item.requestId === requestId);
       const now = new Date().toISOString();
@@ -4365,6 +4596,8 @@ async function handleAiGenerate(req, res, user) {
           providerName: selection.route.candidates[0] && selection.route.candidates[0].providerName || "",
           model: selection.route.model,
           reasoningEffort: selection.route.reasoningEffort,
+          contentType: selection.contentType,
+          direction: selection.direction,
           count: selection.count,
           groupCount: selection.groupCount,
           plannedSetIds: Array.from({ length: selection.groupCount }, () => `aiset-${crypto.randomUUID()}`),
@@ -4701,6 +4934,71 @@ function aiExamSelectionForState(state, requested = {}) {
   return { route, examState, includeEssay, includeListening, totalPoints };
 }
 
+function appendCompletedExamWordUsage(state, exam) {
+  if (!exam || exam.status !== "completed" || !exam.result) return;
+  const grades = new Map((Array.isArray(exam.result.grades) ? exam.result.grades : []).map(grade => [grade.questionId, grade]));
+  (Array.isArray(exam.questions) ? exam.questions : []).forEach(question => {
+    const grade = grades.get(question.id) || {};
+    const english = [question.sourceText, question.speechText, question.prompt].filter(Boolean).join(" ");
+    appendQuestionWordUsage(state, {
+      eventId: `exam:${exam.id}:${question.id}`,
+      source: "exam",
+      taskId: question.id,
+      question: { english, contentType: "sentence" },
+      result: {
+        correct: grade.correct === true,
+        gradingStatus: grade.correct === true ? "correct" : "incorrect",
+        score: Number(grade.score) >= Number(question.points) ? 1 : 0
+      },
+      occurredAt: exam.submittedAt || exam.result.gradedAt,
+      date: studyDateForTimestamp(exam.submittedAt || exam.result.gradedAt),
+      formalEvidence: true
+    });
+  });
+}
+
+function studyDateForTimestamp(value) {
+  const date = value ? new Date(value) : new Date();
+  const safe = Number.isFinite(date.getTime()) ? date : new Date();
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: APP_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(safe);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function appendCompletedDictationWordUsage(state, session) {
+  if (!session || session.status !== "completed") return;
+  (Array.isArray(session.items) ? session.items : []).forEach(item => {
+    appendQuestionWordUsage(state, {
+      eventId: `dictation:${session.id}:${item.id}`,
+      source: "dictation",
+      taskId: item.id,
+      question: { contentType: "word", wordId: item.wordId, english: item.english },
+      result: { correct: item.correct === true, gradingStatus: item.correct === true ? "correct" : "incorrect", score: item.correct === true ? 1 : 0 },
+      occurredAt: session.completedAt,
+      date: studyDateForTimestamp(session.completedAt),
+      formalEvidence: true
+    });
+  });
+}
+
+function appendCompletedFocusedWordUsage(state, session) {
+  if (!session || session.status !== "completed" || !session.result) return;
+  const grades = new Map((Array.isArray(session.result.grades) ? session.result.grades : []).map(grade => [grade.questionId, grade]));
+  (Array.isArray(session.questions) ? session.questions : []).forEach(question => {
+    const grade = grades.get(question.id) || {};
+    appendQuestionWordUsage(state, {
+      eventId: `focused:${session.id}:${question.id}`,
+      source: "focused",
+      taskId: question.id,
+      question: { contentType: "sentence", english: [session.passage, question.sourceText, question.prompt].filter(Boolean).join(" ") },
+      result: { correct: grade.correct === true, gradingStatus: grade.correct === true ? "correct" : "incorrect", score: grade.correct === true ? 1 : 0 },
+      occurredAt: session.completedAt,
+      date: studyDateForTimestamp(session.completedAt),
+      formalEvidence: true
+    });
+  });
+}
+
 function reconcileAiExamGeneration(state) {
   const examState = sanitizeAiExamState(state.aiExam);
   const generation = examState.generation;
@@ -4873,6 +5171,7 @@ async function handleAiExams(req, res, url, user) {
       const completed = completeExam(exam, graded.value, graded.config, profile.allowedWords);
       if (recognized.value.recognitionNote) completed.result.summary = `${recognized.value.recognitionNote} ${completed.result.summary}`.trim();
       state.aiExam = recordCompletedExam(examState, completed);
+      appendCompletedExamWordUsage(state, completed);
       persistUserStates();
       const abilities = analyzeAbilities(content, state);
       return sendJson(res, 200, { ...publicAiExamState(state.aiExam), abilities, abilityChanges: abilityChanges(before, abilities), submissionMode: "photo" });
@@ -4906,6 +5205,7 @@ async function handleAiExams(req, res, url, user) {
       const routed = await runAiRoute(route, config => createAiExamGrader(config).grade({ exam, answers: exam.answers, allowedWords: profile.allowedWords }));
       const completed = completeExam(exam, routed.value, routed.config, profile.allowedWords);
       state.aiExam = recordCompletedExam(examState, completed);
+      appendCompletedExamWordUsage(state, completed);
       persistUserStates();
       const abilities = analyzeAbilities(content, state);
       return sendJson(res, 200, { ...publicAiExamState(state.aiExam), abilities, abilityChanges: abilityChanges(before, abilities), submissionMode: "web" });
@@ -4950,7 +5250,8 @@ async function handleAiDictation(req, res, url, user) {
       refreshContent();
       const learnedWords = content.words.filter(item => !item.preview && item.learned && String(item.learned) <= today());
       if (!learnedWords.length) return sendError(res, 409, "no learned words are available");
-      const words = selectDictationWords(learnedWords, selection.dictation.weights, selection.count);
+      const priorityWordIds = rankedWordUsageIds(state.wordUsage, content, { date: today(), timeZone: APP_TIMEZONE, limit: learnedWords.length });
+      const words = selectDictationWords(learnedWords, selection.dictation.weights, selection.count, Math.random, priorityWordIds);
       selection.dictation.currentSession = createDictationSession(words, selection.route.candidates[0]);
       selection.dictation.updatedAt = new Date().toISOString();
       state.dictation = selection.dictation;
@@ -5014,6 +5315,7 @@ async function handleAiDictation(req, res, url, user) {
       const routed = await runAiRoute(route, config => createAiDictationAnalyzer(config).analyze(session));
       const completed = completeDictation(session, routed.value, routed.config);
       state.dictation = recordCompletedDictation(dictation, completed);
+      appendCompletedDictationWordUsage(state, completed);
       persistUserStates();
       const abilities = analyzeAbilities(content, state);
       return sendJson(res, 200, { ...publicDictationState(state.dictation), abilities, abilityChanges: abilityChanges(before, abilities) });
@@ -5128,6 +5430,7 @@ async function handleAiFocusedPractice(req, res, url, user) {
       const routed = await runAiRoute(route, config => createAiExamGrader(config).grade({ exam, answers: session.answers, allowedWords: profile.allowedWords }));
       const completed = completeFocusedSession(session, routed.value, routed.config);
       state.focusedPractice = recordCompletedFocused(focused, completed);
+      appendCompletedFocusedWordUsage(state, completed);
       persistUserStates();
       const abilities = analyzeAbilities(content, state);
       return sendJson(res, 200, { ...publicFocusedState(state.focusedPractice), abilities, abilityChanges: abilityChanges(before, abilities) });
@@ -5148,7 +5451,7 @@ function serveStatic(req, res, url) {
   let relative = decodeURIComponent(url.pathname); if (relative === "/") relative = "/index.html";
   if (relative.includes("\0") || relative.includes("..") || relative.startsWith("/server/")) return sendError(res, 404, "not found");
   const filePath = path.resolve(ROOT, `.${relative}`); if (!filePath.startsWith(ROOT + path.sep)) return sendError(res, 404, "not found");
-  fs.stat(filePath, (error, stats) => { if (error || !stats.isFile()) return sendError(res, 404, "not found"); setCommonHeaders(res, mimeType(filePath)); res.setHeader("Cache-Control", ["index.html", "styles.css", "data.js", "pronunciation-data.js", "review-variants.js", "answer-utils.js", "study-time.js", "review-session.js", "review-batch-client.js", "state-sync-client.js", "offline-store.js", "offline-learning.js", "offline-ai.js", "offline-replay.js", "app.js", "sw.js"].some(name => filePath.endsWith(name)) ? "no-cache" : "public, max-age=3600"); res.writeHead(200); fs.createReadStream(filePath).pipe(res); });
+  fs.stat(filePath, (error, stats) => { if (error || !stats.isFile()) return sendError(res, 404, "not found"); setCommonHeaders(res, mimeType(filePath)); res.setHeader("Cache-Control", ["index.html", "styles.css", "data.js", "pronunciation-data.js", "review-variants.js", "answer-utils.js", "study-time.js", "review-session.js", "review-batch-client.js", "state-sync-client.js", "library-usage.js", "offline-store.js", "offline-learning.js", "offline-ai.js", "offline-replay.js", "app.js", "sw.js"].some(name => filePath.endsWith(name)) ? "no-cache" : "public, max-age=3600"); res.writeHead(200); fs.createReadStream(filePath).pipe(res); });
 }
 
 const server = http.createServer((req, res) => {
@@ -5167,6 +5470,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === "/api/preview") return handlePreview(req, res, user);
   if (url.pathname === "/api/offline/pack") return handleOfflinePack(req, res, user);
   if (url.pathname === "/api/abilities") return handleAbilities(req, res, user);
+  if (url.pathname === "/api/word-usage") return handleWordUsage(req, res, url, user);
   if (url.pathname === "/api/review/sentence-stats") return handleReviewSentenceStats(req, res, url, user);
   if (url.pathname === "/api/review/sentence-variants") return handleReviewSentenceVariants(req, res, user);
   if (url.pathname === "/api/review/batches" || url.pathname.startsWith("/api/review/batches/")) return handleReviewBatches(req, res, url, user);

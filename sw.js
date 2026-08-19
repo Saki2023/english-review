@@ -1,24 +1,25 @@
-const CACHE_NAME = "daily-english-review-v73";
+const CACHE_NAME = "daily-english-review-v74";
 const APP_SHELL = [
   "/",
   "/index.html",
-  "/styles.css?v=73",
-  "/data.js?v=73",
-  "/pronunciation-data.js?v=73",
-  "/review-variants.js?v=73",
-  "/answer-utils.js?v=73",
-  "/study-time.js?v=73",
-  "/review-session.js?v=73",
-  "/review-batch-client.js?v=73",
-  "/state-sync-client.js?v=73",
-  "/offline-store.js?v=73",
-  "/offline-learning.js?v=73",
-  "/offline-ai.js?v=73",
-  "/offline-replay.js?v=73",
-  "/app.js?v=73",
+  "/styles.css?v=74",
+  "/data.js?v=74",
+  "/pronunciation-data.js?v=74",
+  "/review-variants.js?v=74",
+  "/answer-utils.js?v=74",
+  "/study-time.js?v=74",
+  "/review-session.js?v=74",
+  "/review-batch-client.js?v=74",
+  "/state-sync-client.js?v=74",
+  "/library-usage.js?v=74",
+  "/offline-store.js?v=74",
+  "/offline-learning.js?v=74",
+  "/offline-ai.js?v=74",
+  "/offline-replay.js?v=74",
+  "/app.js?v=74",
   "/manifest.webmanifest",
   "/icon.svg",
-  "/vendor/lucide.min.js?v=73"
+  "/vendor/lucide.min.js?v=74"
 ];
 
 self.addEventListener("install", event => {

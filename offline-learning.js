@@ -43,6 +43,13 @@
     throw new Error("当前浏览器不支持离线参考答案解锁");
   }
 
+  function textFromBase64(value) {
+    const bytes = bytesFromBase64(value);
+    if (typeof TextDecoder === "function") return new TextDecoder().decode(bytes);
+    if (typeof Buffer !== "undefined") return Buffer.from(bytes).toString("utf8");
+    return Array.from(bytes).map(byte => String.fromCharCode(byte)).join("");
+  }
+
   function hex(bytes) {
     return Array.from(new Uint8Array(bytes)).map(value => value.toString(16).padStart(2, "0")).join("");
   }
@@ -110,11 +117,14 @@
 
   function stepProgress(progress, stepId) {
     progress.steps ||= {};
-    progress.steps[stepId] ||= { status: "unattempted", draft: "", attempts: [], questions: [], firstAttemptId: "", completedAt: "", continueIds: [] };
+    progress.steps[stepId] ||= { status: "unattempted", draft: "", attempts: [], questions: [], firstAttemptId: "", completedAt: "", continueIds: [], hintLevel: 0, assistance: "", hintReceipts: [], automaticSummary: null };
     const state = progress.steps[stepId];
     state.attempts = Array.isArray(state.attempts) ? state.attempts : [];
     state.questions = Array.isArray(state.questions) ? state.questions : [];
     state.continueIds = Array.isArray(state.continueIds) ? state.continueIds : [];
+    state.hintLevel = Math.max(0, Math.min(3, Number(state.hintLevel) || 0));
+    state.assistance = ["assisted", "revealed"].includes(state.assistance) ? state.assistance : "";
+    state.hintReceipts = Array.isArray(state.hintReceipts) ? state.hintReceipts : [];
     return state;
   }
 
@@ -190,6 +200,8 @@
       submittedAt: attempt.submittedAt,
       gradedAt: attempt.gradedAt,
       correction: attempt.correction,
+      assistance: attempt.assistance || "",
+      hintLevel: Math.max(0, Number(attempt.hintLevel) || 0),
       formalEvidence: false
     };
     if (revealReference && attempt.referenceAnswer) safe.referenceAnswer = attempt.referenceAnswer;
@@ -224,7 +236,12 @@
       draft: state.draft || "",
       attempts: state.attempts.map(attempt => publicAttempt(attempt, completed)),
       questions: clone(state.questions),
-      ...(completed && state.referenceAnswer ? { referenceAnswer: state.referenceAnswer } : {})
+      hintLevel: state.hintLevel,
+      hintMaxLevel: QUESTION_TYPES.has(step.type) ? 3 : 0,
+      assistance: state.assistance,
+      hints: clone((Array.isArray(step.hints) ? step.hints : []).slice(0, Math.min(2, state.hintLevel))),
+      automaticSummary: clone(state.automaticSummary || (step.type === "summary" ? automaticSummary(progress, new Date(progress.updatedAt || Date.now())) : null)),
+      ...((completed || state.hintLevel >= 3) ? { referenceAnswer: state.referenceAnswer || textFromBase64(step.referenceAnswerReveal || "") } : {})
     };
   }
 
@@ -304,12 +321,42 @@
   function operationId(path, body = {}) {
     if (path === "/draft") return `self-draft:${body.lessonId}:${body.stepId}`;
     if (path === "/submit") return `self-submit:${body.attemptId}`;
+    if (path === "/hint") return `self-hint:${body.hintId}`;
     if (path === "/continue") return `self-continue:${body.continueId}`;
     if (path === "/question") return `self-question:${body.questionId}`;
     if (path === "/start") return `self-start:${body.lessonId}`;
     if (path === "/mode") return `self-mode:${body.enabled === true ? "on" : "off"}:${body.requestId || Date.now()}`;
     if (["/pause", "/resume"].includes(path)) return `self-${path.slice(1)}:${body.lessonId}:${body.requestId || Date.now()}`;
     return `self-operation:${path}:${body.requestId || Date.now()}`;
+  }
+
+  function automaticSummary(progress, now = new Date()) {
+    if (!progress || !progress.snapshot) return null;
+    const questionSteps = progress.snapshot.stages.flatMap(stage => stage.steps).filter(step => QUESTION_TYPES.has(step.type));
+    const rows = questionSteps.map(step => {
+      const state = stepProgress(progress, step.stepId);
+      const graded = state.attempts.filter(attempt => attempt.status === "graded");
+      return { step, state, first: graded[0] || null, last: graded[graded.length - 1] || null };
+    });
+    const completed = rows.filter(row => row.state.status === "completed");
+    const assisted = completed.filter(row => row.state.assistance === "assisted");
+    const revealed = completed.filter(row => row.state.assistance === "revealed");
+    const independent = completed.filter(row => !row.state.assistance && row.last && row.last.correct === true);
+    const incorrect = rows.filter(row => row.first && row.first.correct !== true);
+    const pending = rows.filter(row => row.state.status === "pending");
+    const errorReasons = Array.from(new Set(incorrect.map(row => String(row.first && (row.first.detailedExplanation || row.first.explanation) || "").trim()).filter(Boolean))).slice(0, 8);
+    const weakPoints = Array.from(new Set(incorrect.map(row => String(row.step.focus || row.step.title || row.step.category || "").trim()).filter(Boolean))).slice(0, 8);
+    const words = Array.isArray(progress.snapshot.plannedContent && progress.snapshot.plannedContent.words) ? progress.snapshot.plannedContent.words.map(item => ({ id: item.id, english: item.english, chinese: item.chinese })) : [];
+    const sentences = Array.isArray(progress.snapshot.plannedContent && progress.snapshot.plannedContent.sentences) ? progress.snapshot.plannedContent.sentences.map(item => ({ id: item.id, english: item.english, chinese: item.chinese })) : [];
+    const nextReview = weakPoints.length ? `下次先复习：${weakPoints.join("、")}，并重新独立完成使用过提示或首答错误的题目。` : "下次按记忆曲线复习今天的新词，并在句子中再次独立回忆。";
+    const text = [
+      `今天学习了 ${words.length} 个新词、${sentences.length} 个新句型或句子。`,
+      `实际完成 ${completed.length}/${questionSteps.length} 道题：独立完成 ${independent.length} 道，提示后完成 ${assisted.length} 道，看答案后完成 ${revealed.length} 道；首答错误 ${incorrect.length} 道。`,
+      pending.length ? `${pending.length} 道仍等待联网判定，不计为错误。` : "没有等待判定的题目。",
+      errorReasons.length ? `实际错因：${errorReasons.join("；")}。` : "本次没有已确认的错误，未练习内容没有被写成答错。",
+      nextReview
+    ].join("\n");
+    return { schema: 1, source: "deterministic-offline", generatedAt: timestamp(now), lessonId: progress.lessonId, newWords: words, newSentences: sentences, completedQuestions: completed.length, totalQuestions: questionSteps.length, independentCorrect: independent.length, initiallyIncorrect: incorrect.length, corrected: incorrect.filter(row => row.state.status === "completed").length, assistedCompleted: assisted.length, revealedCompleted: revealed.length, pending: pending.length, unattempted: rows.filter(row => !row.first).length, errorReasons, weakPoints, nextReview, text, formalEvidence: false };
   }
 
   async function operateSelfStudy(packValue, path, body = {}, options = {}) {
@@ -357,6 +404,24 @@
       progress.pausedAt = "";
       progress.pauseReason = "";
       touchProgress(progress, now);
+    } else if (path === "/hint") {
+      const { progress, step, stepState } = requireCurrent(state, body);
+      if (!QUESTION_TYPES.has(step.type)) throw new Error("当前步骤没有提示");
+      const hintId = String(body.hintId || "").trim();
+      if (!hintId) throw new Error("离线提示缺少稳定标识");
+      const requestedLevel = Math.max(1, Math.min(3, Number(body.level) || stepState.hintLevel + 1));
+      const receipt = stepState.hintReceipts.find(item => item.id === hintId);
+      if (receipt) {
+        if (Number(receipt.level) !== requestedLevel) throw new Error("同一提示标识不能改写为其他层级");
+        duplicate = true;
+      } else {
+        if (requestedLevel > stepState.hintLevel + 1) throw new Error("请按顺序查看提示");
+        if (requestedLevel === 3 && body.confirmReveal !== true) throw new Error("查看完整答案前需要明确确认");
+        stepState.hintLevel = Math.max(stepState.hintLevel, requestedLevel);
+        stepState.assistance = requestedLevel >= 3 ? "revealed" : "assisted";
+        stepState.hintReceipts.push({ id: hintId, level: requestedLevel, requestedAt: timestamp(now) });
+        touchProgress(progress, now);
+      }
     } else if (path === "/submit") {
       const attemptId = String(body.attemptId || "");
       if (!attemptId) throw new Error("离线作答缺少稳定提交标识");
@@ -373,18 +438,23 @@
       }
       else {
         const { progress, step, stepState } = requireCurrent(state, body);
-        if (step.required !== false && !["teach", "read-aloud"].includes(step.type) && !answer) {
-          throw new Error(step.type === "summary" ? "请先填写今天的中文总结" : "请先填写或选择答案");
+        if (step.type === "summary") {
+          stepState.automaticSummary = automaticSummary(progress, now);
+          operationBody = { ...operationBody, answer: stepState.automaticSummary && stepState.automaticSummary.text || "" };
+        }
+        if (step.required !== false && !["teach", "read-aloud", "summary"].includes(step.type) && !answer) {
+          throw new Error("请先填写或选择答案");
         }
         const correction = stepState.attempts.some(attempt => attempt.status === "graded" && attempt.correct !== true);
         let attempt;
         if (!QUESTION_TYPES.has(step.type)) {
-          attempt = { attemptId, answer, status: "graded", correct: true, score: 1, gradingStatus: "correct", explanation: "当前教学内容已确认。", detailedExplanation: "当前教学内容已确认；正式学习证据将在联网同步成功后由服务器写入。", submittedAt: timestamp(now), gradedAt: timestamp(now), correction, formalEvidence: false, referenceAnswer: "" };
+          const confirmationAnswer = step.type === "summary" ? (stepState.automaticSummary && stepState.automaticSummary.text || "") : answer;
+          attempt = { attemptId, answer: confirmationAnswer, status: "graded", correct: true, score: 1, gradingStatus: "correct", explanation: step.type === "summary" ? "系统已根据实际作答生成总结。" : "当前教学内容已确认。", detailedExplanation: "当前教学内容已确认；正式学习证据将在联网同步成功后由服务器写入。", submittedAt: timestamp(now), gradedAt: timestamp(now), correction, formalEvidence: false, referenceAnswer: "", assistance: stepState.assistance, hintLevel: stepState.hintLevel };
           stepState.status = "completed";
           stepState.completedAt = timestamp(now);
           courseReadyToSync = advance(progress, now);
         } else if (step.gradingMode === "ai") {
-          attempt = { attemptId, answer, status: "pending", correct: null, score: null, gradingStatus: "pending", explanation: "答案已保存在本机，等待联网后由 AI 判定。", detailedExplanation: "断网期间不会把这条答案记为正确或错误，也不会写入正式能力证据。", submittedAt: timestamp(now), gradedAt: "", correction, formalEvidence: false, referenceAnswer: "" };
+          attempt = { attemptId, answer, status: "pending", correct: null, score: null, gradingStatus: "pending", explanation: "答案已保存在本机，等待联网后由 AI 判定。", detailedExplanation: "断网期间不会把这条答案记为正确或错误，也不会写入正式能力证据。", submittedAt: timestamp(now), gradedAt: "", correction, formalEvidence: false, referenceAnswer: "", assistance: stepState.assistance, hintLevel: stepState.hintLevel };
           stepState.status = "pending";
           pendingOnline = true;
         } else {
@@ -392,16 +462,16 @@
           const correct = (Array.isArray(step.answerDigests) ? step.answerDigests : []).includes(digest);
           const referenceAnswer = correct ? await unlockReference(step, answer, digest, cryptoProvider) : "";
           const hint = (Array.isArray(step.correctionHints) ? step.correctionHints : [])[Math.min(stepState.attempts.length, Math.max(0, (step.correctionHints || []).length - 1))] || "当前答案不正确，请重新检查题干后订正。";
-          attempt = { attemptId, answer, status: "graded", correct, score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", explanation: correct ? "回答正确。" : hint, detailedExplanation: correct ? "回答正确；参考答案已在本机解锁，正式学习证据将在联网同步成功后由服务器写入。" : `${hint} 请修改后重新提交同一道题；不会提前显示完整答案。`, submittedAt: timestamp(now), gradedAt: timestamp(now), correction, formalEvidence: false, referenceAnswer };
+          attempt = { attemptId, answer, status: "graded", correct, score: correct ? 1 : 0, gradingStatus: correct ? "correct" : "incorrect", explanation: correct ? "回答正确。" : hint, detailedExplanation: correct ? "回答正确；参考答案已在本机解锁，正式学习证据将在联网同步成功后由服务器写入。" : `${hint} 请修改后重新提交同一道题；不会提前显示完整答案。`, submittedAt: timestamp(now), gradedAt: timestamp(now), correction, formalEvidence: false, referenceAnswer, assistance: stepState.assistance, hintLevel: stepState.hintLevel };
           stepState.status = correct ? "completed" : "needs-correction";
           stepState.completedAt = correct ? timestamp(now) : "";
           if (correct) stepState.referenceAnswer = referenceAnswer;
         }
-        stepState.draft = answer;
+        stepState.draft = step.type === "summary" ? (stepState.automaticSummary && stepState.automaticSummary.text || "") : answer;
         stepState.firstAttemptId ||= attemptId;
         stepState.attempts.push(attempt);
         touchProgress(progress, now);
-        operationBody = { ...operationBody, lessonId, stepId, answer, attemptId };
+        operationBody = { ...operationBody, lessonId, stepId, answer: attempt.answer, attemptId };
       }
     } else if (path === "/continue") {
       const progress = state.progress[String(body.lessonId || "")];
@@ -459,6 +529,7 @@
     normalizeState,
     operateSelfStudy,
     operationId,
+    automaticSummary,
     publicSelfStudyState,
     unlockReference
   };

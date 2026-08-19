@@ -103,9 +103,11 @@ test("dictation and focused APIs persist private drafts and update shared eviden
     assert.equal(Object.hasOwn(dictation.currentSession.items[0], "english"), false);
     assert.equal(Object.hasOwn(dictation.currentSession.items[0], "wordId"), false);
     const answers = {};
+    const firstDictationWords = [];
     for (const [index, item] of dictation.currentSession.items.entries()) {
       const speech = await fetch(`${baseUrl}/api/ai/dictation/speech`, { method: "POST", headers, body: JSON.stringify({ sessionId: dictation.currentSession.id, itemId: item.id }) });
       const english = (await speech.json()).text;
+      firstDictationWords.push(english);
       answers[item.id] = index ? english : "wrong";
     }
     const submittedDictation = await fetch(`${baseUrl}/api/ai/dictation/submit`, { method: "POST", headers, body: JSON.stringify({ sessionId: dictation.currentSession.id, answers }) });
@@ -115,6 +117,16 @@ test("dictation and focused APIs persist private drafts and update shared eviden
     assert.equal(dictation.currentSession.score, 4);
     assert.equal(dictation.weightSummary.highPriorityWords >= 0, true);
     assert.equal(dictation.abilities.abilities.find(item => item.id === "spelling").evidenceCount, 5);
+
+    const nextDictationResponse = await fetch(`${baseUrl}/api/ai/dictation/generate`, { method: "POST", headers, body: JSON.stringify({ model: "test-model", count: 5 }) });
+    assert.equal(nextDictationResponse.status, 201);
+    const nextDictation = await nextDictationResponse.json();
+    const nextDictationWords = [];
+    for (const item of nextDictation.currentSession.items) {
+      const speech = await fetch(`${baseUrl}/api/ai/dictation/speech`, { method: "POST", headers, body: JSON.stringify({ sessionId: nextDictation.currentSession.id, itemId: item.id }) });
+      nextDictationWords.push((await speech.json()).text);
+    }
+    assert.equal(nextDictationWords.some(word => firstDictationWords.includes(word)), false, "completed words must yield to today's unused coverage candidates");
 
     const generatedFocused = await fetch(`${baseUrl}/api/ai/focused/generate`, { method: "POST", headers, body: JSON.stringify({ model: "test-model", focusedType: "choice" }) });
     assert.equal(generatedFocused.status, 201);

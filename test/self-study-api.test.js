@@ -32,10 +32,10 @@ async function waitForHealth(baseUrl, child) {
   throw new Error("server did not become healthy");
 }
 
-function startServer(dataDir, port, apiToken) {
+function startServer(dataDir, port, apiToken, extraEnv = {}) {
   return spawn(process.execPath, [path.join(ROOT, "server.js")], {
     cwd: ROOT,
-    env: { ...process.env, DATA_DIR: dataDir, PORT: String(port), API_TOKEN: apiToken, COOKIE_SECURE: "false", REVIEW_VARIANT_POOL_AUTOFILL: "false" },
+    env: { ...process.env, DATA_DIR: dataDir, PORT: String(port), API_TOKEN: apiToken, COOKIE_SECURE: "false", REVIEW_VARIANT_POOL_AUTOFILL: "false", ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"]
   });
 }
@@ -361,7 +361,11 @@ test("anchored future lesson dates flow through preview, offline, sync, and rest
   const writeToken = deriveTeachingProfileWriteToken(apiToken);
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  let child = startServer(dataDir, port, apiToken);
+  const fixedClock = {
+    TEST_FIXED_NOW: "2026-08-17T15:59:59.000Z",
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require=${path.join(ROOT, "test", "support", "fixed-clock.cjs")}`.trim()
+  };
+  let child = startServer(dataDir, port, apiToken, fixedClock);
   try {
     await waitForHealth(baseUrl, child);
     const lesson = courseLesson("trip-day-12-date", 12, "dog", "狗");
@@ -402,7 +406,7 @@ test("anchored future lesson dates flow through preview, offline, sync, and rest
     assert.deepEqual(other.data.words, []);
 
     await stopServer(child);
-    child = startServer(dataDir, port, apiToken);
+    child = startServer(dataDir, port, apiToken, fixedClock);
     await waitForHealth(baseUrl, child);
     const restored = await request(baseUrl, travelerCookie, "/api/self-study");
     assert.equal(restored.data.waitingUntil, "2026-08-17T16:00:00.000Z");

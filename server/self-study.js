@@ -22,6 +22,7 @@ const TEST_BLUEPRINT = Object.freeze({ phonics: 2, "en-zh": 2, "zh-en": 2, readi
 const MAX_LESSONS = 60;
 const MAX_ATTEMPTS_PER_STEP = 20;
 const MAX_QUESTIONS_PER_STEP = 50;
+const MAX_HINT_RECEIPTS_PER_STEP = 20;
 const SELF_STUDY_SCHEDULE_ANCHOR_DAY = 12;
 const SELF_STUDY_SCHEDULE_ANCHOR_DATE = "2026-08-18";
 
@@ -163,6 +164,39 @@ function acceptedAnswersForStep(source, direction) {
   return uniqueStrings(candidates, 20, 500);
 }
 
+function defaultStepHints(step) {
+  const type = String(step && step.type || "");
+  const direction = String(step && step.direction || "");
+  const reference = cleanInline(step && step.referenceAnswer, 1000);
+  const words = englishTokens(reference);
+  let first = "先看题目要求，再找主语、动作和关键词。";
+  if (type === "choice") first = "先判断题目在问什么，再逐项比较主语、动作和关键词。";
+  else if (direction === "zh-en" || type === "zh-en") first = "先写主语，再检查系动词或动作，最后补全对象和位置。";
+  else if (direction === "en-zh" || type === "en-zh") first = "先找英文里的主语、动作、对象和位置，再按原顺序表达。";
+  else if (type === "reading-question") first = "回到短文中找到与题干相同的主语或关键词，再判断答案。";
+  else if (type === "correction") first = "先对照题干检查主语、冠词、系动词、介词和关键词。";
+  const second = (() => {
+    if ((direction === "zh-en" || type === "zh-en") && words.length) {
+      return `英文答案共 ${words.length} 个词，首字母依次是：${words.map(word => word[0]).join(" · ")}。`;
+    }
+    if ((direction === "en-zh" || type === "en-zh") && reference) {
+      return `中文答案的第一个字是“${Array.from(reference)[0]}”，先确认主语和核心意思。`;
+    }
+    if (type === "choice" && reference) return `正确选项以“${Array.from(reference)[0]}”开头。`;
+    return "再缩小范围：优先检查题干中重复出现的关键词。";
+  })();
+  return [first, second];
+}
+
+function sanitizeStepHints(source, step) {
+  const supplied = uniqueStrings([
+    ...(Array.isArray(source && source.hints) ? source.hints : []),
+    ...(Array.isArray(source && source.hintLayers) ? source.hintLayers : [])
+  ], 2, 500);
+  const defaults = defaultStepHints(step);
+  return [supplied[0] || defaults[0], supplied[1] || defaults[1]];
+}
+
 function sanitizeStep(value, index, stageType) {
   const source = value && typeof value === "object" ? value : {};
   const type = cleanInline(source.type, 40).toLocaleLowerCase();
@@ -189,7 +223,7 @@ function sanitizeStep(value, index, stageType) {
     source.correctionHint,
     source.hint
   ], 10, 500);
-  return {
+  const step = {
     stepId: cleanId(source.stepId || `step-${index + 1}`, "stepId"),
     type,
     category,
@@ -214,6 +248,8 @@ function sanitizeStep(value, index, stageType) {
     required: source.required !== false,
     stageType
   };
+  step.hints = question ? sanitizeStepHints(source, step) : [];
+  return step;
 }
 
 function sanitizePlannedWord(value, lessonDay) {
@@ -407,6 +443,8 @@ function sanitizeAttempt(value) {
     submittedAt: cleanIso(source.submittedAt) || new Date().toISOString(),
     gradedAt: cleanIso(source.gradedAt),
     correction: source.correction === true,
+    assistance: ["assisted", "revealed"].includes(source.assistance) ? source.assistance : "",
+    hintLevel: Math.max(0, Math.min(3, Number(source.hintLevel) || 0)),
     formalEvidence: source.formalEvidence === true,
     referenceAnswer: cleanText(source.referenceAnswer, 1000),
     acceptedAnswerVersion: cleanInline(source.acceptedAnswerVersion, 80)
@@ -441,6 +479,14 @@ function sanitizeStepProgress(value) {
     confirmationId: cleanInline(source.confirmationId, 160),
     continueId: cleanInline(source.continueId, 160),
     firstAttemptId: cleanInline(source.firstAttemptId, 160),
+    hintLevel: Math.max(0, Math.min(3, Number(source.hintLevel) || 0)),
+    assistance: ["assisted", "revealed"].includes(source.assistance) ? source.assistance : "",
+    hintReceipts: (Array.isArray(source.hintReceipts) ? source.hintReceipts : []).slice(-MAX_HINT_RECEIPTS_PER_STEP).map(item => ({
+      id: cleanInline(item && item.id, 160),
+      level: Math.max(1, Math.min(3, Number(item && item.level) || 1)),
+      requestedAt: cleanIso(item && item.requestedAt)
+    })).filter(item => item.id),
+    automaticSummary: source.automaticSummary && typeof source.automaticSummary === "object" ? clone(source.automaticSummary) : null,
     completedAt: cleanIso(source.completedAt),
     skippedAt: cleanIso(source.skippedAt),
     questions: (Array.isArray(source.questions) ? source.questions : []).map(sanitizeTutorQuestion).filter(Boolean).slice(-MAX_QUESTIONS_PER_STEP)
@@ -586,6 +632,8 @@ function offlineStep(step, lessonSalt) {
     formalEvidence: false,
     required: step.required,
     correctionHints: clone(step.correctionHints),
+    hints: clone(step.hints),
+    referenceAnswerReveal: step.referenceAnswer ? Buffer.from(step.referenceAnswer, "utf8").toString("base64") : "",
     answerSalt,
     answerDigests: step.acceptedAnswers.map(answer => offlineAnswerDigest(answerSalt, answer)),
     referenceUnlocks: step.acceptedAnswers.map(answer => offlineReferenceUnlock(answerSalt, answer, step.referenceAnswer)).filter(Boolean)
@@ -878,6 +926,98 @@ function resumeSelfStudy(value, input = {}, now = new Date()) {
   return state;
 }
 
+function requestSelfStudyHint(value, input = {}, now = new Date()) {
+  const state = sanitizeSelfStudyState(value);
+  const lessonId = cleanInline(input.lessonId, 120);
+  const stepId = cleanInline(input.stepId, 120);
+  const hintId = cleanInline(input.hintId, 160);
+  if (!hintId) fail("hintId is required");
+  const progress = state.progress[lessonId];
+  const current = progressCurrent(progress);
+  if (!current || current.step.stepId !== stepId) fail("self-study step is not current", 409);
+  if (progress.status === "paused") fail("resume the lesson before requesting a hint", 409);
+  if (!isQuestionStep(current.step)) fail("current self-study step has no hints", 409);
+  const stepState = ensureStepProgress(progress, stepId);
+  const requestedLevel = Math.max(1, Math.min(3, Number(input.level) || stepState.hintLevel + 1));
+  const receipt = stepState.hintReceipts.find(item => item.id === hintId);
+  if (receipt) {
+    if (receipt.level !== requestedLevel) fail("hintId was already used for another hint level", 409);
+    return { state, duplicate: true, level: receipt.level };
+  }
+  if (requestedLevel > stepState.hintLevel + 1) fail("request hint levels in order", 409);
+  if (requestedLevel === 3 && input.confirmReveal !== true) fail("full answer reveal requires explicit confirmation", 409);
+  stepState.hintLevel = Math.max(stepState.hintLevel, requestedLevel);
+  stepState.assistance = requestedLevel >= 3 ? "revealed" : "assisted";
+  stepState.hintReceipts.push({ id: hintId, level: requestedLevel, requestedAt: now.toISOString() });
+  stepState.hintReceipts = stepState.hintReceipts.slice(-MAX_HINT_RECEIPTS_PER_STEP);
+  touchProgress(progress, now);
+  state.updatedAt = now.toISOString();
+  return { state, duplicate: false, level: requestedLevel };
+}
+
+function selfStudyAutomaticSummary(progress, now = new Date()) {
+  if (!progress || !progress.snapshot) return null;
+  const questionSteps = progress.snapshot.stages.flatMap(stage => stage.steps).filter(isQuestionStep);
+  const rows = questionSteps.map(step => {
+    const state = progress.steps[step.stepId] || sanitizeStepProgress({});
+    const graded = state.attempts.filter(attempt => attempt.status === "graded");
+    const first = graded[0] || null;
+    const last = graded.at(-1) || null;
+    return { step, state, first, last };
+  });
+  const completed = rows.filter(row => row.state.status === "completed");
+  const assisted = completed.filter(row => row.state.assistance === "assisted" || row.last && row.last.assistance === "assisted");
+  const revealed = completed.filter(row => row.state.assistance === "revealed" || row.last && row.last.assistance === "revealed");
+  const independent = completed.filter(row => !row.state.assistance && row.last && row.last.correct === true && row.last.gradingStatus === "correct");
+  const initiallyIncorrect = rows.filter(row => row.first && (row.first.correct !== true || row.first.gradingStatus !== "correct"));
+  const corrected = initiallyIncorrect.filter(row => row.state.status === "completed");
+  const pending = rows.filter(row => row.state.status === "pending");
+  const unattempted = rows.filter(row => !row.first);
+  const errorReasons = uniqueStrings(initiallyIncorrect.flatMap(row => [
+    row.first && (row.first.detailedExplanation || row.first.explanation),
+    ...(row.first && Array.isArray(row.first.problemWords) && row.first.problemWords.length ? [`相关词：${row.first.problemWords.join("、")}`] : [])
+  ]), 8, 240);
+  const weakPoints = uniqueStrings(initiallyIncorrect.map(row => row.step.focus || row.step.title || row.step.category).filter(Boolean), 8, 160);
+  const words = progress.snapshot.plannedContent && Array.isArray(progress.snapshot.plannedContent.words)
+    ? progress.snapshot.plannedContent.words.map(item => ({ id: item.id, english: item.english, chinese: item.chinese }))
+    : [];
+  const sentences = progress.snapshot.plannedContent && Array.isArray(progress.snapshot.plannedContent.sentences)
+    ? progress.snapshot.plannedContent.sentences.map(item => ({ id: item.id, english: item.english, chinese: item.chinese }))
+    : [];
+  const nextReview = weakPoints.length
+    ? `下次先复习：${weakPoints.join("、")}，并重新独立完成使用过提示或首答错误的题目。`
+    : "下次按记忆曲线复习今天的新词，并在句子中再次独立回忆。";
+  const text = [
+    `今天学习了 ${words.length} 个新词、${sentences.length} 个新句型或句子。`,
+    `实际完成 ${completed.length}/${questionSteps.length} 道题：独立完成 ${independent.length} 道，提示后完成 ${assisted.length} 道，看答案后完成 ${revealed.length} 道；首答错误 ${initiallyIncorrect.length} 道，已订正 ${corrected.length} 道。`,
+    pending.length ? `${pending.length} 道仍等待判定，不计为错误。` : "没有等待判定的题目。",
+    errorReasons.length ? `实际错因：${errorReasons.join("；")}。` : "本次没有已确认的错误，未练习内容没有被写成答错。",
+    nextReview
+  ].join("\n");
+  return {
+    schema: 1,
+    source: "deterministic",
+    generatedAt: now.toISOString(),
+    lessonId: progress.lessonId,
+    newWords: words,
+    newSentences: sentences,
+    completedQuestions: completed.length,
+    totalQuestions: questionSteps.length,
+    independentCorrect: independent.length,
+    initiallyIncorrect: initiallyIncorrect.length,
+    corrected: corrected.length,
+    assistedCompleted: assisted.length,
+    revealedCompleted: revealed.length,
+    pending: pending.length,
+    unattempted: unattempted.length,
+    errorReasons,
+    weakPoints,
+    nextReview,
+    text,
+    formalEvidence: false
+  };
+}
+
 function genericWrongExplanation(step, answer) {
   if (step.type === "choice") return "当前选择不正确，请重新读题并检查选项之间的区别。";
   if (step.direction === "zh-en" || step.type === "zh-en") {
@@ -997,8 +1137,13 @@ async function submitSelfStudyStep(value, input, options = {}) {
 
   if (!isQuestionStep(step)) {
     if (!attemptId) fail("attemptId is required");
-    const response = cleanText(input && (input.answer || input.response), 2000);
-    if (step.type === "summary" && step.required && !response) fail("summary response is required");
+    let response = cleanText(input && (input.answer || input.response), 2000);
+    if (step.type === "summary") {
+      const summary = selfStudyAutomaticSummary(progress, now);
+      stepState.automaticSummary = summary;
+      response = cleanText(summary && summary.text, 2000);
+    }
+    if (step.type === "summary" && step.required && !response) fail("automatic summary is unavailable");
     if (stepState.status === "completed") return { state, duplicate: true, completionReady: progress.status === "ready" };
     stepState.draft = response;
     stepState.confirmationId = attemptId;
@@ -1006,7 +1151,7 @@ async function submitSelfStudyStep(value, input, options = {}) {
     stepState.completedAt = now.toISOString();
     advanceProgress(progress, now);
     state.updatedAt = now.toISOString();
-    return { state, duplicate: false, completionReady: progress.status === "ready" };
+    return { state, duplicate: false, completionReady: progress.status === "ready", automaticSummary: stepState.automaticSummary };
   }
 
   const answer = cleanText(input && input.answer, 2000);
@@ -1025,6 +1170,8 @@ async function submitSelfStudyStep(value, input, options = {}) {
     gradingStatus: step.gradingMode === "ai" ? "pending" : "incorrect",
     submittedAt: now.toISOString(),
     correction,
+    assistance: stepState.assistance,
+    hintLevel: stepState.hintLevel,
     formalEvidence: step.formalEvidence,
     referenceAnswer: step.referenceAnswer,
     acceptedAnswerVersion: progress.lessonVersion
@@ -1046,7 +1193,12 @@ async function submitSelfStudyStep(value, input, options = {}) {
     throw Object.assign(error, { selfStudyState: state, pendingAttempt: true });
   }
   const result = normalizeGrade(step, answer, grade);
-  Object.assign(pending, result, { status: "graded", gradedAt: new Date().toISOString() });
+  Object.assign(pending, result, {
+    status: "graded",
+    gradedAt: new Date().toISOString(),
+    assistance: stepState.assistance,
+    hintLevel: stepState.hintLevel
+  });
   if (!stepState.firstAttemptId) stepState.firstAttemptId = attemptId;
   if (result.correct && result.gradingStatus === "correct") {
     stepState.status = "completed";
@@ -1180,6 +1332,8 @@ function publicAttempt(attempt, revealReference) {
     submittedAt: attempt.submittedAt,
     gradedAt: attempt.gradedAt,
     correction: attempt.correction,
+    assistance: attempt.assistance,
+    hintLevel: attempt.hintLevel,
     formalEvidence: attempt.formalEvidence,
     ...(revealReference ? { referenceAnswer: attempt.referenceAnswer } : {})
   };
@@ -1192,6 +1346,10 @@ function publicCurrentStep(progress) {
   const state = ensureStepProgress(progress, step.stepId);
   const completed = state.status === "completed";
   const attempts = state.attempts.map(attempt => publicAttempt(attempt, completed));
+  const revealedHints = (Array.isArray(step.hints) ? step.hints : []).slice(0, Math.min(2, state.hintLevel));
+  const automaticSummary = step.type === "summary"
+    ? (state.automaticSummary || selfStudyAutomaticSummary(progress, new Date(progress.updatedAt || Date.now())))
+    : null;
   return {
     stepId: step.stepId,
     type: step.type,
@@ -1214,7 +1372,12 @@ function publicCurrentStep(progress) {
     draft: state.draft,
     attempts,
     questions: clone(state.questions),
-    ...(completed ? { referenceAnswer: step.referenceAnswer } : {})
+    hintLevel: state.hintLevel,
+    hintMaxLevel: isQuestionStep(step) ? 3 : 0,
+    assistance: state.assistance,
+    hints: clone(revealedHints),
+    automaticSummary: clone(automaticSummary),
+    ...((completed || state.hintLevel >= 3) ? { referenceAnswer: step.referenceAnswer } : {})
   };
 }
 
@@ -1312,6 +1475,9 @@ function selfStudyHistory(value) {
           status: stepState.status,
           draftPresent: Boolean(stepState.draft && !["completed", "skipped"].includes(stepState.status)),
           firstAttemptId: stepState.firstAttemptId,
+          hintLevel: stepState.hintLevel,
+          assistance: stepState.assistance,
+          automaticSummary: clone(stepState.automaticSummary),
           firstAttempt: clone(stepState.attempts.find(item => item.attemptId === stepState.firstAttemptId) || null),
           attempts: clone(stepState.attempts),
           corrections: clone(stepState.attempts.filter(item => item.correction)),
@@ -1383,6 +1549,9 @@ function selfStudyHistory(value) {
       formalAttempts: formalAttempts.length,
       firstCorrect: firstAttempts.filter(item => item.correct === true && item.gradingStatus === "correct").length,
       corrections: corrections.length,
+      assistedCompletions: allSteps.filter(step => step.status === "completed" && step.assistance === "assisted").length,
+      revealedCompletions: allSteps.filter(step => step.status === "completed" && step.assistance === "revealed").length,
+      automaticSummaries: allSteps.filter(step => step.type === "summary" && step.automaticSummary).length,
       unattempted: allSteps.filter(step => step.status === "unattempted").length + plannedSteps,
       pending: allSteps.filter(step => step.status === "pending").length,
       lastStudiedAt: histories.map(item => item.updatedAt).filter(Boolean).sort().at(-1) || ""
@@ -1413,11 +1582,13 @@ module.exports = {
   referenceLeaked,
   resolveTutorQuestion,
   resumeSelfStudy,
+  requestSelfStudyHint,
   sanitizeSelfStudyLesson,
   sanitizeSelfStudyState,
   saveSelfStudyDraft,
   selfStudyPreviewContent,
   selfStudyHistory,
+  selfStudyAutomaticSummary,
   selfStudyScheduledDate,
   startSelfStudyLesson,
   submitSelfStudyStep,

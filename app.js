@@ -8,6 +8,7 @@
   const REVIEW_SESSION = window.ENGLISH_REVIEW_SESSION || {};
   const REVIEW_BATCH_CLIENT = window.ENGLISH_REVIEW_BATCH_CLIENT || {};
   const STATE_SYNC = window.ENGLISH_REVIEW_STATE_SYNC || {};
+  const LIBRARY_USAGE = window.ENGLISH_REVIEW_LIBRARY_USAGE || { revision: () => "", sortItems: items => items };
   const OFFLINE_STORAGE = window.ENGLISH_REVIEW_OFFLINE || {};
   const OFFLINE_LEARNING = window.ENGLISH_REVIEW_OFFLINE_LEARNING || {};
   const OFFLINE_AI = window.ENGLISH_REVIEW_OFFLINE_AI || {};
@@ -54,6 +55,8 @@
   const INTERVALS = [1, 3, 7, 14, 30, 60];
   const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
   const AI_GROUP_COUNTS = [1, 2, 3, 5];
+  const AI_CONTENT_TYPES = ["word", "sentence"];
+  const AI_DIRECTIONS = ["mixed", "en-zh", "zh-en"];
   const AI_EFFORT_LABELS = { low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高" };
   const MAX_CLIENT_TUTOR_HISTORY = 1000;
   const MAX_CLIENT_TUTOR_RESETS = 1000;
@@ -98,6 +101,18 @@
   let reviewMode = "all";
   let libraryType = "word";
   let libraryPage = 1;
+  let libraryUsageRows = new Map();
+  let libraryUsageLoading = false;
+  let libraryUsageError = "";
+  let libraryUsageRequestSerial = 0;
+  let libraryUsageKey = "";
+  let libraryUsageFrom = "";
+  let libraryUsageTo = "";
+  let libraryUsageSort = "index";
+  let libraryUsageOrder = "asc";
+  let libraryUsageVisibilityRefreshAt = 0;
+  let previewMaskMode = "all";
+  let previewRevealedIds = {};
   let pronunciationFilter = "learned";
   let notesDay = Math.max(1, Number(DATA.currentDay) || 1, ...learnedItems.map(item => Number(item.day) || 0));
   let currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
@@ -250,6 +265,91 @@
     return value == null ? value : JSON.parse(JSON.stringify(value));
   }
 
+  function normalizeClientWordUsage(value) {
+    const source = value && typeof value === "object" ? value : {};
+    const rankedWordIds = Array.from(new Set((Array.isArray(source.rankedWordIds) ? source.rankedWordIds : []).map(item => String(item || "").trim()).filter(id => itemById.get(id)?.type === "word")));
+    const memories = {};
+    Object.entries(source.memories && typeof source.memories === "object" ? source.memories : {}).forEach(([wordId, raw]) => {
+      if (itemById.get(wordId)?.type !== "word") return;
+      const item = raw && typeof raw === "object" ? raw : {};
+      memories[wordId] = {
+        repetitions: Math.max(0, Number(item.repetitions) || 0),
+        intervalDays: Math.max(0, Number(item.intervalDays) || 0),
+        lapses: Math.max(0, Number(item.lapses) || 0),
+        nextDue: /^\d{4}-\d{2}-\d{2}$/.test(String(item.nextDue || "")) ? String(item.nextDue) : "",
+        due: item.due === true,
+        todayUsage: Math.max(0, Number(item.todayUsage) || 0),
+        lastUsedDate: /^\d{4}-\d{2}-\d{2}$/.test(String(item.lastUsedDate || "")) ? String(item.lastUsedDate) : ""
+      };
+    });
+    const summary = source.summary && typeof source.summary === "object" ? source.summary : {};
+    const rows = (Array.isArray(source.rows) ? source.rows : []).map(raw => {
+      if (!raw || typeof raw !== "object") return null;
+      const id = String(raw.id || "").trim();
+      if (itemById.get(id)?.type !== "word") return null;
+      const date = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? String(value) : "";
+      return {
+        id,
+        index: Math.max(0, Number(raw.index) || 0),
+        day: Math.max(0, Number(raw.day) || 0),
+        english: String(raw.english || "").trim().slice(0, 200),
+        chinese: String(raw.chinese || "").trim().slice(0, 300),
+        todayUsage: Math.max(0, Number(raw.todayUsage) || 0),
+        totalUsage: Math.max(0, Number(raw.totalUsage) || 0),
+        periodUsage: Math.max(0, Number(raw.periodUsage) || 0),
+        independentCorrect: Math.max(0, Number(raw.independentCorrect) || 0),
+        wrong: Math.max(0, Number(raw.wrong) || 0),
+        assisted: Math.max(0, Number(raw.assisted) || 0),
+        exposure: Math.max(0, Number(raw.exposure) || 0),
+        accuracy: raw.accuracy == null ? null : Math.max(0, Math.min(100, Number(raw.accuracy) || 0)),
+        lastUsedAt: String(raw.lastUsedAt || "").slice(0, 40),
+        lastUsedDate: date(raw.lastUsedDate),
+        nextDue: date(raw.nextDue),
+        repetitions: Math.max(0, Number(raw.repetitions) || 0),
+        intervalDays: Math.max(0, Number(raw.intervalDays) || 0),
+        lapses: Math.max(0, Number(raw.lapses) || 0),
+        due: raw.due === true,
+        active: raw.active !== false,
+        absentDays: Math.max(0, Number(raw.absentDays) || 0),
+        coverageDue: raw.coverageDue === true,
+        coverageStatus: String(raw.coverageStatus || "scheduled").slice(0, 40)
+      };
+    }).filter(Boolean);
+    return {
+      schema: Math.max(0, Number(source.schema) || 0),
+      date: /^\d{4}-\d{2}-\d{2}$/.test(String(source.date || "")) ? String(source.date) : "",
+      rankedWordIds,
+      memories,
+      summary: {
+        learnedWords: Math.max(0, Number(summary.learnedWords) || 0),
+        coveredToday: Math.max(0, Number(summary.coveredToday) || 0),
+        uncoveredToday: Math.max(0, Number(summary.uncoveredToday) || 0),
+        urgentCoverage: Math.max(0, Number(summary.urgentCoverage) || 0),
+        events: Math.max(0, Number(summary.events) || 0),
+        capacityLimited: Math.max(0, Number(summary.capacityLimited) || 0)
+      },
+      rows,
+      updatedAt: String(source.updatedAt || "").slice(0, 40)
+    };
+  }
+
+  function wordUsageRevision(value) {
+    return typeof LIBRARY_USAGE.revision === "function" ? LIBRARY_USAGE.revision(value) : String(value && value.updatedAt || "");
+  }
+
+  function mergeServerModel(remote) {
+    const previousRevision = wordUsageRevision(model && model.wordUsage);
+    const merged = mergeModels(model, remote);
+    if (remote && remote.wordUsage && wordUsageRevision(merged.wordUsage) !== previousRevision) {
+      const canUseSnapshotRows = !libraryUsageFrom && !libraryUsageTo;
+      libraryUsageRows = canUseSnapshotRows
+        ? new Map((merged.wordUsage.rows || []).map(row => [String(row.id || ""), row]).filter(([id]) => id))
+        : new Map();
+      invalidateLibraryUsage({ preserveRows: canUseSnapshotRows });
+    }
+    return merged;
+  }
+
   function offlinePackSummary(pack = offlinePack) {
     const source = pack && typeof pack === "object" ? pack : null;
     if (!source) return null;
@@ -365,6 +465,7 @@
       generationQueue: packedAi.generationQueue || [],
       updatedAt: packedAi.updatedAt || pack.generatedAt
     });
+    model.wordUsage = normalizeClientWordUsage(pack.wordUsage || model.wordUsage);
     const packedModels = Array.from(new Set([
       packedAi.settings && packedAi.settings.model,
       packedCurrent && packedCurrent.model,
@@ -625,7 +726,9 @@
         model: String(settings.model || ""),
         reasoningEffort: AI_EFFORTS.includes(settings.reasoningEffort) ? settings.reasoningEffort : "medium",
         count: [5, 10].includes(Number(settings.count)) ? Number(settings.count) : 5,
-        groupCount: AI_GROUP_COUNTS.includes(Number(settings.groupCount)) ? Number(settings.groupCount) : 1
+        groupCount: AI_GROUP_COUNTS.includes(Number(settings.groupCount)) ? Number(settings.groupCount) : 1,
+        contentType: AI_CONTENT_TYPES.includes(settings.contentType) ? settings.contentType : "sentence",
+        direction: AI_DIRECTIONS.includes(settings.direction) ? settings.direction : "mixed"
       },
       tutorSettings: {
         providerId: String(tutorSettings.providerId || ""),
@@ -643,6 +746,8 @@
         providerName: String(item && item.providerName || ""),
         model: String(item && item.model || ""),
         reasoningEffort: AI_EFFORTS.includes(item && item.reasoningEffort) ? item.reasoningEffort : "medium",
+        contentType: AI_CONTENT_TYPES.includes(item && item.contentType) ? item.contentType : "sentence",
+        direction: AI_DIRECTIONS.includes(item && item.direction) ? item.direction : "mixed",
         count: [5, 10].includes(Number(item && item.count)) ? Number(item.count) : 5,
         groupCount: [1, 2, 3, 5].includes(Number(item && item.groupCount)) ? Number(item.groupCount) : 1,
         readyGroups: Math.max(0, Number(item && item.readyGroups) || 0),
@@ -654,6 +759,8 @@
           questionCount: [5, 10].includes(Number(group && group.questionCount)) ? Number(group.questionCount) : 5,
           model: String(group && group.model || item && item.model || ""),
           reasoningEffort: AI_EFFORTS.includes(group && group.reasoningEffort) ? group.reasoningEffort : (AI_EFFORTS.includes(item && item.reasoningEffort) ? item.reasoningEffort : "medium"),
+          contentType: AI_CONTENT_TYPES.includes(group && group.contentType) ? group.contentType : (AI_CONTENT_TYPES.includes(item && item.contentType) ? item.contentType : "sentence"),
+          direction: AI_DIRECTIONS.includes(group && group.direction) ? group.direction : (AI_DIRECTIONS.includes(item && item.direction) ? item.direction : "mixed"),
           createdAt: String(group && group.createdAt || item && item.createdAt || ""),
           questionVersion: Math.max(1, Number(group && group.questionVersion) || 1),
           status: ["pending", "ready", "failed"].includes(group && group.status) ? group.status : "pending"
@@ -1155,7 +1262,7 @@
     $("#generateDictationButton").disabled = !available;
     $("#dictationSpeechSupport").textContent = supported ? "使用设备英文语音慢速播放；作答前不显示单词。" : "当前浏览器不支持语音合成，无法进行听写。";
     $("#dictationSpeechSupport").classList.toggle("is-error", !supported);
-    $("#dictationStatus").textContent = dictationStatusMessage || (aiOptions.configured ? "错词会提高后续抽取权重。" : "请先由管理员配置 AI 模型。 ");
+    $("#dictationStatus").textContent = dictationStatusMessage || (aiOptions.configured ? "优先抽取到期、薄弱、今日未用和最久未出现词；错词权重继续生效。" : "请先由管理员配置 AI 模型。 ");
     const session = dictationState.currentSession;
     $("#dictationEmptyState").hidden = Boolean(session);
     $("#dictationForm").hidden = !session;
@@ -1187,7 +1294,7 @@
   async function generateDictation() {
     if (dictationRequestInProgress || !speechSynthesisAvailable()) return;
     dictationRequestInProgress = true;
-    dictationStatusMessage = "正在按错词权重抽取单词…";
+    dictationStatusMessage = "正在按记忆曲线、覆盖优先级和错词权重抽取单词…";
     setBusyButton($("#generateDictationButton"), true, "正在生成…");
     renderDictationView();
     try {
@@ -1294,6 +1401,7 @@
       dictationState = normalizeClientDictation(data);
       dictationAbilityChanges = Array.isArray(data.abilityChanges) ? data.abilityChanges : [];
       if (data.abilities) abilityReport = normalizeAbilityReport(data.abilities);
+      invalidateLibraryUsage();
       dictationStatusMessage = "分析完成，错词权重和能力档案已更新。";
     } catch (error) {
       dictationStatusMessage = error.message;
@@ -1584,6 +1692,7 @@
       focusedState = normalizeClientFocused(data);
       focusedAbilityChanges = Array.isArray(data.abilityChanges) ? data.abilityChanges : [];
       if (data.abilities) abilityReport = normalizeAbilityReport(data.abilities);
+      invalidateLibraryUsage();
       focusedStatusMessage = "专项分析完成，五分能力条和总能力档案已更新。";
     } catch (error) {
       focusedStatusMessage = error.message;
@@ -1756,6 +1865,11 @@
     next.previewPracticeHistory = normalizeClientPreviewPracticeHistory(next.previewPracticeHistory);
     next.aiPractice = normalizeClientAiPractice(next.aiPractice);
     next.formalPractice = normalizeClientFormalPractice(next.formalPractice);
+    next.wordUsage = normalizeClientWordUsage(next.wordUsage);
+    next.previewMaskMode = ["all", "hide-chinese", "hide-english"].includes(next.previewMaskMode) ? next.previewMaskMode : "all";
+    next.previewRevealedIds = Object.fromEntries(Object.entries(next.previewRevealedIds && typeof next.previewRevealedIds === "object" ? next.previewRevealedIds : {}).filter(([id, revealed]) => String(id).length <= 160 && revealed === true));
+    previewMaskMode = next.previewMaskMode;
+    previewRevealedIds = { ...next.previewRevealedIds };
     next.schema = 1;
     allItems.forEach(item => (item.directions || ["en-zh"]).forEach(direction => {
       const taskId = `${item.id}:${direction}`;
@@ -1776,6 +1890,11 @@
     if (options.remote !== false && API_ENABLED && remoteReady && !offlineSession && remoteStateQueue) {
       void remoteStateQueue.scheduleState(model, { immediate: options.immediate === true });
     }
+  }
+
+  function syncPreviewMaskGlobals() {
+    previewMaskMode = ["all", "hide-chinese", "hide-english"].includes(model && model.previewMaskMode) ? model.previewMaskMode : "all";
+    previewRevealedIds = { ...(model && model.previewRevealedIds && typeof model.previewRevealedIds === "object" ? model.previewRevealedIds : {}) };
   }
 
   function mergeReviewSessions(localSession, remoteSession) {
@@ -1812,7 +1931,10 @@
       previewPractice: normalizeClientPreviewPractice(local.previewPractice),
       previewPracticeHistory: normalizeClientPreviewPracticeHistory(local.previewPracticeHistory),
       aiPractice: remote && remote.aiPractice ? normalizeClientAiPractice(remote.aiPractice) : normalizeClientAiPractice(local.aiPractice),
-      formalPractice: remote && remote.formalPractice ? normalizeClientFormalPractice(remote.formalPractice) : normalizeClientFormalPractice(local.formalPractice)
+      formalPractice: remote && remote.formalPractice ? normalizeClientFormalPractice(remote.formalPractice) : normalizeClientFormalPractice(local.formalPractice),
+      wordUsage: remote && remote.wordUsage ? normalizeClientWordUsage(remote.wordUsage) : normalizeClientWordUsage(local.wordUsage),
+      previewMaskMode: ["all", "hide-chinese", "hide-english"].includes(local.previewMaskMode) ? local.previewMaskMode : "all",
+      previewRevealedIds: { ...(local.previewRevealedIds && typeof local.previewRevealedIds === "object" ? local.previewRevealedIds : {}) }
     };
     const remotePreviewPractice = normalizeClientPreviewPractice(remote && remote.previewPractice);
     if (remotePreviewPractice.updatedAt >= merged.previewPractice.updatedAt || (!merged.previewPractice.key && remotePreviewPractice.key)) merged.previewPractice = remotePreviewPractice;
@@ -1964,7 +2086,8 @@
       const remote = await response.json();
       if (remote && remote.reviewVariantPool) updateReviewVariantPoolStatus(remote.reviewVariantPool);
       remoteStateQueue?.markServerState(remote);
-      model = mergeModels(model, remote);
+      model = mergeServerModel(remote);
+      syncPreviewMaskGlobals();
       remoteReady = true;
       saveModel();
       $("#dataStatus").textContent = `词库同步至第 ${DATA.currentDay} 天 · 云端已连接`;
@@ -1995,6 +2118,7 @@
     clearAiGenerationPolling();
     accountRequestEpoch += 1;
     currentUser = user;
+    resetLibraryUsageCache();
     remoteStateQueue?.setAccountId(user && user.id);
     reviewBatchRequestInProgress = false;
     reviewBatchStartFailure = null;
@@ -2102,6 +2226,7 @@
       offlinePack = offlineStore ? await offlineStore.loadPack(data.user.id) : null;
       setAccountContext(data.user);
       model = loadModel();
+      syncPreviewMaskGlobals();
       previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
       selectedPreviewName = "";
       previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
@@ -2161,7 +2286,14 @@
   function selectedAiSettings() {
     const practice = normalizeClientAiPractice(model.aiPractice);
     const modelName = aiOptions.models.includes(practice.settings.model) ? practice.settings.model : aiOptions.defaultModel;
-    return { model: modelName, reasoningEffort: practice.settings.reasoningEffort, count: practice.settings.count, groupCount: practice.settings.groupCount };
+    return {
+      model: modelName,
+      reasoningEffort: practice.settings.reasoningEffort,
+      count: practice.settings.count,
+      groupCount: practice.settings.groupCount,
+      contentType: practice.settings.contentType,
+      direction: practice.settings.direction
+    };
   }
 
   function updateAiPreferences(patch) {
@@ -2233,6 +2365,7 @@
   function populateAiModelSelect() {
     const select = $("#aiModelSelect");
     const settings = selectedAiSettings();
+    const localWordMode = settings.contentType === "word";
     select.replaceChildren(...aiOptions.models.map(modelName => {
       const option = document.createElement("option");
       option.value = modelName;
@@ -2240,18 +2373,30 @@
       return option;
     }));
     if (settings.model) select.value = settings.model;
-    select.disabled = !aiOptions.configured || !aiOptions.models.length;
+    select.disabled = localWordMode || !aiOptions.configured || !aiOptions.models.length;
     $("#aiQuestionCount").value = String(settings.count);
-    $("#aiQuestionCount").disabled = !aiOptions.configured || aiGenerationInProgress || aiOptionsLoading;
+    $("#aiQuestionCount").disabled = (!localWordMode && !aiOptions.configured) || aiGenerationInProgress || aiOptionsLoading;
     $("#aiGroupCount").value = String(settings.groupCount);
-    $("#aiGroupCount").disabled = !aiOptions.configured || aiGenerationInProgress || aiOptionsLoading;
+    $("#aiGroupCount").disabled = (!localWordMode && !aiOptions.configured) || aiGenerationInProgress || aiOptionsLoading;
+    $$('[data-ai-content-type]').forEach(button => {
+      const active = button.dataset.aiContentType === settings.contentType;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.disabled = aiGenerationInProgress || aiOptionsLoading;
+    });
+    $$('[data-ai-direction]').forEach(button => {
+      const active = button.dataset.aiDirection === settings.direction;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+      button.disabled = aiGenerationInProgress || aiOptionsLoading;
+    });
     $$('[data-ai-effort]').forEach(button => {
       const active = button.dataset.aiEffort === settings.reasoningEffort;
       button.classList.toggle("is-selected", active);
       button.setAttribute("aria-pressed", String(active));
-      button.disabled = !aiOptions.configured || aiOptionsLoading;
+      button.disabled = localWordMode || !aiOptions.configured || aiOptionsLoading;
     });
-    $("#generateAiQuestions").disabled = aiGenerationInProgress || aiQueueClearInProgress || aiOptionsLoading || offlineSession;
+    $("#generateAiQuestions").disabled = aiGenerationInProgress || aiQueueClearInProgress || aiOptionsLoading || offlineSession || (!localWordMode && !aiOptions.configured);
     const retryButton = $("#retryAiConnection");
     if (retryButton) {
       retryButton.disabled = aiOptionsLoading || offlineReplayInProgress;
@@ -3047,6 +3192,8 @@
         questionCount: item.count,
         model: item.model,
         reasoningEffort: item.reasoningEffort,
+        contentType: item.contentType,
+        direction: item.direction,
         createdAt: item.createdAt,
         questionVersion: 1,
         status: item.status
@@ -3055,10 +3202,12 @@
         position += 1;
         const status = group.status === "ready" ? "已就绪" : group.status === "failed" ? "生成失败" : "生成中";
         const effort = AI_EFFORT_LABELS[group.reasoningEffort] || group.reasoningEffort;
+        const contentLabel = group.contentType === "word" ? "单词" : "句子";
+        const directionLabel = group.direction === "mixed" ? "双向混合" : formatDirection(group.direction);
         const createdAt = group.createdAt ? formatAiHistoryTime(group.createdAt, group.createdAt) : "时间待记录";
         return `<div class="ai-queue-item" data-queue-status="${group.status}" data-queue-group-id="${escapeHtml(group.id)}">
           <span class="ai-queue-position">${position}</span>
-          <div class="ai-queue-copy"><strong>第 ${group.groupNumber}/${item.groupCount} 组 · ${escapeHtml(group.model || "默认模型")} · ${escapeHtml(effort)}</strong><span>${group.questionCount} 题 · ${createdAt} · ${status}</span>${item.error && group.status === "failed" ? `<small>${escapeHtml(item.error)}</small>` : ""}</div>
+          <div class="ai-queue-copy"><strong>第 ${group.groupNumber}/${item.groupCount} 组 · ${contentLabel} · ${directionLabel}</strong><span>${group.questionCount} 题 · ${group.contentType === "word" ? "本地词库" : escapeHtml(group.model || "默认模型")} · ${group.contentType === "word" ? "确定性判题" : escapeHtml(effort)} · ${createdAt} · ${status}</span>${item.error && group.status === "failed" ? `<small>${escapeHtml(item.error)}</small>` : ""}</div>
           ${group.status === "failed" ? `<button class="secondary-button compact-button" type="button" data-retry-ai-generation="${escapeHtml(item.requestId)}">只重试本组</button>` : `<span class="ai-queue-status">${status}</span>`}
         </div>`;
       });
@@ -3070,6 +3219,7 @@
     const previousAnswerUi = answerInput ? { key: String(answerInput.dataset.aiQuestionKey || ""), value: answerInput.value } : null;
     model.aiPractice = normalizeClientAiPractice(model.aiPractice);
     const practice = model.aiPractice;
+    const localWordMode = practice.settings.contentType === "word";
     syncAiGenerationPolling(practice);
     const queuedCount = Math.max(aiQueueGroupCount(practice), offlineSession ? practice.queuedSets.length : 0);
     populateAiModelSelect();
@@ -3082,7 +3232,7 @@
     const pendingQueueGroups = queueGroups.filter(group => group.status === "pending").length;
     const failedQueueGroups = queueGroups.filter(group => group.status === "failed").length;
     const queueSummary = [readyQueueGroups ? `${readyQueueGroups} 组已就绪` : "", pendingQueueGroups ? `${pendingQueueGroups} 组生成中` : "", failedQueueGroups ? `${failedQueueGroups} 组待重试` : ""].filter(Boolean).join("，");
-    const baseStatusMessage = aiStatusMessage || aiOptionsError || (aiOptions.configured ? (queueSummary || "AI 已配置") : "AI 尚未配置");
+    const baseStatusMessage = aiStatusMessage || (localWordMode ? (queueSummary || "单词题使用已学词库确定性生成和判题") : aiOptionsError || (aiOptions.configured ? (queueSummary || "AI 已配置") : "AI 尚未配置"));
     $("#aiStatus").textContent = connectivityMessage ? `${connectivityMessage}${aiStatusMessage ? ` ${aiStatusMessage}` : ""}` : baseStatusMessage;
     const empty = $("#aiEmptyState");
     const panel = $("#aiPracticePanel");
@@ -3091,7 +3241,7 @@
     renderBatchReviewPanel("ai", set);
     renderBatchResultsPanel("ai", set);
     const offlineReady = offlineSession && Boolean(set || queuedCount);
-    if (!aiOptions.configured && !offlineReady) {
+    if (!localWordMode && !aiOptions.configured && !offlineReady) {
       empty.hidden = false; panel.hidden = true; complete.hidden = true;
       $("#aiEmptyTitle").textContent = offlineSession || !browserIsOnline()
         ? "断网时不能实时生成；请使用出门前准备的题组"
@@ -3141,7 +3291,9 @@
     }
     empty.hidden = true; panel.hidden = false; complete.hidden = true;
     $("#aiFocusBadge").textContent = question.focus || "巩固练习";
-    $("#aiModelReadout").textContent = [set.providerName, set.model, AI_EFFORT_LABELS[set.reasoningEffort] || "中"].filter(Boolean).join(" · ");
+    $("#aiModelReadout").textContent = set.contentType === "word"
+      ? "已学词库 · 确定性判题"
+      : [set.providerName, set.model, AI_EFFORT_LABELS[set.reasoningEffort] || "中"].filter(Boolean).join(" · ");
     $("#aiQuestionProgress").textContent = Number(set.groupCount) > 1
       ? `第 ${Number(set.groupNumber) || 1}/${Number(set.groupCount) || 1} 组 · ${Number(set.index) + 1}/${set.questions.length}`
       : `${Number(set.index) + 1} / ${set.questions.length}`;
@@ -3305,7 +3457,7 @@
   }
 
   function applyReviewBatchResponse(data) {
-    if (data && data.state && typeof data.state === "object") model = mergeModels(model, data.state);
+    if (data && data.state && typeof data.state === "object") { model = mergeServerModel(data.state); syncPreviewMaskGlobals(); }
     model.formalPractice = normalizeClientFormalPractice(model.formalPractice);
     if (data && Object.hasOwn(data, "batch")) {
       model.formalPractice.review.current = data.batch && Array.isArray(data.batch.questions) ? data.batch : null;
@@ -3801,13 +3953,16 @@
 
   async function requestPreviewPracticeGrade(task, answer) {
     const settings = selectedAiSettings();
+    const state = ensurePreviewPracticeState();
+    const eventId = `preview:${state.roundId || state.key || "round"}:${task.id}`;
     const response = await fetch("/api/preview/practice/grade", {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ task: previewPracticeTaskPayload(task), answer, model: settings.model, reasoningEffort: settings.reasoningEffort })
+      body: JSON.stringify({ task: previewPracticeTaskPayload(task), answer, eventId, model: settings.model, reasoningEffort: settings.reasoningEffort })
     });
     const result = await responseJson(response);
+    invalidateLibraryUsage();
     if (typeof result.correct !== "boolean" || typeof result.explanation !== "string") throw new Error("AI 预习判题返回格式异常");
     const referenceAnswer = task.direction === "zh-en" ? task.english : task.chinese;
     return {
@@ -3820,6 +3975,24 @@
       wordResults: Array.isArray(result.wordResults) ? result.wordResults : [],
       source: result.source === "ai" ? "ai" : "local"
     };
+  }
+
+  async function queueOfflinePreviewPracticeGrade(task, answer) {
+    if (!offlineSession || !offlineStore || !currentUser) return;
+    const state = ensurePreviewPracticeState();
+    const eventId = `preview:${state.roundId || state.key || "round"}:${task.id}`;
+    const settings = selectedAiSettings();
+    await offlineStore.enqueue({
+      id: `preview-grade:${eventId}`,
+      path: "/api/preview/practice/grade",
+      method: "POST",
+      body: { task: previewPracticeTaskPayload(task), answer, eventId, model: settings.model, reasoningEffort: settings.reasoningEffort },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      attempts: 0,
+      lastError: ""
+    }, currentUser.id);
+    await refreshOfflineOutboxCount(currentUser.id);
   }
 
   function showPreviewPracticeFormError(message) {
@@ -4034,6 +4207,7 @@
     try {
       const grading = API_ENABLED && !offlineSession && browserIsOnline() ? await requestPreviewPracticeGrade(task, answer) : { ...previewPracticeGrade(task, answer), source: "local" };
       state.results[task.id] = { ...grading, answeredAt: new Date().toISOString() };
+      if (offlineSession) await queueOfflinePreviewPracticeGrade(task, answer);
       delete state.pending[task.id];
       state.updatedAt = new Date().toISOString();
       saveModel();
@@ -4094,7 +4268,7 @@
   }
 
   function aiGenerationSettingsKey(settings) {
-    return [String(settings && settings.model || ""), String(settings && settings.reasoningEffort || ""), Number(settings && settings.count) || 0, Number(settings && settings.groupCount) || 0].join("\u0000");
+    return [String(settings && settings.model || ""), String(settings && settings.reasoningEffort || ""), Number(settings && settings.count) || 0, Number(settings && settings.groupCount) || 0, String(settings && settings.contentType || "sentence"), String(settings && settings.direction || "mixed")].join("\u0000");
   }
 
   async function generateAiQuestions(retryRequestId = "", retrySettings = null) {
@@ -4110,7 +4284,8 @@
       return;
     }
     if (!aiOptionsLoaded) await loadAiOptions();
-    if (!aiOptions.configured) {
+    const currentSettings = selectedAiSettings();
+    if (currentSettings.contentType !== "word" && !aiOptions.configured) {
       aiStatusMessage = aiOptionsError || (currentUser && currentUser.role === "admin" ? "AI 尚未配置，请先打开 AI 设置。" : "AI 尚未配置，请联系管理员。");
       renderAiView();
       showToast(aiStatusMessage);
@@ -4122,7 +4297,9 @@
       model: $("#aiModelSelect").value,
       reasoningEffort: $$('[data-ai-effort]').find(item => item.classList.contains("is-selected"))?.dataset.aiEffort || "medium",
       count: Number($("#aiQuestionCount").value) || 5,
-      groupCount: Number($("#aiGroupCount").value) || 1
+      groupCount: Number($("#aiGroupCount").value) || 1,
+      contentType: $$('[data-ai-content-type]').find(item => item.classList.contains("is-selected"))?.dataset.aiContentType || currentSettings.contentType,
+      direction: $$('[data-ai-direction]').find(item => item.classList.contains("is-selected"))?.dataset.aiDirection || currentSettings.direction
     };
     const settingsKey = aiGenerationSettingsKey(settings);
     const uncertainRetry = !retryRequestId
@@ -4274,7 +4451,7 @@
   function retryQueuedAiGeneration(requestId) {
     const item = normalizeClientAiPractice(model.aiPractice).generationQueue.find(candidate => candidate.requestId === requestId && candidate.status === "failed");
     if (!item) return;
-    return generateAiQuestions(item.requestId, { model: item.model, reasoningEffort: item.reasoningEffort, count: item.count, groupCount: item.groupCount });
+    return generateAiQuestions(item.requestId, { model: item.model, reasoningEffort: item.reasoningEffort, count: item.count, groupCount: item.groupCount, contentType: item.contentType, direction: item.direction });
   }
 
   async function submitAiAnswer(event) {
@@ -4343,6 +4520,7 @@
         aiStatusMessage = "整组答案已保存在本机，待联网后由服务器统一批改；目前没有写入得分、错题或能力证据。";
       } else {
         invalidateReviewVariantStats();
+        invalidateLibraryUsage();
         invalidateAbilities();
         await loadAbilities(true);
       }
@@ -4729,6 +4907,7 @@
       examState = normalizeClientAiExam(data);
       examAbilityChanges = Array.isArray(data.abilityChanges) ? data.abilityChanges : [];
       if (data.abilities) abilityReport = normalizeAbilityReport(data.abilities);
+      invalidateLibraryUsage();
       clearExamPhotos();
       examStatusMessage = "纸质答卷判卷完成；照片未保存，识别答案和成绩已写入学习档案。";
     } catch (error) {
@@ -4961,6 +5140,7 @@
       examState = normalizeClientAiExam(data);
       examAbilityChanges = Array.isArray(data.abilityChanges) ? data.abilityChanges : [];
       if (data.abilities) abilityReport = normalizeAbilityReport(data.abilities);
+      invalidateLibraryUsage();
       examStatusMessage = "判卷完成，薄弱点已写入学习档案";
       requestAnimationFrame(() => $("#examResult").scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (error) {
@@ -5797,10 +5977,13 @@
       if (mode === "sentence") return task.item.type === "sentence";
       return true;
     });
+    const rankedWords = new Map((model.wordUsage && model.wordUsage.rankedWordIds || []).map((wordId, index) => [wordId, index]));
     tasks.sort((a, b) => {
       const stateA = taskState(a.taskId); const stateB = taskState(b.taskId);
       const mistakeA = stateA.lastResult === false ? 0 : 1; const mistakeB = stateB.lastResult === false ? 0 : 1;
-      return mistakeA - mistakeB || stateA.nextDue.localeCompare(stateB.nextDue) || a.item.day - b.item.day || a.taskId.localeCompare(b.taskId);
+      const wordRankA = a.item.type === "word" ? (rankedWords.get(a.item.id) ?? Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
+      const wordRankB = b.item.type === "word" ? (rankedWords.get(b.item.id) ?? Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
+      return mistakeA - mistakeB || wordRankA - wordRankB || stateA.nextDue.localeCompare(stateB.nextDue) || a.item.day - b.item.day || a.taskId.localeCompare(b.taskId);
     });
     return tasks;
   }
@@ -5829,6 +6012,7 @@
       if (!reviewTaskIsEligible(task) || excluded.has(task.taskId)) return false;
       return reviewTaskMatchesMode(task, mode);
     });
+    const rankedWords = new Map((model.wordUsage && model.wordUsage.rankedWordIds || []).map((wordId, index) => [wordId, index]));
     tasks.sort((left, right) => {
       const leftState = taskState(left.taskId);
       const rightState = taskState(right.taskId);
@@ -5838,8 +6022,11 @@
       const rightWrong = rightState.lastResult === false ? 0 : 1;
       const leftReviewed = String(leftState.lastReviewed || "");
       const rightReviewed = String(rightState.lastReviewed || "");
+      const leftWordRank = left.item.type === "word" ? (rankedWords.get(left.item.id) ?? Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
+      const rightWordRank = right.item.type === "word" ? (rankedWords.get(right.item.id) ?? Number.MAX_SAFE_INTEGER) : Number.MAX_SAFE_INTEGER;
       return leftDue - rightDue
         || leftWrong - rightWrong
+        || leftWordRank - rightWordRank
         || (Number(leftState.level) || 0) - (Number(rightState.level) || 0)
         || leftReviewed.localeCompare(rightReviewed)
         || left.item.day - right.item.day
@@ -6472,7 +6659,7 @@
 
   function removeSelfStudyStepLocal(lessonId, stepId) {
     const prefix = selfStudyStoragePrefix(lessonId, stepId);
-    ["-draft", "-attempt", "-continue", "-question"].forEach(suffix => localStorage.removeItem(`${prefix}${suffix}`));
+    ["-draft", "-attempt", "-continue", "-question", "-hint"].forEach(suffix => localStorage.removeItem(`${prefix}${suffix}`));
   }
 
   function selfStudyCurrentStep() {
@@ -6528,6 +6715,7 @@
       error.statusCode = response.status;
       throw error;
     }
+    if (path === "/submit") invalidateLibraryUsage();
     return data;
   }
 
@@ -6600,24 +6788,36 @@
   }
 
   function selfStudyStepBodyHtml(step) {
+    const summary = step.type === "summary" && step.automaticSummary && typeof step.automaticSummary === "object" ? step.automaticSummary : null;
     const pronunciationText = step.english || (step.type === "read-aloud" ? step.content : "");
     const pronunciation = step.phonetic || step.pronunciation || pronunciationText
       ? `<div class="self-study-pronunciation">${step.phonetic ? `<span>${escapeHtml(step.phonetic)}</span>` : ""}${step.pronunciation ? `<span>中文辅助：${escapeHtml(step.pronunciation)}</span>` : ""}${speechButtonHtml(pronunciationText, "播放当前英文", { includeSlow: true, slowLabel: "慢速播放当前英文" })}</div>`
       : "";
+    const summaryHtml = summary ? `<section class="self-study-auto-summary" aria-label="系统自动学习总结">
+      <div class="self-study-summary-counts">
+        <span><strong>${Number(summary.completedQuestions) || 0}</strong>完成</span>
+        <span><strong>${Number(summary.independentCorrect) || 0}</strong>独立正确</span>
+        <span><strong>${Number(summary.initiallyIncorrect) || 0}</strong>首答错误</span>
+        <span><strong>${(Number(summary.assistedCompleted) || 0) + (Number(summary.revealedCompleted) || 0)}</strong>提示完成</span>
+      </div>
+      <p>${escapeHtml(summary.text || "系统正在根据实际作答整理总结。").replace(/\n/g, "<br>")}</p>
+      <small>${summary.source === "deterministic-offline" ? "离线确定性总结，联网后仅可补充表述，不会改动统计。" : "本总结只依据实际作答；未练习内容不会被写成错误。"}</small>
+    </section>` : "";
     return `
       ${step.title ? `<h2>${escapeHtml(step.title)}</h2>` : ""}
       ${step.instruction ? `<p class="self-study-instruction">${escapeHtml(step.instruction)}</p>` : ""}
       ${step.passage ? `<div class="self-study-passage">${escapeHtml(step.passage)}</div>` : ""}
       ${step.content ? `<div class="self-study-content">${escapeHtml(step.content)}</div>` : ""}
       ${step.prompt ? `<div class="self-study-prompt">${escapeHtml(step.prompt)}</div>` : ""}
-      ${pronunciation}`;
+      ${pronunciation}
+      ${summaryHtml}`;
   }
 
   function selfStudyAnswerControlHtml(current, step) {
     if (step.status === "completed" && ["choice", "short-answer", "en-zh", "zh-en", "reading-question", "correction"].includes(step.type)) return "";
     if (["teach", "read-aloud"].includes(step.type)) return "";
     const draft = selfStudyDraftValue(current, step);
-    if (step.type === "summary") return `<label class="sr-only" for="selfStudyAnswerInput">你的总结</label><textarea id="selfStudyAnswerInput" rows="5" maxlength="2000" placeholder="请用中文写下今天学到的内容">${escapeHtml(draft)}</textarea>`;
+    if (step.type === "summary") return `<p class="self-study-summary-confirm">确认系统总结后完成当天课程；不再要求你手工概括。</p>`;
     if (step.type === "choice") {
       return `<div class="self-study-choice-list" role="radiogroup" aria-label="选择答案">${(step.choices || []).map(choice => `<label class="self-study-choice"><input type="radio" name="selfStudyChoice" value="${escapeHtml(choice.id)}" ${draft === choice.id ? "checked" : ""}><span><strong>${escapeHtml(choice.id)}.</strong> ${escapeHtml(choice.text)}</span></label>`).join("")}</div>`;
     }
@@ -6636,7 +6836,55 @@
     }
     const correct = latest.correct === true && latest.gradingStatus === "correct";
     feedback.className = `feedback self-study-feedback ${correct ? "is-correct" : latest.gradingStatus === "partial" ? "is-partial" : "is-wrong"}`;
-    feedback.innerHTML = `<strong class="feedback-title">${correct ? "回答正确" : "当前答案还需要订正"}</strong><span class="feedback-answer">你的答案：${escapeHtml(latest.answer || "（未填写）")}</span>${correct && step.referenceAnswer ? `<span class="feedback-answer">参考答案：${escapeHtml(step.referenceAnswer)}</span>` : ""}<span class="feedback-note">${escapeHtml(latest.detailedExplanation || latest.explanation || "请重新检查当前题目。")}</span>${!correct ? `<span class="feedback-note">请修改后重新提交同一道题；不会提前显示完整答案。</span>` : ""}`;
+    const assistance = latest.assistance === "revealed" ? "本题查看过完整答案，不能计为独立答对。" : latest.assistance === "assisted" ? "本题使用过提示，已按提示完成单独记录。" : "";
+    feedback.innerHTML = `<strong class="feedback-title">${correct ? "回答正确" : "当前答案还需要订正"}</strong><span class="feedback-answer">你的答案：${escapeHtml(latest.answer || "（未填写）")}</span>${correct && step.referenceAnswer ? `<span class="feedback-answer">参考答案：${escapeHtml(step.referenceAnswer)}</span>` : ""}${assistance ? `<span class="feedback-note">${escapeHtml(assistance)}</span>` : ""}<span class="feedback-note">${escapeHtml(latest.detailedExplanation || latest.explanation || "请重新检查当前题目。")}</span>${!correct ? `<span class="feedback-note">请修改后重新提交同一道题；不会提前显示完整答案。</span>` : ""}`;
+  }
+
+  function renderSelfStudyHints(step) {
+    const panel = $("#selfStudyHintPanel");
+    const button = $("#selfStudyHintButton");
+    const list = $("#selfStudyHintList");
+    const question = ["choice", "short-answer", "en-zh", "zh-en", "reading-question", "correction"].includes(step && step.type);
+    panel.hidden = !question;
+    if (!question) { list.replaceChildren(); return; }
+    const level = Math.max(0, Math.min(3, Number(step.hintLevel) || 0));
+    const hints = Array.isArray(step.hints) ? step.hints : [];
+    list.innerHTML = hints.map((hint, index) => `<li><span>${index + 1}</span><p>${escapeHtml(hint)}</p></li>`).join("")
+      + (level >= 3 && step.referenceAnswer ? `<li class="is-answer"><span>3</span><p><strong>完整答案</strong><br>${escapeHtml(step.referenceAnswer)}</p></li>` : "");
+    button.hidden = step.status === "completed" || level >= 3;
+    button.disabled = selfStudyRequestInProgress;
+    button.innerHTML = level >= 2
+      ? '<i data-lucide="eye" aria-hidden="true"></i>查看完整答案'
+      : `<i data-lucide="lightbulb" aria-hidden="true"></i>${level ? "再给一个提示" : "查看提示"}`;
+    $("#selfStudyHintNote").textContent = level >= 3
+      ? "已查看完整答案；完成后会按看答案记录，并安排更早复习。"
+      : level ? "本题已标记为提示后完成；你仍可自己作答。" : "提示后仍可继续作答，但会与独立答对分开记录。";
+  }
+
+  async function requestSelfStudyHint() {
+    if (selfStudyRequestInProgress) return;
+    const current = selfStudyState.current;
+    const step = selfStudyCurrentStep();
+    if (!current || !step) return;
+    const level = Math.max(1, Math.min(3, (Number(step.hintLevel) || 0) + 1));
+    if (level === 3 && !window.confirm("查看完整答案后，本题不能计为独立答对。确定继续吗？")) return;
+    const key = `${selfStudyStoragePrefix(current.lessonId, step.stepId)}-hint`;
+    let receipt = readSelfStudyLocal(key);
+    if (!receipt || receipt.level !== level || !receipt.hintId) {
+      receipt = { level, hintId: `hint-${current.lessonId}-${step.stepId}-${level}-${cryptoRandomId()}` };
+      writeSelfStudyLocal(key, receipt);
+    }
+    selfStudyRequestInProgress = true;
+    try {
+      await selfStudyRequest("/hint", { body: { lessonId: current.lessonId, stepId: step.stepId, level, hintId: receipt.hintId, confirmReveal: level === 3 } });
+      localStorage.removeItem(key);
+    } catch (error) {
+      selfStudyStatusMessage = error.message;
+      showToast(error.message);
+    } finally {
+      selfStudyRequestInProgress = false;
+      renderSelfStudyView();
+    }
   }
 
   function renderSelfStudyQuestionHistory(step) {
@@ -6683,6 +6931,7 @@
     $("#selfStudyStepCount").textContent = `第 ${current.stepIndex + 1} / ${current.stages[current.stageIndex]?.totalSteps || 1} 项`;
     $("#selfStudyStepBody").innerHTML = selfStudyStepBodyHtml(step);
     $("#selfStudyAnswerControl").innerHTML = selfStudyAnswerControlHtml(current, step);
+    renderSelfStudyHints(step);
     const submit = $("#submitSelfStudyButton");
     const isQuestion = ["choice", "short-answer", "en-zh", "zh-en", "reading-question", "correction"].includes(step.type);
     if (isQuestion && step.status === "completed") submit.textContent = "继续下一项";
@@ -6690,7 +6939,7 @@
     else if (step.status === "needs-correction") submit.textContent = "提交订正";
     else if (step.type === "teach") submit.textContent = "我已理解，继续";
     else if (step.type === "read-aloud") submit.textContent = "我已朗读，继续";
-    else if (step.type === "summary") submit.textContent = "提交总结并完成";
+    else if (step.type === "summary") submit.textContent = "确认总结并完成";
     else submit.textContent = "提交答案";
     submit.disabled = current.status === "paused" || selfStudyRequestInProgress;
     const pause = $("#pauseSelfStudyButton");
@@ -6782,7 +7031,7 @@
     if (!current || !step || !submit || submit.disabled) return;
     const questionTypes = ["choice", "short-answer", "en-zh", "zh-en", "reading-question", "correction"];
     const canContinue = step.status === "completed" && questionTypes.includes(step.type);
-    const hasNoAnswerControl = ["teach", "read-aloud"].includes(step.type);
+    const hasNoAnswerControl = ["teach", "read-aloud", "summary"].includes(step.type);
     if (!canContinue && !hasNoAnswerControl) return;
     event.preventDefault();
     $("#selfStudyAnswerForm")?.requestSubmit();
@@ -6801,8 +7050,8 @@
       if (step.status === "completed" && ["choice", "short-answer", "en-zh", "zh-en", "reading-question", "correction"].includes(step.type)) {
         await continueSelfStudyQuestion(current, step);
       } else {
-        const answer = currentSelfStudyAnswer();
-        if (!["teach", "read-aloud"].includes(step.type) && !answer) {
+        const answer = step.type === "summary" ? "系统自动总结" : currentSelfStudyAnswer();
+        if (!["teach", "read-aloud", "summary"].includes(step.type) && !answer) {
           $("#selfStudyFormError").textContent = "请先填写或选择答案。";
           $("#selfStudyFormError").hidden = false;
           $("#selfStudyAnswerInput")?.focus();
@@ -6865,11 +7114,22 @@
   }
 
   function setView(view) {
+    view = view === "smart-review" ? "home" : view === "today" ? "today-study" : view === "learning-records" ? "records" : view;
     activeView = view;
     if (view !== "home") clearReviewVariantPoolStatusPolling();
     if (view !== "ai") clearAiGenerationPolling();
+    const categoryForView = value => {
+      if (["today-study", "self-study", "preview", "preview-words", "preview-practice"].includes(value)) return "today-study";
+      if (["home", "mistakes"].includes(value)) return "home";
+      if (["ai"].includes(value)) return "ai";
+      if (["library", "pronunciation"].includes(value)) return "library";
+      if (["records", "progress", "abilities", "notes", "exam", "dictation", "focused"].includes(value)) return "records";
+      return value;
+    };
+    const activeCategory = categoryForView(view);
     $$(".nav-item").forEach(button => {
-      const active = button.dataset.view === view;
+      const buttonCategory = button.classList.contains("top-level-nav-item") ? categoryForView(button.dataset.view) : button.dataset.view;
+      const active = buttonCategory === activeCategory && (button.classList.contains("top-level-nav-item") || button.dataset.view === view);
       button.classList.toggle("is-active", active);
       button.setAttribute("aria-current", active ? "page" : "false");
     });
@@ -6878,6 +7138,7 @@
       section.classList.toggle("is-visible", active);
       section.hidden = !active;
     });
+    if (view === "today-study") { renderTodayStudy(); if (!previewWordsState.loaded) void loadPreviewWords(); if (!selfStudyLoaded) void loadSelfStudy(); }
     if (view === "home") renderHome();
     if (view === "self-study") { renderSelfStudyView(); loadSelfStudy(); }
     if (view === "ai") {
@@ -6888,7 +7149,7 @@
     if (view === "abilities") { renderAbilityView(); loadAbilities(); }
     if (view === "dictation") { renderDictationView(); loadDictation(); }
     if (view === "focused") { renderFocusedView(); loadFocused(); }
-    if (view === "library") renderLibrary();
+    if (view === "library") { renderLibrary(); void loadLibraryUsage(); }
     if (view === "pronunciation") renderPronunciation();
     if (view === "notes") renderNotes();
     if (view === "preview") { renderPreview(); loadPreview(); }
@@ -6896,6 +7157,7 @@
     if (view === "preview-practice") { renderPreviewPractice(); loadPreviewWords(); }
     if (view === "mistakes") renderMistakes();
     if (view === "progress") renderProgress();
+    if (view === "records") renderRecords();
     renderStudyTimer();
     renderAiTutorWindow();
     if (view === "home") scheduleReviewVariantPoolStatusPolling();
@@ -7677,16 +7939,94 @@
     setView("home");
   }
 
+  function libraryUsageRequestKey() {
+    return [libraryUsageFrom, libraryUsageTo, libraryUsageSort, libraryUsageOrder, currentUser && currentUser.id || "", offlineSession ? "offline" : "online"].join("|");
+  }
+
+  function resetLibraryUsageCache() {
+    libraryUsageRequestSerial += 1;
+    libraryUsageRows = new Map();
+    libraryUsageLoading = false;
+    libraryUsageError = "";
+    libraryUsageKey = "";
+  }
+
+  function invalidateLibraryUsage(options = {}) {
+    libraryUsageRequestSerial += 1;
+    if (options.preserveRows !== true) libraryUsageRows = new Map();
+    libraryUsageLoading = false;
+    libraryUsageError = "";
+    libraryUsageKey = "";
+    if (activeView === "library" && currentUser) void loadLibraryUsage(true);
+  }
+
+  function refreshVisibleLibraryUsage() {
+    if (activeView !== "library" || !currentUser || document.visibilityState === "hidden") return;
+    const now = Date.now();
+    if (now - libraryUsageVisibilityRefreshAt < 250) return;
+    libraryUsageVisibilityRefreshAt = now;
+    invalidateLibraryUsage({ preserveRows: true });
+  }
+
+  function usageRowForItem(item) {
+    if (!item || item.type !== "word") return null;
+    return libraryUsageRows.get(String(item.id || "")) || null;
+  }
+
+  function formatUsageDate(value, empty = "未使用") {
+    const text = String(value || "");
+    return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : empty;
+  }
+
+  async function loadLibraryUsage(force = false) {
+    const key = libraryUsageRequestKey();
+    if (!force && key === libraryUsageKey && (libraryUsageRows.size || libraryUsageLoading || libraryUsageError)) return;
+    libraryUsageKey = key;
+    libraryUsageError = "";
+    if (offlineSession || !API_ENABLED || !currentUser) {
+      const rows = model.wordUsage && Array.isArray(model.wordUsage.rows) ? model.wordUsage.rows : [];
+      libraryUsageRows = new Map(rows.map(row => [String(row.id || ""), row]).filter(([id]) => id));
+      if (activeView === "library") renderLibrary();
+      return;
+    }
+    const serial = ++libraryUsageRequestSerial;
+    const requestUserId = String(currentUser.id || "");
+    libraryUsageLoading = true;
+    if (activeView === "library") renderLibrary();
+    try {
+      const query = new URLSearchParams({ sort: libraryUsageSort, order: libraryUsageOrder });
+      if (libraryUsageFrom) query.set("from", libraryUsageFrom);
+      if (libraryUsageTo) query.set("to", libraryUsageTo);
+      const response = await fetch(`/api/word-usage?${query}`, { credentials: "same-origin", cache: "no-store" });
+      const data = await responseJson(response);
+      if (serial !== libraryUsageRequestSerial || !currentUser || String(currentUser.id || "") !== requestUserId) return;
+      const normalized = normalizeClientWordUsage(data);
+      libraryUsageRows = new Map(normalized.rows.map(row => [row.id, row]));
+      model.wordUsage = normalized;
+      saveModel({ remote: false });
+    } catch (error) {
+      if (serial === libraryUsageRequestSerial) libraryUsageError = error.message || "词库统计暂时无法读取";
+    } finally {
+      if (serial === libraryUsageRequestSerial) {
+        libraryUsageLoading = false;
+        if (activeView === "library") renderLibrary();
+      }
+    }
+  }
+
   function renderLibrary() {
     const rawSearch = $("#librarySearch").value || "";
     const searchChinese = normalizeChinese(rawSearch);
     const searchEnglish = normalizeEnglish(rawSearch);
     const day = $("#dayFilter").value;
-    const filteredItems = allItems.filter(item => item.type === libraryType
+    const matchingItems = allItems.filter(item => item.type === libraryType
       && (day === "all" || String(item.day) === day)
       && (!rawSearch.trim()
         || normalizeChinese(item.chinese).includes(searchChinese)
         || normalizeEnglish(item.english).includes(searchEnglish)));
+    const filteredItems = libraryType === "word" && typeof LIBRARY_USAGE.sortItems === "function"
+      ? LIBRARY_USAGE.sortItems(matchingItems, libraryUsageRows, libraryUsageSort, libraryUsageOrder)
+      : matchingItems;
     const requestedPageSize = Number($("#libraryPageSize").value);
     const pageSize = LIBRARY_PAGE_SIZES.includes(requestedPageSize) ? requestedPageSize : LIBRARY_PAGE_SIZES[0];
     if (requestedPageSize !== pageSize) $("#libraryPageSize").value = String(pageSize);
@@ -7694,12 +8034,23 @@
     libraryPage = Math.min(totalPages, Math.max(1, libraryPage));
     const startIndex = (libraryPage - 1) * pageSize;
     const items = filteredItems.slice(startIndex, startIndex + pageSize);
-    $("#libraryHead").innerHTML = libraryType === "word" ? "<tr><th class=\"sequence-cell\">序号</th><th>单词</th><th>发音</th><th>中文</th><th>学习日</th><th></th></tr>" : "<tr><th class=\"sequence-cell\">序号</th><th>句子</th><th>中文</th><th>学习日</th><th></th></tr>";
+    $("#libraryHead").innerHTML = libraryType === "word"
+      ? "<tr><th class=\"sequence-cell\">序号</th><th>单词</th><th>发音</th><th>中文</th><th>使用统计</th><th>学习日</th><th></th></tr>"
+      : "<tr><th class=\"sequence-cell\">序号</th><th>句子</th><th>中文</th><th>学习日</th><th></th></tr>";
     $("#libraryBody").innerHTML = items.map((item, index) => {
       const action = item.preview ? '<span class="type-badge">预习</span>' : `<button class="table-action" type="button" data-practice="${item.id}">练习</button>`;
       const dayLabel = item.preview ? `第 ${item.day} 天预习` : `第 ${item.day} 天`;
+      const usage = usageRowForItem(item);
+      const usageDescription = usage && typeof LIBRARY_USAGE.describeRow === "function"
+        ? LIBRARY_USAGE.describeRow(usage, libraryUsageFrom, libraryUsageTo)
+        : null;
+      const usageHtml = usage
+        ? `<div class="library-usage-cell"><span>今日 ${usage.todayUsage} · 总计 ${usage.totalUsage}</span>${usageDescription?.period ? `<span>${escapeHtml(usageDescription.period)}</span>` : ""}<span>${escapeHtml(usageDescription?.results || `累计对 ${usage.independentCorrect} · 错 ${usage.wrong} · 提示 ${usage.assisted}`)}</span><span>${escapeHtml(usageDescription?.accuracy || `累计正确率 ${usage.accuracy == null ? "—" : `${usage.accuracy}%`}`)}</span><span>最近 ${formatUsageDate(usage.lastUsedDate)}</span><span>下次 ${formatUsageDate(usage.nextDue, "未安排")}</span></div>`
+        : libraryUsageLoading
+          ? '<span class="library-usage-empty">正在刷新…</span>'
+          : '<span class="library-usage-empty">暂无正式使用</span>';
       return libraryType === "word"
-        ? `<tr><td class="sequence-cell">${startIndex + index + 1}</td><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, `播放 ${item.english} 的发音`)}</span></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">${dayLabel}</td><td>${action}</td></tr>`
+        ? `<tr><td class="sequence-cell">${startIndex + index + 1}</td><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, `播放 ${item.english} 的发音`)}</span></td><td class="phonetic-cell">${escapeHtml(item.phonetic)}</td><td>${escapeHtml(item.chinese)}</td><td>${usageHtml}</td><td class="day-cell">${dayLabel}</td><td>${action}</td></tr>`
         : `<tr><td class="sequence-cell">${startIndex + index + 1}</td><td><span class="inline-english"><code>${escapeHtml(item.english)}</code>${speechButtonHtml(item.english, "播放句子发音")}</span></td><td>${escapeHtml(item.chinese)}</td><td class="day-cell">${dayLabel}</td><td>${action}</td></tr>`;
     }).join("");
     const hasItems = filteredItems.length > 0;
@@ -7709,6 +8060,20 @@
     $("#libraryPageStatus").textContent = hasItems ? `第 ${libraryPage} / ${totalPages} 页` : "第 0 / 0 页";
     $("#libraryPrevPage").disabled = !hasItems || libraryPage <= 1;
     $("#libraryNextPage").disabled = !hasItems || libraryPage >= totalPages;
+    const summary = model.wordUsage && model.wordUsage.summary || {};
+    const summaryNode = $("#libraryUsageSummary");
+    const usageScope = typeof LIBRARY_USAGE.dateScope === "function"
+      ? LIBRARY_USAGE.dateScope(libraryUsageFrom, libraryUsageTo)
+      : { active: Boolean(libraryUsageFrom || libraryUsageTo), label: libraryUsageFrom || libraryUsageTo || "全部日期" };
+    if (summaryNode) {
+      summaryNode.textContent = libraryUsageLoading
+        ? "正在读取服务端使用统计…"
+        : libraryUsageError
+          ? libraryUsageError
+          : libraryType === "word"
+            ? `今日已覆盖 ${summary.coveredToday || 0} / ${summary.learnedWords || learnedItems.filter(item => item.type === "word").length} 个词 · 未覆盖 ${summary.uncoveredToday || 0} · 到期/薄弱 ${summary.urgentCoverage || 0}${summary.capacityLimited ? ` · 当前容量不足 ${summary.capacityLimited} 个` : ""} · ${usageScope.active ? `行内所选区间：${usageScope.label}` : "行内对/错/提示/正确率：全部日期累计"}`
+            : "句子使用统计只在实际完成后计入；生成、展示和未作答不计数。";
+    }
     $$('[data-practice]').forEach(button => button.addEventListener("click", () => practiceTask(`${button.dataset.practice}:en-zh`)));
     $$("[data-library-type]").forEach(button => { const active = button.dataset.libraryType === libraryType; button.classList.toggle("is-selected", active); button.setAttribute("aria-pressed", String(active)); });
     refreshIcons();
@@ -7932,22 +8297,38 @@
     refreshIcons();
   }
 
+  function renderMaskedPreviewWordCards(words) {
+    const validIds = new Set(words.map(item => String(item.id || "").trim()).filter(Boolean));
+    previewRevealedIds = Object.fromEntries(Object.entries(previewRevealedIds).filter(([id, revealed]) => validIds.has(id) && revealed === true));
+    model.previewRevealedIds = { ...previewRevealedIds };
+    $$('[data-preview-mask-mode]').forEach(control => {
+      const selected = control.dataset.previewMaskMode === previewMaskMode;
+      control.classList.toggle("is-selected", selected);
+      control.setAttribute("aria-pressed", String(selected));
+    });
+    return words.map(item => {
+      const id = String(item.id || "").trim();
+      const revealed = previewRevealedIds[id] === true;
+      const hideChinese = previewMaskMode === "hide-chinese" && !revealed;
+      const hideEnglish = previewMaskMode === "hide-english" && !revealed;
+      const revealLabel = previewMaskMode === "hide-chinese" ? "查看中文" : "查看英文";
+      const englishHtml = hideEnglish ? "" : '<div class="preview-word-english"><code>' + escapeHtml(item.english) + '</code><span>' + escapeHtml(item.phonetic || "等待正式课讲解") + '</span></div>';
+      const chineseHtml = hideChinese ? "" : '<div class="preview-word-meaning"><span>中文</span><strong>' + escapeHtml(item.chinese) + '</strong></div>';
+      const speechHtml = hideEnglish ? "" : speechButtonHtml(item.english, "慢速播放预习单词 " + item.english);
+      const detailHtml = hideChinese || hideEnglish
+        ? '<p class="preview-word-masked-note">' + escapeHtml(revealed ? "已查看本项内容。" : revealLabel + "后显示本项内容。") + '</p>'
+        : '<p>' + escapeHtml(item.pronunciation || "先点击喇叭听 " + item.english + "，正式课程会详细讲解发音。") + '</p>';
+      const revealHtml = (hideChinese || hideEnglish) ? '<button class="secondary-button compact-button preview-word-reveal" type="button" data-preview-reveal-id="' + escapeHtml(id) + '"><i data-lucide="eye" aria-hidden="true"></i>' + revealLabel + '</button>' : "";
+      return '<article class="preview-word-card"><header><span class="type-badge">第 ' + item.day + ' 天预习</span><span class="preview-word-header-actions">' + speechHtml + revealHtml + '</span></header>' + englishHtml + chineseHtml + detailHtml + '</article>';
+    }).join("");
+  }
+
   function renderPreviewWords() {
     const words = Array.isArray(previewWordsState.words) ? previewWordsState.words : [];
     const nextDay = Math.max(1, Number(previewWordsState.nextDay) || (Number(DATA.currentDay) || 1) + 1);
     const button = $("#refreshPreviewWordsButton");
     button.disabled = previewWordsState.loading;
-    $("#previewWordsGrid").innerHTML = words.map(item => `
-      <article class="preview-word-card">
-        <header>
-          <span class="type-badge">第 ${item.day} 天预习</span>
-          ${speechButtonHtml(item.english, `慢速播放预习单词 ${item.english}`)}
-        </header>
-        <div class="preview-word-english"><code>${escapeHtml(item.english)}</code><span>${escapeHtml(item.phonetic || "等待正式课讲解")}</span></div>
-        <div class="preview-word-meaning"><span>中文</span><strong>${escapeHtml(item.chinese)}</strong></div>
-        <p>${escapeHtml(item.pronunciation || `先点击喇叭听 ${item.english}，正式课程会详细讲解发音。`)}</p>
-      </article>
-    `).join("");
+    $("#previewWordsGrid").innerHTML = renderMaskedPreviewWordCards(words);
     $("#previewWordsEmpty").hidden = words.length > 0 || previewWordsState.loading;
 
     if (previewWordsState.loading && !words.length) {
@@ -7959,6 +8340,14 @@
     } else {
       $("#previewWordsStatus").textContent = `当前课程第 ${previewWordsState.currentDay} 天 · 只显示第 ${nextDay} 天的 ${words.length} 个未学单词`;
     }
+    $$('[data-preview-reveal-id]').forEach(control => control.addEventListener("click", () => {
+      const id = String(control.dataset.previewRevealId || "").trim();
+      if (!id) return;
+      previewRevealedIds[id] = true;
+      model.previewRevealedIds = { ...previewRevealedIds };
+      saveModel({ remote: false });
+      renderPreviewWords();
+    }));
     refreshIcons();
   }
 
@@ -7998,6 +8387,42 @@
     refreshIcons();
   }
 
+  function renderTodayStudy() {
+    const words = previewPracticeWords();
+    const previewSummary = $("#todayStudyPreviewSummary");
+    if (previewSummary) previewSummary.textContent = previewWordsState.loading
+      ? "正在读取下一课…"
+      : previewWordsState.error
+        ? previewWordsState.error
+        : words.length
+          ? `第 ${previewWordsState.nextDay} 天有 ${words.length} 个待学习词，完成正式课程前不会进入复习。`
+          : "当前没有待学习的新词。";
+    const selfSummary = $("#todayStudySelfStudySummary");
+    if (selfSummary) {
+      const current = selfStudyState.current || selfStudyState.availableLesson;
+      selfSummary.textContent = !selfStudyState.hasLessons
+        ? "当前账号还没有同步出门自学课程。"
+        : current
+          ? `第 ${current.studyDay || current.day || "?"} 天课程${selfStudyState.current ? "正在进行" : "可以开始"}。`
+          : selfStudyState.waitingUntil
+            ? `下一课将在 ${selfStudyState.waitingUntil} 开放。`
+            : "课程已完成，等待下一天内容。";
+    }
+    const status = $("#todayStudyStatus");
+    if (status) status.textContent = selfStudyState.enabled
+      ? "出门模式已开启；预习、课程和练习共用同一份账号进度。"
+      : "预习、自学课程和练习会按当前账号与课程日期接续。";
+    refreshIcons();
+  }
+
+  function renderRecords() {
+    const node = $("#recordsProgressSummary");
+    if (!node) return;
+    const stats = todayStats();
+    node.textContent = `今日完成 ${stats.reviewed || 0} 题${stats.reviewed ? `，正确率 ${stats.accuracy}%` : ""}；详细历史、能力和笔记仍可从这里进入。`;
+    refreshIcons();
+  }
+
   function calculateStreak() {
     let count = 0; let cursor = localDate();
     while (model.history[cursor] && model.history[cursor].reviewed > 0) { count += 1; cursor = addDays(cursor, -1); }
@@ -8013,6 +8438,7 @@
     reviewAnswerResetRequested = true;
     localStorage.removeItem(storageKey());
     model = loadModel();
+    syncPreviewMaskGlobals();
     saveModel();
     renderHome(); renderAiView(); renderPreviewPractice(); renderMistakes(); renderProgress();
     showToast("当前账号复习记录已重置");
@@ -8059,6 +8485,8 @@
     });
     ["pointerdown", "keydown", "touchstart", "input", "scroll"].forEach(type => document.addEventListener(type, markStudyActivity, { passive: true }));
     document.addEventListener("visibilitychange", handleStudyVisibility);
+    document.addEventListener("visibilitychange", refreshVisibleLibraryUsage);
+    window.addEventListener("focus", refreshVisibleLibraryUsage);
     window.addEventListener("pagehide", () => stopStudyClock("页面关闭", true));
     $$("[data-view]").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
     $("#prepareOfflinePack").addEventListener("click", prepareOfflinePack);
@@ -8080,6 +8508,7 @@
     document.addEventListener("keydown", handleSelfStudyStepEnter);
     $("#selfStudyAnswerForm").addEventListener("input", persistSelfStudyDraftLocally);
     $("#selfStudyAnswerForm").addEventListener("change", persistSelfStudyDraftLocally);
+    $("#selfStudyHintButton").addEventListener("click", () => void requestSelfStudyHint());
     $("#toggleSelfStudyQuestion").addEventListener("click", () => {
       selfStudyQuestionOpen = !selfStudyQuestionOpen;
       renderSelfStudyView();
@@ -8147,12 +8576,38 @@
       reviewVariantPoolPage += 1;
       renderCurrentReviewVariantPoolBrowser();
     });
-    $$("[data-library-type]").forEach(button => button.addEventListener("click", () => { libraryType = button.dataset.libraryType; libraryPage = 1; renderLibrary(); }));
+    $$("[data-library-type]").forEach(button => button.addEventListener("click", () => { libraryType = button.dataset.libraryType; libraryPage = 1; renderLibrary(); void loadLibraryUsage(); }));
     $("#librarySearch").addEventListener("input", () => { libraryPage = 1; renderLibrary(); });
     $("#dayFilter").addEventListener("change", () => { libraryPage = 1; renderLibrary(); });
     $("#libraryPageSize").addEventListener("change", () => { libraryPage = 1; renderLibrary(); });
     $("#libraryPrevPage").addEventListener("click", () => { libraryPage = Math.max(1, libraryPage - 1); renderLibrary(); });
     $("#libraryNextPage").addEventListener("click", () => { libraryPage += 1; renderLibrary(); });
+    ["#libraryUsageFrom", "#libraryUsageTo"].forEach(selector => $(selector).addEventListener("change", event => {
+      if (selector === "#libraryUsageFrom") libraryUsageFrom = event.target.value;
+      else libraryUsageTo = event.target.value;
+      libraryUsageRows = new Map();
+      libraryPage = 1;
+      void loadLibraryUsage(true);
+    }));
+    $("#libraryUsageSort").addEventListener("change", event => { libraryUsageSort = event.target.value; libraryPage = 1; void loadLibraryUsage(true); });
+    $("#libraryUsageOrder").addEventListener("click", () => {
+      libraryUsageOrder = libraryUsageOrder === "asc" ? "desc" : "asc";
+      const button = $("#libraryUsageOrder");
+      button.dataset.order = libraryUsageOrder;
+      button.innerHTML = `<i data-lucide="${libraryUsageOrder === "asc" ? "arrow-up" : "arrow-down"}" aria-hidden="true"></i><span>${libraryUsageOrder === "asc" ? "升序" : "降序"}</span>`;
+      libraryPage = 1;
+      void loadLibraryUsage(true);
+      refreshIcons();
+    });
+    $("#libraryUsageClear").addEventListener("click", () => {
+      libraryUsageFrom = "";
+      libraryUsageTo = "";
+      $("#libraryUsageFrom").value = "";
+      $("#libraryUsageTo").value = "";
+      libraryUsageRows = new Map();
+      libraryPage = 1;
+      void loadLibraryUsage(true);
+    });
     $$("[data-pronunciation-filter]").forEach(button => button.addEventListener("click", () => {
       pronunciationFilter = button.dataset.pronunciationFilter;
       renderPronunciation();
@@ -8167,6 +8622,14 @@
     });
     $("#refreshPreviewButton").addEventListener("click", loadPreview);
     $("#refreshPreviewWordsButton").addEventListener("click", loadPreviewWords);
+    $$('[data-preview-mask-mode]').forEach(control => control.addEventListener("click", () => {
+      previewMaskMode = ["all", "hide-chinese", "hide-english"].includes(control.dataset.previewMaskMode) ? control.dataset.previewMaskMode : "all";
+      previewRevealedIds = {};
+      model.previewMaskMode = previewMaskMode;
+      model.previewRevealedIds = {};
+      saveModel({ remote: false });
+      renderPreviewWords();
+    }));
     $$('[data-preview-practice-mode]').forEach(button => button.addEventListener("click", () => setPreviewPracticeMode(button.dataset.previewPracticeMode)));
     $("#previewPracticeForm").addEventListener("submit", submitPreviewPractice);
     $("#previewPracticeInput").addEventListener("input", clearPreviewPracticeFormError);
@@ -8179,6 +8642,16 @@
       updateAiPreferences({ model: event.target.value });
       renderAiView();
     });
+    $$('[data-ai-content-type]').forEach(button => button.addEventListener("click", () => {
+      aiStatusMessage = "";
+      updateAiPreferences({ contentType: button.dataset.aiContentType });
+      renderAiView();
+    }));
+    $$('[data-ai-direction]').forEach(button => button.addEventListener("click", () => {
+      aiStatusMessage = "";
+      updateAiPreferences({ direction: button.dataset.aiDirection });
+      renderAiView();
+    }));
     $$('[data-ai-effort]').forEach(button => button.addEventListener("click", () => {
       aiStatusMessage = "";
       updateAiPreferences({ reasoningEffort: button.dataset.aiEffort });
@@ -8388,7 +8861,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=73", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=74", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
@@ -8399,6 +8872,7 @@
     const authenticated = await fetchCurrentUser();
     if (!authenticated) { showAuthView(); refreshIcons(); return; }
     model = loadModel();
+    syncPreviewMaskGlobals();
     if (offlineSession && offlinePack) hydrateOfflinePack(offlinePack);
   }
   showAppView();

@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=73">
+  <link rel="stylesheet" href="styles.css?v=74">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v73">v73</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v74">v74</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -56,49 +56,64 @@
 
     <div class="app-body" id="appBody" hidden>
       <nav class="side-nav" aria-label="主要功能">
-        <button class="nav-item is-active" type="button" data-view="home" aria-current="page">
-          <i data-lucide="layout-dashboard" aria-hidden="true"></i><span>今日复习</span>
+        <button class="nav-item top-level-nav-item" type="button" data-view="today-study" aria-current="false">
+          <i data-lucide="sunrise" aria-hidden="true"></i><span>今日学习</span>
         </button>
-        <button class="nav-item self-study-nav-item" type="button" data-view="self-study" id="selfStudyNavItem" hidden>
-          <i data-lucide="graduation-cap" aria-hidden="true"></i><span>出门自学</span>
+        <button class="nav-item top-level-nav-item is-active" type="button" data-view="home" aria-current="page">
+          <i data-lucide="brain-circuit" aria-hidden="true"></i><span>智能复习</span>
         </button>
-        <button class="nav-item" type="button" data-view="ai" id="aiNavItem">
+        <button class="nav-item top-level-nav-item" type="button" data-view="ai" aria-current="false">
           <i data-lucide="sparkles" aria-hidden="true"></i><span>AI 出题</span>
         </button>
-        <button class="nav-item" type="button" data-view="exam" id="examNavItem">
-          <i data-lucide="clipboard-check" aria-hidden="true"></i><span>试卷</span>
-        </button>
-        <button class="nav-item" type="button" data-view="abilities" id="abilitiesNavItem">
-          <i data-lucide="radar" aria-hidden="true"></i><span>能力分析</span>
-        </button>
-        <button class="nav-item" type="button" data-view="dictation" id="dictationNavItem">
-          <i data-lucide="audio-lines" aria-hidden="true"></i><span>听写</span>
-        </button>
-        <button class="nav-item" type="button" data-view="focused" id="focusedNavItem">
-          <i data-lucide="crosshair" aria-hidden="true"></i><span>定向增强</span>
-        </button>
-        <button class="nav-item" type="button" data-view="library">
+        <button class="nav-item top-level-nav-item" type="button" data-view="library" aria-current="false">
           <i data-lucide="library" aria-hidden="true"></i><span>词句库</span>
         </button>
-        <button class="nav-item" type="button" data-view="pronunciation" id="pronunciationNavItem">
+        <button class="nav-item top-level-nav-item" type="button" data-view="records" aria-current="false">
+          <i data-lucide="history" aria-hidden="true"></i><span>学习记录</span>
+        </button>
+        <button class="nav-item legacy-nav-item is-active" type="button" data-view="home" aria-current="page">
+          <i data-lucide="layout-dashboard" aria-hidden="true"></i><span>今日复习</span>
+        </button>
+        <button class="nav-item legacy-nav-item self-study-nav-item" type="button" data-view="self-study" id="selfStudyNavItem" hidden>
+          <i data-lucide="graduation-cap" aria-hidden="true"></i><span>出门自学</span>
+        </button>
+        <button class="nav-item legacy-nav-item" type="button" data-view="ai" id="aiNavItem">
+          <i data-lucide="sparkles" aria-hidden="true"></i><span>AI 出题</span>
+        </button>
+        <button class="nav-item legacy-nav-item" type="button" data-view="exam" id="examNavItem">
+          <i data-lucide="clipboard-check" aria-hidden="true"></i><span>试卷</span>
+        </button>
+        <button class="nav-item legacy-nav-item" type="button" data-view="abilities" id="abilitiesNavItem">
+          <i data-lucide="radar" aria-hidden="true"></i><span>能力分析</span>
+        </button>
+        <button class="nav-item legacy-nav-item" type="button" data-view="dictation" id="dictationNavItem">
+          <i data-lucide="audio-lines" aria-hidden="true"></i><span>听写</span>
+        </button>
+        <button class="nav-item legacy-nav-item" type="button" data-view="focused" id="focusedNavItem">
+          <i data-lucide="crosshair" aria-hidden="true"></i><span>定向增强</span>
+        </button>
+        <button class="nav-item legacy-nav-item" type="button" data-view="library">
+          <i data-lucide="library" aria-hidden="true"></i><span>词句库</span>
+        </button>
+        <button class="nav-item legacy-nav-item" type="button" data-view="pronunciation" id="pronunciationNavItem">
           <i data-lucide="volume-2" aria-hidden="true"></i><span>发音课</span>
         </button>
-        <button class="nav-item" type="button" data-view="notes">
+        <button class="nav-item legacy-nav-item" type="button" data-view="notes">
           <i data-lucide="notebook-tabs" aria-hidden="true"></i><span>学习笔记</span>
         </button>
-        <button class="nav-item" type="button" data-view="preview" id="previewNavItem">
+        <button class="nav-item legacy-nav-item" type="button" data-view="preview" id="previewNavItem">
           <i data-lucide="book-open" aria-hidden="true"></i><span>每日预习</span>
         </button>
-        <button class="nav-item" type="button" data-view="preview-words" id="previewWordsNavItem">
+        <button class="nav-item legacy-nav-item" type="button" data-view="preview-words" id="previewWordsNavItem">
           <i data-lucide="book-marked" aria-hidden="true"></i><span>预习单词</span>
         </button>
-        <button class="nav-item" type="button" data-view="preview-practice" id="previewPracticeNavItem">
+        <button class="nav-item legacy-nav-item" type="button" data-view="preview-practice" id="previewPracticeNavItem">
           <i data-lucide="languages" aria-hidden="true"></i><span>预习练习</span>
         </button>
-        <button class="nav-item" type="button" data-view="mistakes">
+        <button class="nav-item legacy-nav-item" type="button" data-view="mistakes">
           <i data-lucide="triangle-alert" aria-hidden="true"></i><span>错题本</span>
         </button>
-        <button class="nav-item" type="button" data-view="progress">
+        <button class="nav-item legacy-nav-item" type="button" data-view="progress">
           <i data-lucide="bar-chart-3" aria-hidden="true"></i><span>学习进度</span>
         </button>
         <button class="nav-item ai-settings-nav-item" type="button" id="openAiConfigButton" aria-label="AI 连接设置" hidden>
@@ -114,6 +129,34 @@
           </button>
           <span class="study-plan-dock-time" id="studyPlanDockTime">00:00 / 10:00</span>
           <button class="secondary-button compact-button" type="button" id="studyPlanDockToggle">开始</button>
+        </section>
+
+        <section class="view aggregate-view" id="view-today-study" aria-labelledby="todayStudyTitle" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">TODAY STUDY</p>
+              <h1 id="todayStudyTitle">今日学习</h1>
+              <p class="heading-note" id="todayStudyStatus">预习、自学课程和练习会按当前账号与课程日期接续。</p>
+            </div>
+          </div>
+          <div class="aggregate-grid">
+            <article class="aggregate-item">
+              <div><span class="stat-label">下一课词汇</span><h2>预习单词</h2><p id="todayStudyPreviewSummary">正在读取预习内容…</p></div>
+              <button class="secondary-button" type="button" data-view="preview-words"><i data-lucide="book-marked" aria-hidden="true"></i>查看预习单词</button>
+            </article>
+            <article class="aggregate-item">
+              <div><span class="stat-label">课程材料</span><h2>每日预习</h2><p>查看学习窗口同步的下一课说明和历史预习文档。</p></div>
+              <button class="secondary-button" type="button" data-view="preview"><i data-lucide="book-open" aria-hidden="true"></i>打开每日预习</button>
+            </article>
+            <article class="aggregate-item" id="todayStudySelfStudyCard">
+              <div><span class="stat-label">出门期间</span><h2>完整自学课程</h2><p id="todayStudySelfStudySummary">课程入口仅在账号主动开启出门模式后出现。</p></div>
+              <button class="primary-button" type="button" data-view="self-study"><i data-lucide="graduation-cap" aria-hidden="true"></i>进入自学课程</button>
+            </article>
+            <article class="aggregate-item">
+              <div><span class="stat-label">练习</span><h2>预习练习</h2><p>只记录预习接触，不改变正式掌握等级。</p></div>
+              <button class="secondary-button" type="button" data-view="preview-practice"><i data-lucide="languages" aria-hidden="true"></i>开始预习练习</button>
+            </article>
+          </div>
         </section>
 
         <section class="view is-visible" id="view-home" aria-labelledby="homeTitle">
@@ -374,6 +417,14 @@
               <button class="secondary-button compact-button" type="button" id="pauseSelfStudyButton"><i data-lucide="pause" aria-hidden="true"></i>暂停学习</button>
             </header>
             <div class="self-study-step-body" id="selfStudyStepBody"></div>
+            <section class="self-study-hint-panel" id="selfStudyHintPanel" aria-labelledby="selfStudyHintTitle" hidden>
+              <div class="self-study-hint-heading">
+                <h3 id="selfStudyHintTitle">分级提示</h3>
+                <button class="secondary-button compact-button" type="button" id="selfStudyHintButton"><i data-lucide="lightbulb" aria-hidden="true"></i>查看提示</button>
+              </div>
+              <ol class="self-study-hint-list" id="selfStudyHintList" aria-live="polite"></ol>
+              <p class="self-study-hint-note" id="selfStudyHintNote">提示后仍可继续作答，但会与独立答对分开记录。</p>
+            </section>
             <form class="self-study-answer-form" id="selfStudyAnswerForm">
               <div id="selfStudyAnswerControl"></div>
               <p class="self-study-form-error" id="selfStudyFormError" hidden></p>
@@ -417,6 +468,21 @@
           </div>
 
           <div class="ai-controls" id="aiControls">
+            <div class="ai-control-field ai-choice-control">
+              <span>内容</span>
+              <div class="segmented-control" role="group" aria-label="选择 AI 题目内容">
+                <button type="button" class="segment" data-ai-content-type="word" aria-pressed="false">单词</button>
+                <button type="button" class="segment is-selected" data-ai-content-type="sentence" aria-pressed="true">句子</button>
+              </div>
+            </div>
+            <div class="ai-control-field ai-choice-control">
+              <span>方向</span>
+              <div class="segmented-control" role="group" aria-label="选择翻译方向">
+                <button type="button" class="segment" data-ai-direction="en-zh" aria-pressed="false">英译中</button>
+                <button type="button" class="segment" data-ai-direction="zh-en" aria-pressed="false">中译英</button>
+                <button type="button" class="segment is-selected" data-ai-direction="mixed" aria-pressed="true">混合</button>
+              </div>
+            </div>
             <label class="ai-control-field">
               <span>模型</span>
               <select id="aiModelSelect" aria-label="选择 AI 模型"></select>
@@ -845,6 +911,19 @@
               </select>
             </label>
           </div>
+          <section class="library-usage-panel" aria-labelledby="libraryUsageTitle">
+            <div class="library-usage-heading">
+              <div><span class="stat-label">真实使用覆盖</span><h2 id="libraryUsageTitle">单词记忆曲线与使用统计</h2></div>
+              <p id="libraryUsageSummary" role="status" aria-live="polite">正在读取服务端使用统计…</p>
+            </div>
+            <div class="library-usage-filters">
+              <label class="select-field"><span>开始日期</span><input id="libraryUsageFrom" type="date" aria-label="统计开始日期"></label>
+              <label class="select-field"><span>结束日期</span><input id="libraryUsageTo" type="date" aria-label="统计结束日期"></label>
+              <label class="select-field"><span>排序</span><select id="libraryUsageSort" aria-label="统计排序"><option value="index">原始序号</option><option value="usage">使用次数</option><option value="correct">答对次数</option><option value="wrong">答错次数</option><option value="accuracy">正确率</option><option value="recent">最近使用</option><option value="due">下次到期</option></select></label>
+              <button class="secondary-button compact-button" type="button" id="libraryUsageOrder" data-order="asc"><i data-lucide="arrow-up" aria-hidden="true"></i><span>升序</span></button>
+              <button class="secondary-button compact-button" type="button" id="libraryUsageClear"><i data-lucide="calendar-x" aria-hidden="true"></i><span>全部日期</span></button>
+            </div>
+          </section>
           <div class="table-wrap">
             <table class="data-table">
               <thead id="libraryHead"></thead>
@@ -959,6 +1038,11 @@
               <p class="heading-note" id="previewWordsStatus">正在获取下一课单词…</p>
             </div>
             <div class="preview-words-actions">
+              <div class="segmented-control preview-mask-control" role="group" aria-label="预习显示方式">
+                <button class="segment is-selected" type="button" data-preview-mask-mode="all" aria-pressed="true">全部显示</button>
+                <button class="segment" type="button" data-preview-mask-mode="hide-chinese" aria-pressed="false">遮住中文</button>
+                <button class="segment" type="button" data-preview-mask-mode="hide-english" aria-pressed="false">遮住英文</button>
+              </div>
               <button class="secondary-button compact-button" type="button" data-view="preview-practice" id="openPreviewPracticeButton">
                 <i data-lucide="languages" aria-hidden="true"></i><span>开始预习练习</span>
               </button>
@@ -1026,6 +1110,22 @@
               <p class="preview-history-empty">完成一轮预习练习后，题目、答案和判定会保存在这里。</p>
             </div>
           </section>
+        </section>
+
+        <section class="view aggregate-view" id="view-records" aria-labelledby="recordsTitle" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">LEARNING RECORDS</p>
+              <h1 id="recordsTitle">学习记录</h1>
+              <p class="heading-note">进度、能力、笔记和专项历史统一保存在当前账号。</p>
+            </div>
+          </div>
+          <div class="aggregate-grid records-aggregate-grid">
+            <article class="aggregate-item"><div><span class="stat-label">进度</span><h2>学习进度</h2><p id="recordsProgressSummary">查看完成天数、词句数量和连续学习。</p></div><button class="secondary-button" type="button" data-view="progress"><i data-lucide="bar-chart-3" aria-hidden="true"></i>打开进度</button></article>
+            <article class="aggregate-item"><div><span class="stat-label">能力</span><h2>能力分析</h2><p>只根据服务端正式证据汇总。</p></div><button class="secondary-button" type="button" data-view="abilities"><i data-lucide="radar" aria-hidden="true"></i>查看能力</button></article>
+            <article class="aggregate-item"><div><span class="stat-label">学习材料</span><h2>学习笔记</h2><p>按学习日查看同步的结构化笔记。</p></div><button class="secondary-button" type="button" data-view="notes"><i data-lucide="notebook-tabs" aria-hidden="true"></i>查看笔记</button></article>
+            <article class="aggregate-item"><div><span class="stat-label">专项记录</span><h2>试卷、听写与错题</h2><p>旧入口保留，历史和草稿不会丢失。</p></div><div class="aggregate-actions"><button class="text-button" type="button" data-view="exam">试卷</button><button class="text-button" type="button" data-view="dictation">听写</button><button class="text-button" type="button" data-view="mistakes">错题本</button><button class="text-button" type="button" data-view="focused">定向增强</button></div></article>
+          </div>
         </section>
 
         <section class="view" id="view-mistakes" aria-labelledby="mistakesTitle" hidden>
@@ -1236,19 +1336,20 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=73"></script>
-  <script src="data.js?v=73"></script>
-  <script src="pronunciation-data.js?v=73"></script>
-  <script src="review-variants.js?v=73"></script>
-  <script src="answer-utils.js?v=73"></script>
-  <script src="study-time.js?v=73"></script>
-  <script src="review-session.js?v=73"></script>
-  <script src="review-batch-client.js?v=73"></script>
-  <script src="state-sync-client.js?v=73"></script>
-  <script src="offline-store.js?v=73"></script>
-  <script src="offline-learning.js?v=73"></script>
-  <script src="offline-ai.js?v=73"></script>
-  <script src="offline-replay.js?v=73"></script>
+  <script src="vendor/lucide.min.js?v=74"></script>
+  <script src="data.js?v=74"></script>
+  <script src="pronunciation-data.js?v=74"></script>
+  <script src="review-variants.js?v=74"></script>
+  <script src="answer-utils.js?v=74"></script>
+  <script src="study-time.js?v=74"></script>
+  <script src="review-session.js?v=74"></script>
+  <script src="review-batch-client.js?v=74"></script>
+  <script src="state-sync-client.js?v=74"></script>
+  <script src="library-usage.js?v=74"></script>
+  <script src="offline-store.js?v=74"></script>
+  <script src="offline-learning.js?v=74"></script>
+  <script src="offline-ai.js?v=74"></script>
+  <script src="offline-replay.js?v=74"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1264,7 +1365,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=73";
+      appScript.src = "app.js?v=74";
       document.body.appendChild(appScript);
     })();
   </script>
