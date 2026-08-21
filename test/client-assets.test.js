@@ -118,8 +118,8 @@ test("formal review batch start has bounded recovery and an explicit retry gate"
   const css = read("styles.css");
   const serviceWorker = read("sw.js");
   const server = read("server.js");
-  assert.match(html, /review-batch-client\.js\?v=74/);
-  assert.match(serviceWorker, /review-batch-client\.js\?v=74/);
+  assert.match(html, /review-batch-client\.js\?v=75/);
+  assert.match(serviceWorker, /review-batch-client\.js\?v=75/);
   assert.match(html, /id="reviewBatchStartRetryActions"[\s\S]*id="reviewBatchStartRetryButton"[\s\S]*重试保存题目快照/);
   assert.match(app, /REVIEW_BATCH_START_TIMEOUT_MS = Number\(REVIEW_BATCH_CLIENT\.DEFAULT_START_TIMEOUT_MS\) \|\| 12000/);
   assert.match(app, /REVIEW_BATCH_RECOVERY_TIMEOUT_MS = Number\(REVIEW_BATCH_CLIENT\.DEFAULT_RECOVERY_TIMEOUT_MS\) \|\| 6000/);
@@ -183,8 +183,26 @@ test("AI settings UI manages providers and exposes manual or automatic routing",
   const nav = html.slice(html.indexOf('<nav class="side-nav"'), html.indexOf("</nav>"));
   const aiHeading = html.slice(html.indexOf('id="view-ai"'), html.indexOf('id="aiControls"'));
   assert.match(nav, /id="openAiConfigButton"/);
+  assert.ok(nav.indexOf('data-view="records"') < nav.indexOf('id="openAiConfigButton"'), "AI settings should follow learning records in the primary nav");
   assert.doesNotMatch(aiHeading, /id="openAiConfigButton"/);
-  assert.match(css, /\.ai-settings-nav-item\s*\{[^}]*margin-top:\s*auto/s);
+  assert.match(css, /\.ai-settings-nav-item\s*\{[^}]*margin-top:\s*0/s);
+  assert.match(html, /class="ai-control-field ai-choice-control"/);
+  assert.match(html, /class="ai-control-field ai-model-control"/);
+  assert.match(html, /class="ai-control-field ai-effort-field"/);
+  assert.match(html, /class="ai-control-field compact-control ai-question-count-control"/);
+  assert.match(html, /class="ai-control-field compact-control ai-group-count-control"/);
+  assert.match(css, /\.ai-controls\s*\{[^}]*grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\)/s);
+  assert.match(css, /\.ai-effort-field\s*\{[^}]*grid-column:\s*span\s*3/s);
+  assert.match(css, /@media \(max-width: 1100px\)[\s\S]*\.ai-controls\s*\{[^}]*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s);
+  assert.match(html, /id="aiHistoryPagination"[\s\S]*id="aiHistoryPrevPage"[\s\S]*id="aiHistoryPageStatus"[\s\S]*id="aiHistoryNextPage"/);
+  assert.match(app, /const AI_HISTORY_PAGE_SIZE = 10/);
+  assert.match(app, /const pageGroups = groups\.slice\(startIndex, startIndex \+ AI_HISTORY_PAGE_SIZE\)/);
+  assert.match(app, /data-ai-history-details/);
+  assert.match(app, /details\.addEventListener\("toggle"/);
+  assert.match(app, /renderAiHistoryQuestions\(group\)/);
+  assert.match(app, /aiHistoryPage <= 1/);
+  assert.match(app, /aiHistoryPage >= totalPages/);
+  assert.match(css, /\.ai-history-pagination\[hidden\]\s*\{[^}]*display:\s*none/s);
 });
 
 test("mistake book automatically closes mastered items while retaining a two-answer threshold", () => {
@@ -253,14 +271,14 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=74/);
+  assert.match(html, /pronunciation-data\.js\?v=75/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /phonemeSoundButtonHtml\(item\)/);
   assert.match(app, /speechButtonHtml\(item\.example, `慢速播放完整示范词/);
   assert.match(app, /data-pronunciation-sound/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=74/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=75/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -316,8 +334,8 @@ test("library paginates filtered English and Chinese results with continuous seq
   assert.match(app, /class=\\"sequence-cell\\">序号/);
   assert.match(app, /normalizeChinese\(item\.chinese\)\.includes\(searchChinese\)/);
   assert.match(app, /normalizeEnglish\(item\.english\)\.includes\(searchEnglish\)/);
-  assert.match(html, /library-usage\.js\?v=74/);
-  assert.match(serviceWorker, /library-usage\.js\?v=74/);
+  assert.match(html, /library-usage\.js\?v=75/);
+  assert.match(serviceWorker, /library-usage\.js\?v=75/);
   assert.match(app, /LIBRARY_USAGE\.sortItems\(matchingItems, libraryUsageRows, libraryUsageSort, libraryUsageOrder\)/);
   assert.match(libraryUsage, /Planned\/preview words do not have formal usage rows/);
   assert.match(app, /filteredItems\.slice\(startIndex, startIndex \+ pageSize\)/);
@@ -539,8 +557,8 @@ test("remote state saves are narrow, serialized, and skip server-authoritative r
   const serviceWorker = read("sw.js");
   const server = read("server.js");
   const stateSync = read("state-sync-client.js");
-  assert.match(html, /state-sync-client\.js\?v=74/);
-  assert.match(serviceWorker, /state-sync-client\.js\?v=74/);
+  assert.match(html, /state-sync-client\.js\?v=75/);
+  assert.match(serviceWorker, /state-sync-client\.js\?v=75/);
   assert.match(app, /STATE_SYNC\.createStateSaveQueue/);
   assert.match(app, /remoteStateQueue\.scheduleState\(model/);
   assert.match(app, /remoteStateQueue\?\.markServerState\(remote\)/);
@@ -670,7 +688,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 74", () => {
+test("PWA client assets consistently use the displayed cache version 75", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -681,8 +699,8 @@ test("PWA client assets consistently use the displayed cache version 74", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "74");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v74"/);
+  assert.equal(displayedVersion[1], "75");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v75"/);
 });
 
 test("complete self-study exposes one-step teaching, recovery, questions, and explicit continuation controls", () => {
@@ -740,10 +758,10 @@ test("offline travel mode is explicit, account-bound, FIFO replayed, and never c
   assert.match(html, /id="deleteOfflinePack"/);
   assert.match(html, /id="offlinePackStatus"/);
   assert.match(html, /id="startNextOfflineAiBatch"/);
-  assert.match(html, /offline-store\.js\?v=74/);
-  assert.match(html, /offline-learning\.js\?v=74/);
-  assert.match(html, /offline-ai\.js\?v=74/);
-  assert.match(html, /offline-replay\.js\?v=74/);
+  assert.match(html, /offline-store\.js\?v=75/);
+  assert.match(html, /offline-learning\.js\?v=75/);
+  assert.match(html, /offline-ai\.js\?v=75/);
+  assert.match(html, /offline-replay\.js\?v=75/);
   assert.match(app, /function enterPreparedOfflineSession\(\)/);
   assert.match(app, /offlineStore\.activeAccountId\(\) !== accountId/);
   assert.match(app, /async function replayOfflineOutbox\(\)/);
@@ -760,8 +778,8 @@ test("offline travel mode is explicit, account-bound, FIFO replayed, and never c
   assert.doesNotMatch(`${app}\n${server}`, /\/api\/offline\/replay/);
   assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)\) return/);
   assert.doesNotMatch(serviceWorker, /\/api\/state/);
-  assert.match(serviceWorker, /offline-store\.js\?v=74/);
-  assert.match(serviceWorker, /offline-replay\.js\?v=74/);
+  assert.match(serviceWorker, /offline-store\.js\?v=75/);
+  assert.match(serviceWorker, /offline-replay\.js\?v=75/);
   assert.match(css, /@media \(max-width: 520px\)[\s\S]*\.self-study-mode-actions button:not\(\.offline-pack-delete\)/);
 });
 
@@ -795,6 +813,6 @@ test("daily study plan offers six free-choice projects and records sixty minutes
   assert.doesNotMatch(app, /String\(stage\.index \+ 1\)/);
   assert.doesNotMatch(app, /按顺序完成/);
   assert.doesNotMatch(html, /按顺序学习/);
-  assert.match(html, /study-time\.js\?v=74/);
-  assert.match(serviceWorker, /study-time\.js\?v=74/);
+  assert.match(html, /study-time\.js\?v=75/);
+  assert.match(serviceWorker, /study-time\.js\?v=75/);
 });

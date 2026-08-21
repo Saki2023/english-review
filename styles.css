@@ -63,7 +63,7 @@ button:disabled { cursor: wait; opacity: 0.62; }
 .nav-item svg { width: 17px; height: 17px; }
 .nav-item:hover { color: var(--primary-deep); background: var(--surface-soft); }
 .nav-item.is-active { color: var(--primary-deep); background: var(--primary-soft); font-weight: 500; }
-.ai-settings-nav-item { margin-top: auto; }
+.ai-settings-nav-item { margin-top: 0; }
 
 .main-content { width: min(1040px, 100%); padding: 44px 56px 64px; margin: 0 auto; }
 .main-content:has(#view-exam.is-visible) { width: min(1420px, 100%); }
@@ -313,13 +313,16 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .self-study-complete { margin-top: 16px; }
 .self-study-complete .primary-button { margin-left: auto; }
 
-.ai-controls { display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(210px, 1fr) 100px 100px auto; align-items: end; gap: 16px; margin-bottom: 24px; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.ai-controls { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); align-items: end; gap: 16px; margin-bottom: 24px; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .ai-control-field { min-width: 0; display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
 .ai-control-field > select { width: 100%; height: 38px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--ink); background: var(--surface); }
+.ai-choice-control, .ai-model-control { grid-column: span 2; }
+.ai-effort-field { grid-column: span 3; }
+.ai-question-count-control, .ai-group-count-control, .ai-generate-button { grid-column: span 1; }
 .ai-control-field .segmented-control { width: 100%; }
 .ai-control-field .segment { flex: 1; min-width: 0; }
 .ai-effort-control .segment { padding-inline: 5px; white-space: nowrap; }
-.ai-generate-button { min-width: 118px; height: 38px; }
+.ai-generate-button { width: 100%; min-width: 0; height: 38px; }
 .ai-state { min-height: 260px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
 .ai-state svg { width: 30px; height: 30px; color: var(--primary); }
 .ai-state strong { color: var(--ink); font-size: 15px; font-weight: 500; }
@@ -574,6 +577,8 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .ai-history-answers > div { display: grid; grid-template-columns: 68px minmax(0, 1fr); gap: 10px; font-size: 12px; line-height: 1.55; }
 .ai-history-answers dt { color: var(--muted); }
 .ai-history-answers dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+.ai-history-pagination[hidden] { display: none; }
+.ai-history-pagination { margin-top: 8px; }
 
 .library-controls { justify-content: flex-start; flex-wrap: wrap; }
 .library-usage-panel { margin: 4px 0 18px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-soft); }
@@ -868,6 +873,12 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .auth-submit { width: 100%; margin-top: 15px; }
 .auth-feedback { margin: 14px 0 0; padding: 10px 12px; border-radius: 6px; color: #8e3333; background: var(--danger-soft); font-size: 12px; line-height: 1.5; }
 
+@media (max-width: 1100px) {
+  .ai-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ai-choice-control, .ai-model-control, .ai-effort-field, .ai-question-count-control, .ai-group-count-control, .ai-generate-button { grid-column: auto; }
+  .ai-generate-button { grid-column: 1 / -1; }
+}
+
 @media (max-width: 760px) {
   .aggregate-grid { grid-template-columns: 1fr; }
   .aggregate-item { padding: 16px; }
@@ -903,7 +914,8 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
   .review-panel { padding: 20px 16px 22px; }
   .question-area { padding: 38px 0 3px; }
   .prompt-text { font-size: 30px; }
-  .ai-controls { grid-template-columns: minmax(180px, 1fr) minmax(210px, 1fr); }
+  .ai-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ai-choice-control, .ai-model-control, .ai-effort-field, .ai-question-count-control, .ai-group-count-control { grid-column: auto; }
   .ai-generate-button { grid-column: 1 / -1; width: 100%; }
   .exam-controls { grid-template-columns: minmax(180px, 1fr) minmax(220px, 1fr); }
   .exam-options { grid-column: 1; }

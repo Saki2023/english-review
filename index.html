@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=74">
+  <link rel="stylesheet" href="styles.css?v=75">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v74">v74</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v75">v75</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -71,6 +71,9 @@
         <button class="nav-item top-level-nav-item" type="button" data-view="records" aria-current="false">
           <i data-lucide="history" aria-hidden="true"></i><span>学习记录</span>
         </button>
+        <button class="nav-item ai-settings-nav-item" type="button" id="openAiConfigButton" aria-label="AI 连接设置" hidden>
+          <i data-lucide="settings-2" aria-hidden="true"></i><span>AI 设置</span>
+        </button>
         <button class="nav-item legacy-nav-item is-active" type="button" data-view="home" aria-current="page">
           <i data-lucide="layout-dashboard" aria-hidden="true"></i><span>今日复习</span>
         </button>
@@ -115,9 +118,6 @@
         </button>
         <button class="nav-item legacy-nav-item" type="button" data-view="progress">
           <i data-lucide="bar-chart-3" aria-hidden="true"></i><span>学习进度</span>
-        </button>
-        <button class="nav-item ai-settings-nav-item" type="button" id="openAiConfigButton" aria-label="AI 连接设置" hidden>
-          <i data-lucide="settings-2" aria-hidden="true"></i><span>AI 设置</span>
         </button>
       </nav>
 
@@ -483,11 +483,11 @@
                 <button type="button" class="segment is-selected" data-ai-direction="mixed" aria-pressed="true">混合</button>
               </div>
             </div>
-            <label class="ai-control-field">
+            <label class="ai-control-field ai-model-control">
               <span>模型</span>
               <select id="aiModelSelect" aria-label="选择 AI 模型"></select>
             </label>
-            <div class="ai-control-field">
+            <div class="ai-control-field ai-effort-field">
               <span>强度</span>
               <div class="segmented-control ai-effort-control" role="group" aria-label="AI 推理强度">
                 <button type="button" class="segment" data-ai-effort="low" aria-pressed="false" title="速度优先">轻度</button>
@@ -497,14 +497,14 @@
                 <button type="button" class="segment" data-ai-effort="max" aria-pressed="false" title="最深推理，耗时最长">最高</button>
               </div>
             </div>
-            <label class="ai-control-field compact-control">
+            <label class="ai-control-field compact-control ai-question-count-control">
               <span>每组题数</span>
               <select id="aiQuestionCount" aria-label="选择题目数量">
                 <option value="5">5 题</option>
                 <option value="10">10 题</option>
               </select>
             </label>
-            <label class="ai-control-field compact-control">
+            <label class="ai-control-field compact-control ai-group-count-control">
               <span>生成组数</span>
               <select id="aiGroupCount" aria-label="选择一次生成的题组数量">
                 <option value="1">1 组</option>
@@ -591,6 +591,14 @@
               <p id="aiHistorySummary">暂无做题记录</p>
             </div>
             <div class="ai-history-list" id="aiHistoryList"></div>
+            <div class="ai-history-pagination library-pagination" id="aiHistoryPagination" hidden>
+              <p id="aiHistoryPageSummary" aria-live="polite">共 0 组</p>
+              <div class="library-page-actions">
+                <button class="secondary-button library-page-button" type="button" id="aiHistoryPrevPage">上一页</button>
+                <span id="aiHistoryPageStatus" aria-live="polite">第 0 / 0 页</span>
+                <button class="secondary-button library-page-button" type="button" id="aiHistoryNextPage">下一页</button>
+              </div>
+            </div>
           </section>
         </section>
 
@@ -1336,20 +1344,20 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=74"></script>
-  <script src="data.js?v=74"></script>
-  <script src="pronunciation-data.js?v=74"></script>
-  <script src="review-variants.js?v=74"></script>
-  <script src="answer-utils.js?v=74"></script>
-  <script src="study-time.js?v=74"></script>
-  <script src="review-session.js?v=74"></script>
-  <script src="review-batch-client.js?v=74"></script>
-  <script src="state-sync-client.js?v=74"></script>
-  <script src="library-usage.js?v=74"></script>
-  <script src="offline-store.js?v=74"></script>
-  <script src="offline-learning.js?v=74"></script>
-  <script src="offline-ai.js?v=74"></script>
-  <script src="offline-replay.js?v=74"></script>
+  <script src="vendor/lucide.min.js?v=75"></script>
+  <script src="data.js?v=75"></script>
+  <script src="pronunciation-data.js?v=75"></script>
+  <script src="review-variants.js?v=75"></script>
+  <script src="answer-utils.js?v=75"></script>
+  <script src="study-time.js?v=75"></script>
+  <script src="review-session.js?v=75"></script>
+  <script src="review-batch-client.js?v=75"></script>
+  <script src="state-sync-client.js?v=75"></script>
+  <script src="library-usage.js?v=75"></script>
+  <script src="offline-store.js?v=75"></script>
+  <script src="offline-learning.js?v=75"></script>
+  <script src="offline-ai.js?v=75"></script>
+  <script src="offline-replay.js?v=75"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1365,7 +1373,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=74";
+      appScript.src = "app.js?v=75";
       document.body.appendChild(appScript);
     })();
   </script>

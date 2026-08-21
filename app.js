@@ -55,6 +55,7 @@
   const INTERVALS = [1, 3, 7, 14, 30, 60];
   const AI_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
   const AI_GROUP_COUNTS = [1, 2, 3, 5];
+  const AI_HISTORY_PAGE_SIZE = 10;
   const AI_CONTENT_TYPES = ["word", "sentence"];
   const AI_DIRECTIONS = ["mixed", "en-zh", "zh-en"];
   const AI_EFFORT_LABELS = { low: "轻度", medium: "中", high: "高", xhigh: "极高", max: "最高" };
@@ -111,6 +112,7 @@
   let libraryUsageSort = "index";
   let libraryUsageOrder = "asc";
   let libraryUsageVisibilityRefreshAt = 0;
+  let aiHistoryPage = 1;
   let previewMaskMode = "all";
   let previewRevealedIds = {};
   let pronunciationFilter = "learned";
@@ -2131,6 +2133,7 @@
     aiGenerationRetryRequest = null;
     aiGenerationPollInProgress = false;
     aiQueueClearInProgress = false;
+    aiHistoryPage = 1;
     [$("#generateAiQuestions"), $("#startNextAiBatch"), $("#startNextOfflineAiBatch"), $("#generateAnotherAiSet")].filter(Boolean).forEach(button => setBusyButton(button, false, ""));
   }
 
@@ -3085,6 +3088,21 @@
     }).sort((left, right) => String(right.latestAt || right.createdAt || "").localeCompare(String(left.latestAt || left.createdAt || "")) || right.latestOrder - left.latestOrder);
   }
 
+  function renderAiHistoryQuestions(group) {
+    return group.questions.map((item, index) => {
+      const number = Number(item.questionNumber) || index + 1;
+      return `<article class="ai-history-question">
+        <div class="ai-history-question-meta"><span>第 ${number} 题 · ${formatDirection(item.direction)}</span><div class="ai-history-question-actions"><span class="ai-history-result ${item.gradingStatus === "partial" ? "is-partial" : item.correct === true ? "is-correct" : "is-wrong"}">${item.gradingStatus === "partial" ? "部分正确" : item.correct === true ? "正确" : "错误"}</span><button class="text-button ai-history-ask" type="button" data-ai-history-ask="${escapeHtml(item.id)}"><i data-lucide="message-circle-question" aria-hidden="true"></i>询问</button></div></div>
+          <div class="ai-history-prompt"><span class="inline-english">${escapeHtml(item.prompt || "（题目未记录）")}${item.direction === "en-zh" ? speechButtonHtml(item.prompt, "播放题目发音") : ""}</span></div>
+          <dl class="ai-history-answers">
+          <div><dt>你的答案</dt><dd>${escapeHtml(item.userAnswer || "（未填写）")}</dd></div>
+          <div><dt>参考答案</dt><dd><span class="inline-english">${escapeHtml(item.correctAnswer || "（未记录）")}${item.direction === "zh-en" ? speechButtonHtml(item.correctAnswer, "播放参考答案") : ""}</span></dd></div>
+          <div><dt>${item.correct === true && item.gradingStatus !== "partial" ? "判定说明" : "错误原因"}</dt><dd>${escapeHtml(item.detailedExplanation || buildTranslationExplanation({ direction: item.direction, referenceAnswer: item.correctAnswer, answer: item.userAnswer, correct: item.correct === true, gradingStatus: item.gradingStatus, explanation: item.explanation, problemWords: item.problemWords }))}</dd></div>
+        </dl>
+      </article>`;
+    }).join("");
+  }
+
   function renderAiHistory() {
     const practice = normalizeClientAiPractice(model.aiPractice);
     const groups = groupAiHistory(practice);
@@ -3093,36 +3111,52 @@
     const accuracy = questions.length ? Math.round((earned / questions.length) * 100) : 0;
     $("#aiHistorySummary").textContent = questions.length ? `${groups.length} 组 · ${questions.length} 题 · 正确率 ${accuracy}%` : "暂无做题记录";
     const list = $("#aiHistoryList");
+    const pagination = $("#aiHistoryPagination");
+    const pageStatus = $("#aiHistoryPageStatus");
+    const pageSummary = $("#aiHistoryPageSummary");
     if (!groups.length) {
       list.innerHTML = `<div class="ai-history-empty"><i data-lucide="history" aria-hidden="true"></i><span>暂无做题记录</span></div>`;
+      if (pagination) pagination.hidden = true;
+      if (pageStatus) pageStatus.textContent = "第 0 / 0 页";
+      if (pageSummary) pageSummary.textContent = "共 0 组";
       refreshIcons();
       return;
     }
-    list.innerHTML = groups.map(group => {
+    const totalPages = Math.max(1, Math.ceil(groups.length / AI_HISTORY_PAGE_SIZE));
+    aiHistoryPage = Math.min(Math.max(1, Number(aiHistoryPage) || 1), totalPages);
+    const startIndex = (aiHistoryPage - 1) * AI_HISTORY_PAGE_SIZE;
+    const pageGroups = groups.slice(startIndex, startIndex + AI_HISTORY_PAGE_SIZE);
+    if (pagination) pagination.hidden = false;
+    if (pageStatus) pageStatus.textContent = `第 ${aiHistoryPage} / ${totalPages} 页`;
+    if (pageSummary) pageSummary.textContent = `共 ${groups.length} 组 · 本页 ${pageGroups.length} 组`;
+    const previousPage = $("#aiHistoryPrevPage");
+    const nextPage = $("#aiHistoryNextPage");
+    if (previousPage) previousPage.disabled = aiHistoryPage <= 1;
+    if (nextPage) nextPage.disabled = aiHistoryPage >= totalPages;
+    list.innerHTML = pageGroups.map(group => {
       const groupScore = group.questions.reduce((sum, item) => sum + aiQuestionScore(item), 0);
       const complete = group.questions.length >= group.expectedCount;
       const modelLabel = [group.providerName, group.model, AI_EFFORT_LABELS[group.reasoningEffort]].filter(Boolean).join(" · ") || "历史题组";
-      const questionRows = group.questions.map((item, index) => {
-        const number = Number(item.questionNumber) || index + 1;
-        return `<article class="ai-history-question">
-          <div class="ai-history-question-meta"><span>第 ${number} 题 · ${formatDirection(item.direction)}</span><div class="ai-history-question-actions"><span class="ai-history-result ${item.gradingStatus === "partial" ? "is-partial" : item.correct === true ? "is-correct" : "is-wrong"}">${item.gradingStatus === "partial" ? "部分正确" : item.correct === true ? "正确" : "错误"}</span><button class="text-button ai-history-ask" type="button" data-ai-history-ask="${escapeHtml(item.id)}"><i data-lucide="message-circle-question" aria-hidden="true"></i>询问</button></div></div>
-            <div class="ai-history-prompt"><span class="inline-english">${escapeHtml(item.prompt || "（题目未记录）")}${item.direction === "en-zh" ? speechButtonHtml(item.prompt, "播放题目发音") : ""}</span></div>
-            <dl class="ai-history-answers">
-            <div><dt>你的答案</dt><dd>${escapeHtml(item.userAnswer || "（未填写）")}</dd></div>
-            <div><dt>参考答案</dt><dd><span class="inline-english">${escapeHtml(item.correctAnswer || "（未记录）")}${item.direction === "zh-en" ? speechButtonHtml(item.correctAnswer, "播放参考答案") : ""}</span></dd></div>
-            <div><dt>${item.correct === true && item.gradingStatus !== "partial" ? "判定说明" : "错误原因"}</dt><dd>${escapeHtml(item.detailedExplanation || buildTranslationExplanation({ direction: item.direction, referenceAnswer: item.correctAnswer, answer: item.userAnswer, correct: item.correct === true, gradingStatus: item.gradingStatus, explanation: item.explanation, problemWords: item.problemWords }))}</dd></div>
-          </dl>
-        </article>`;
-      }).join("");
       return `<details class="ai-history-group">
         <summary>
           <div class="ai-history-group-main"><strong>${escapeHtml(formatAiHistoryTime(group.createdAt, group.latestAt))}</strong><span>${escapeHtml(modelLabel)}</span></div>
           <div class="ai-history-score"><strong>${formatQuestionScore(groupScore)} / ${group.questions.length}</strong><span>${complete ? "已完成" : `已做 ${group.questions.length} / ${group.expectedCount}`}</span></div>
           <i data-lucide="chevron-down" aria-hidden="true"></i>
         </summary>
-        <div class="ai-history-questions">${questionRows}</div>
+        <div class="ai-history-questions" data-ai-history-details="${escapeHtml(group.id)}"></div>
       </details>`;
     }).join("");
+    list.querySelectorAll("details.ai-history-group").forEach(details => {
+      details.addEventListener("toggle", () => {
+        if (!details.open || details.dataset.aiHistoryRendered === "true") return;
+        const group = pageGroups.find(item => item.id === details.querySelector("[data-ai-history-details]")?.dataset.aiHistoryDetails);
+        if (!group) return;
+        const questions = details.querySelector("[data-ai-history-details]");
+        questions.innerHTML = renderAiHistoryQuestions(group);
+        details.dataset.aiHistoryRendered = "true";
+        refreshIcons();
+      });
+    });
     refreshIcons();
   }
 
@@ -8724,6 +8758,17 @@
       const target = aiTutorTargetForHistory(item);
       if (target) openAiTutorWindow(target);
     });
+    $("#aiHistoryPrevPage").addEventListener("click", () => {
+      if (aiHistoryPage <= 1) return;
+      aiHistoryPage -= 1;
+      renderAiHistory();
+    });
+    $("#aiHistoryNextPage").addEventListener("click", () => {
+      const totalPages = Math.max(1, Math.ceil(groupAiHistory(normalizeClientAiPractice(model.aiPractice)).length / AI_HISTORY_PAGE_SIZE));
+      if (aiHistoryPage >= totalPages) return;
+      aiHistoryPage += 1;
+      renderAiHistory();
+    });
     $("#aiTutorDragHandle").addEventListener("pointerdown", startAiTutorDrag);
     $("#aiTutorDragHandle").addEventListener("pointermove", moveAiTutorWindow);
     $("#aiTutorDragHandle").addEventListener("pointerup", endAiTutorDrag);
@@ -8861,7 +8906,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=74", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=75", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
