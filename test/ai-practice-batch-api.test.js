@@ -304,6 +304,140 @@ test("AI practice uses formal word-bank meanings for generation and blocks a con
   }
 });
 
+test("offline AI recovery restores the signed or legacy original set without duplicating formal evidence", async () => {
+  const dataDir = temporaryDataDir();
+  const store = loadUsers(dataDir);
+  const owner = createUser(store, { username: "offline-recovery-owner", password: "offline-recovery-owner-password" });
+  createUser(store, { username: "offline-recovery-other", password: "offline-recovery-other-password" });
+  saveUsers(dataDir, store);
+  const setId = "legacy-offline-word-set";
+  const localSet = {
+    id: setId,
+    batchId: "legacy-offline-batch",
+    contentType: "word",
+    direction: "en-zh",
+    requestedCount: 1,
+    groupNumber: 1,
+    groupCount: 1,
+    createdAt: "2026-08-22T00:00:00.000Z",
+    questions: [{
+      id: "legacy-offline-q1",
+      contentType: "word",
+      wordId: "d1-i",
+      direction: "en-zh",
+      english: "I",
+      chinese: "我",
+      acceptedEnglish: ["I"],
+      acceptedChinese: ["我"],
+      userAnswer: "我"
+    }],
+    index: 0,
+    phase: "answering",
+    completed: false,
+    updatedAt: "2026-08-22T00:01:00.000Z"
+  };
+  const stateFile = path.join(dataDir, "user-states.json");
+  fs.writeFileSync(stateFile, `${JSON.stringify({ schema: 1, users: { [owner.id]: { aiPractice: { currentSet: localSet, queuedSets: [], history: [] } } } })}\n`, "utf8");
+  const clearOwnerCurrentSet = () => {
+    const saved = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    saved.users[owner.id].aiPractice.currentSet = null;
+    fs.writeFileSync(stateFile, `${JSON.stringify(saved)}\n`, "utf8");
+  };
+  const evidence = state => ({
+    attempts: state.attempts,
+    mistakes: state.mistakes,
+    history: state.history,
+    wordUsage: state.wordUsage,
+    taskStates: state.taskStates
+  });
+  let app;
+  try {
+    app = await startApp(dataDir);
+    let cookie = await login(app.baseUrl, "offline-recovery-owner", "offline-recovery-owner-password");
+    let otherCookie = await login(app.baseUrl, "offline-recovery-other", "offline-recovery-other-password");
+    const before = (await request(app.baseUrl, cookie, "/api/state")).body;
+    const pack = await request(app.baseUrl, cookie, "/api/offline/pack");
+    assert.equal(pack.response.status, 200);
+    assert.equal(pack.body.aiPractice.currentSet.id, setId);
+    assert.equal(pack.body.aiPractice.currentSet.questions[0].prompt, "I");
+    assert.equal(pack.body.aiPractice.currentSet.questions[0].userAnswer, "我");
+    const signed = pack.body.aiPractice.recoveryReceipts.find(item => item.setId === setId);
+    assert.match(signed.receipt, /^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+    assert.doesNotMatch(signed.receipt, /legacy-offline|"english"|"chinese"|我/);
+
+    await stopApp(app);
+    clearOwnerCurrentSet();
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "offline-recovery-owner", "offline-recovery-owner-password");
+    otherCookie = await login(app.baseUrl, "offline-recovery-other", "offline-recovery-other-password");
+    assert.equal((await request(app.baseUrl, cookie, "/api/ai/questions/batch")).body.practice.currentSet, null);
+    const reviewSnapshot = structuredClone(pack.body.aiPractice.currentSet);
+    reviewSnapshot.phase = "review";
+    reviewSnapshot.gradeRequestId = "offline-stable-grade";
+    const recovered = await request(app.baseUrl, cookie, "/api/ai/questions/batch/recover", {
+      method: "POST",
+      body: { setId, set: reviewSnapshot, receipt: signed.receipt, recoveryRequestId: `offline-recover:${setId}`, operationPath: "/api/ai/questions/batch/draft", operationMethod: "PUT" }
+    });
+    assert.equal(recovered.response.status, 200);
+    assert.equal(recovered.body.status, "recovered");
+    assert.equal(recovered.body.practice.currentSet.id, setId);
+    assert.equal(recovered.body.practice.currentSet.questions[0].id, "legacy-offline-q1");
+    assert.equal(recovered.body.practice.currentSet.questions[0].prompt, "I");
+    assert.equal(recovered.body.practice.currentSet.questions[0].userAnswer, "我");
+    assert.equal(recovered.body.practice.currentSet.phase, "answering", "the first FIFO draft must replay before the local review phase is restored");
+    const repeated = await request(app.baseUrl, cookie, "/api/ai/questions/batch/recover", {
+      method: "POST",
+      body: { setId, set: reviewSnapshot, receipt: signed.receipt, recoveryRequestId: `offline-recover:${setId}`, operationPath: "/api/ai/questions/batch/draft", operationMethod: "PUT" }
+    });
+    assert.equal(repeated.response.status, 200);
+    assert.equal(repeated.body.status, "active");
+    const crossAccount = await request(app.baseUrl, otherCookie, "/api/ai/questions/batch/recover", {
+      method: "POST",
+      body: { setId, set: reviewSnapshot, receipt: signed.receipt, recoveryRequestId: `offline-recover:${setId}`, operationPath: "/api/ai/questions/batch/draft", operationMethod: "PUT" }
+    });
+    assert.equal(crossAccount.response.status, 422);
+    assert.match(crossAccount.body.error, /无效或不属于当前账号/);
+    assert.deepEqual(evidence((await request(app.baseUrl, cookie, "/api/state")).body), evidence(before));
+
+    await stopApp(app);
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "offline-recovery-owner", "offline-recovery-owner-password");
+    const persisted = await request(app.baseUrl, cookie, "/api/ai/questions/batch");
+    assert.equal(persisted.body.practice.currentSet.id, setId);
+    assert.equal(persisted.body.practice.currentSet.questions[0].userAnswer, "我");
+
+    await stopApp(app);
+    clearOwnerCurrentSet();
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "offline-recovery-owner", "offline-recovery-owner-password");
+    const legacyRecovered = await request(app.baseUrl, cookie, "/api/ai/questions/batch/recover", {
+      method: "POST",
+      body: { setId, set: pack.body.aiPractice.currentSet, receipt: "", recoveryRequestId: `offline-recover:${setId}`, operationPath: "/api/ai/questions/batch/draft", operationMethod: "PUT" }
+    });
+    assert.equal(legacyRecovered.response.status, 200);
+    assert.equal(legacyRecovered.body.status, "recovered");
+    assert.equal(legacyRecovered.body.practice.currentSet.questions[0].prompt, "I");
+    assert.equal(legacyRecovered.body.practice.currentSet.questions[0].userAnswer, "我");
+
+    await stopApp(app);
+    clearOwnerCurrentSet();
+    app = await startApp(dataDir);
+    cookie = await login(app.baseUrl, "offline-recovery-owner", "offline-recovery-owner-password");
+    const corruptSet = structuredClone(pack.body.aiPractice.currentSet);
+    corruptSet.questions[0].prompt = "You";
+    const corrupt = await request(app.baseUrl, cookie, "/api/ai/questions/batch/recover", {
+      method: "POST",
+      body: { setId, set: corruptSet, receipt: "", recoveryRequestId: `offline-recover:${setId}`, operationPath: "/api/ai/questions/batch/draft", operationMethod: "PUT" }
+    });
+    assert.equal(corrupt.response.status, 422);
+    assert.equal((await request(app.baseUrl, cookie, "/api/ai/questions/batch")).body.practice.currentSet, null);
+    assert.deepEqual(evidence((await request(app.baseUrl, cookie, "/api/state")).body), evidence(before));
+  } finally {
+    await stopApp(app);
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("AI batches grade atomically while generation requests append idempotently without blocking drafts", async () => {
   const dataDir = temporaryDataDir();
   const store = loadUsers(dataDir);

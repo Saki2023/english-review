@@ -134,22 +134,22 @@ test("SSH-created account can log in and public registration is absent", async (
 
     const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
     assert.doesNotMatch(html, /data-auth-mode|confirmPasswordWrap|>注册</);
-    assert.match(html, /app\.js\?v=77/);
-    assert.match(html, /pronunciation-data\.js\?v=77/);
+    assert.match(html, /app\.js\?v=78/);
+    assert.match(html, /pronunciation-data\.js\?v=78/);
     assert.match(html, /data-view="notes"/);
     assert.match(html, /id="aiTutorWindow"/);
     assert.match(html, /id="aiHistoryList"/);
     assert.doesNotMatch(html, /\?v=(?:[8-9]|1[0-4])(?:\D|$)/);
 
-    const appResponse = await fetch(`${baseUrl}/app.js?v=77`);
+    const appResponse = await fetch(`${baseUrl}/app.js?v=78`);
     assert.equal(appResponse.status, 200);
     assert.equal(appResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
 
     const appSource = await appResponse.text();
     assert.match(appSource, /nextButton"\)\.focus\(\{ preventScroll: true \}\)/);
     assert.match(appSource, /nextAiQuestion"\)\.addEventListener\("keydown"/);
-    assert.match(appSource, /sw\.js\?v=77/);
-    const pronunciationResponse = await fetch(`${baseUrl}/pronunciation-data.js?v=77`);
+    assert.match(appSource, /sw\.js\?v=78/);
+    const pronunciationResponse = await fetch(`${baseUrl}/pronunciation-data.js?v=78`);
     assert.equal(pronunciationResponse.status, 200);
     assert.equal(pronunciationResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
     const phonemeResponse = await fetch(`${baseUrl}/audio/phonemes/v-close-front.ogg`);

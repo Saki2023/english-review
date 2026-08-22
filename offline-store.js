@@ -60,6 +60,21 @@
     ["selfStudy", "selfStudyPublic", "aiPractice", "localOutboxSequence", "localUpdatedAt"].forEach(field => {
       if (Object.hasOwn(local, field)) merged[field] = clone(local[field]);
     });
+    if (merged.aiPractice && typeof merged.aiPractice === "object") {
+      const localReceipts = Array.isArray(local.aiPractice && local.aiPractice.recoveryReceipts) ? local.aiPractice.recoveryReceipts : [];
+      const remoteReceipts = Array.isArray(remote.aiPractice && remote.aiPractice.recoveryReceipts) ? remote.aiPractice.recoveryReceipts : [];
+      const retainedSetIds = new Set([
+        merged.aiPractice.currentSet && cleanId(merged.aiPractice.currentSet.id, 80),
+        ...(Array.isArray(merged.aiPractice.preparedSets) ? merged.aiPractice.preparedSets.map(set => cleanId(set && set.id, 80)) : [])
+      ].filter(Boolean));
+      const receipts = new Map();
+      [...localReceipts, ...remoteReceipts].forEach(item => {
+        const setId = cleanId(item && item.setId, 80);
+        const receipt = String(item && item.receipt || "").slice(0, 200000);
+        if (setId && receipt && retainedSetIds.has(setId) && !receipts.has(setId)) receipts.set(setId, { setId, receipt });
+      });
+      merged.aiPractice.recoveryReceipts = Array.from(receipts.values()).slice(0, 21);
+    }
     if (local.preview && typeof local.preview === "object") {
       merged.preview ||= {};
       ["practice", "practiceSentences"].forEach(field => {

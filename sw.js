@@ -1,25 +1,25 @@
-const CACHE_NAME = "daily-english-review-v77";
+const CACHE_NAME = "daily-english-review-v78";
 const NAVIGATION_NETWORK_TIMEOUT_MS = 2500;
 const APP_SHELL = [
   "/index.html",
-  "/styles.css?v=77",
-  "/data.js?v=77",
-  "/pronunciation-data.js?v=77",
-  "/review-variants.js?v=77",
-  "/answer-utils.js?v=77",
-  "/study-time.js?v=77",
-  "/review-session.js?v=77",
-  "/review-batch-client.js?v=77",
-  "/state-sync-client.js?v=77",
-  "/library-usage.js?v=77",
-  "/offline-store.js?v=77",
-  "/offline-learning.js?v=77",
-  "/offline-ai.js?v=77",
-  "/offline-replay.js?v=77",
-  "/app.js?v=77",
+  "/styles.css?v=78",
+  "/data.js?v=78",
+  "/pronunciation-data.js?v=78",
+  "/review-variants.js?v=78",
+  "/answer-utils.js?v=78",
+  "/study-time.js?v=78",
+  "/review-session.js?v=78",
+  "/review-batch-client.js?v=78",
+  "/state-sync-client.js?v=78",
+  "/library-usage.js?v=78",
+  "/offline-store.js?v=78",
+  "/offline-learning.js?v=78",
+  "/offline-ai.js?v=78",
+  "/offline-replay.js?v=78",
+  "/app.js?v=78",
   "/manifest.webmanifest",
   "/icon.svg",
-  "/vendor/lucide.min.js?v=77"
+  "/vendor/lucide.min.js?v=78"
 ];
 
 self.addEventListener("install", event => {

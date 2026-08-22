@@ -27,6 +27,22 @@ function pack(accountId = "account-a") {
   };
 }
 
+function recoverablePack() {
+  return {
+    ...pack(),
+    aiPractice: {
+      currentSet: {
+        id: "set-1",
+        phase: "answering",
+        index: 0,
+        questions: [{ id: "q1", contentType: "word", wordId: "word-i", direction: "en-zh", prompt: "I", userAnswer: "我" }]
+      },
+      preparedSets: [],
+      recoveryReceipts: [{ setId: "set-1", receipt: "v1.sealed-receipt" }]
+    }
+  };
+}
+
 function operation(id, path, createdAt) {
   return { id, accountId: "account-a", path, method: "POST", body: { requestId: id }, createdAt, updatedAt: createdAt };
 }
@@ -108,7 +124,7 @@ test("account mismatch blocks replay before reading or mutating queued operation
   assert.deepEqual(await store.listOutbox("account-a"), before);
 });
 
-test("a missing remote AI set is classified separately and remains first in FIFO", async () => {
+test("a missing remote and local AI set is classified as corrupt and remains first in FIFO", async () => {
   const store = await preparedStore();
   const first = await store.listOutbox("account-a");
   await store.removeOutbox("one", "account-a");
@@ -122,7 +138,7 @@ test("a missing remote AI set is classified separately and remains first in FIFO
     if (path === "/api/ai/questions/batch/draft") return jsonResponse(404, { error: "AI question set not found" });
     return jsonResponse(200, {});
   };
-  await assert.rejects(() => replayOutbox({ store, accountId: "account-a", fetch }), error => error.code === "content_missing");
+  await assert.rejects(() => replayOutbox({ store, accountId: "account-a", fetch }), error => error.code === "content_corrupt");
   assert.deepEqual(calls, ["/api/auth/status", "/api/ai/questions/batch/draft"]);
   assert.deepEqual((await store.listOutbox("account-a")).map(item => item.id), ["ai-draft:set-1:1:q1", "later"]);
 
@@ -140,6 +156,104 @@ test("a missing remote AI set is classified separately and remains first in FIFO
   assert.equal(retried.replayed, 2);
   assert.deepEqual(retryCalls, ["/api/auth/status", "/api/ai/questions/batch/draft", "/api/self-study/resume", "/api/offline/pack"]);
   assert.equal((await store.listOutbox("account-a")).length, 0);
+});
+
+test("a missing server AI set is restored from the local immutable snapshot before FIFO replay continues", async () => {
+  const store = createOfflineStore({ localStorage: new MemoryStorage() });
+  await store.savePack(recoverablePack(), "account-a");
+  await store.enqueue({
+    id: "ai-draft:set-1:1:q1",
+    accountId: "account-a",
+    path: "/api/ai/questions/batch/draft",
+    method: "PUT",
+    body: { setId: "set-1", questionId: "q1", index: 0, nextIndex: 0, answer: "我" },
+    createdAt: 1,
+    updatedAt: 1
+  }, "account-a");
+  await store.enqueue(operation("later", "/api/self-study/resume", 2), "account-a");
+  const calls = [];
+  let draftCalls = 0;
+  const result = await replayOutbox({
+    store,
+    accountId: "account-a",
+    fetch: async (path, options = {}) => {
+      calls.push({ path, body: options.body ? JSON.parse(options.body) : null });
+      if (path === "/api/auth/status") return jsonResponse(200, { authenticated: true, user: { id: "account-a" } });
+      if (path === "/api/ai/questions/batch/draft" && ++draftCalls === 1) return jsonResponse(404, { error: "AI question set not found" });
+      if (path === "/api/ai/questions/batch/recover") return jsonResponse(200, { status: "recovered", recovered: true });
+      if (path === "/api/offline/pack") return jsonResponse(200, recoverablePack());
+      return jsonResponse(200, { ok: true });
+    }
+  });
+  assert.deepEqual(calls.map(item => item.path), [
+    "/api/auth/status",
+    "/api/ai/questions/batch/draft",
+    "/api/ai/questions/batch/recover",
+    "/api/ai/questions/batch/draft",
+    "/api/self-study/resume",
+    "/api/offline/pack"
+  ]);
+  assert.equal(calls[2].body.setId, "set-1");
+  assert.equal(calls[2].body.set.questions[0].userAnswer, "我");
+  assert.equal(calls[2].body.receipt, "v1.sealed-receipt");
+  assert.equal(calls[2].body.operationPath, "/api/ai/questions/batch/draft");
+  assert.equal(calls[2].body.operationMethod, "PUT");
+  assert.deepEqual(result.recoveredSetIds, ["set-1"]);
+  assert.equal(result.remaining, 0);
+});
+
+test("a completed server AI set retires stale offline requests without replaying evidence", async () => {
+  const store = createOfflineStore({ localStorage: new MemoryStorage() });
+  await store.savePack(recoverablePack(), "account-a");
+  await store.enqueue({
+    id: "ai-draft:set-1:1:q1",
+    accountId: "account-a",
+    path: "/api/ai/questions/batch/draft",
+    method: "PUT",
+    body: { setId: "set-1", questionId: "q1", answer: "我" },
+    createdAt: 1,
+    updatedAt: 1
+  }, "account-a");
+  let draftCalls = 0;
+  const result = await replayOutbox({
+    store,
+    accountId: "account-a",
+    fetch: async path => {
+      if (path === "/api/auth/status") return jsonResponse(200, { authenticated: true, user: { id: "account-a" } });
+      if (path === "/api/ai/questions/batch/draft") { draftCalls += 1; return jsonResponse(404, { error: "AI question set not found" }); }
+      if (path === "/api/ai/questions/batch/recover") return jsonResponse(200, { status: "completed", reused: true });
+      if (path === "/api/offline/pack") return jsonResponse(200, recoverablePack());
+      return jsonResponse(200, {});
+    }
+  });
+  assert.equal(draftCalls, 1);
+  assert.deepEqual(result.completedSetIds, ["set-1"]);
+  assert.equal(result.remaining, 0);
+});
+
+test("a different active server set keeps the missing local set first and reports a conflict", async () => {
+  const store = createOfflineStore({ localStorage: new MemoryStorage() });
+  await store.savePack(recoverablePack(), "account-a");
+  await store.enqueue({
+    id: "ai-draft:set-1:1:q1",
+    accountId: "account-a",
+    path: "/api/ai/questions/batch/draft",
+    method: "PUT",
+    body: { setId: "set-1", questionId: "q1", answer: "我" },
+    createdAt: 1,
+    updatedAt: 1
+  }, "account-a");
+  await assert.rejects(() => replayOutbox({
+    store,
+    accountId: "account-a",
+    fetch: async path => {
+      if (path === "/api/auth/status") return jsonResponse(200, { authenticated: true, user: { id: "account-a" } });
+      if (path === "/api/ai/questions/batch/draft") return jsonResponse(404, { error: "AI question set not found" });
+      if (path === "/api/ai/questions/batch/recover") return jsonResponse(409, { error: "服务器已有另一组未完成题目" });
+      return jsonResponse(200, {});
+    }
+  }), error => error.code === "content_conflict");
+  assert.deepEqual((await store.listOutbox("account-a")).map(item => item.id), ["ai-draft:set-1:1:q1"]);
 });
 
 test("two tabs replaying the same stable IDs keep server evidence idempotent and empty the queue", async () => {

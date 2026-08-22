@@ -7,7 +7,7 @@ const { URL } = require("url");
 const { loadUsers, normalizeUsername, publicUser, validPassword, validateCredentials } = require("./server/accounts");
 const { NATURAL_DEEP_EXPLANATION, NATURAL_PERSON_MEASURE_EXPLANATION, OPTIONAL_MEASURE_OMISSION_EXPLANATION, buildTranslationExplanation, chineseAnswerMatches, chineseAnswerQuality, chineseNaturalDeepMatches, chineseNaturalPersonMeasureMatches, chineseOptionalMeasureOmissionMatches, englishAnswerMatches, englishSourceWordResults, englishWordResults, mistakeIsResolved, repairReviewEvidence } = require("./answer-utils");
 const { createAiConnectionTester, createAiGrader, createAiModelFetcher, createAiPreviewSentenceGenerator, createAiQuestionGenerator, createAiReviewVariantGenerator, createAiTutor, createRateLimiter } = require("./server/ai-grader");
-const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createDeterministicWordQuestions, createQuestionSet, offlineAiPractice, publicAiPractice, publicQuestionSet, sanitizeAiPractice, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
+const { MAX_AI_HISTORY, MAX_TUTOR_HISTORY, MAX_TUTOR_MESSAGES, MAX_TUTOR_RESETS, buildLearningProfile, createDeterministicWordQuestions, createQuestionSet, offlineAiPractice, publicAiPractice, publicQuestionSet, sanitizeAiPractice, sanitizeQuestionSet, sanitizeTutorExchange, tutorThreadFromHistory } = require("./server/ai-practice");
 const { createReviewBatch, publicFormalPractice, publicReviewBatch, sanitizeFormalPractice, sanitizeReviewBatch, sanitizeReviewResult } = require("./server/formal-practice");
 const { AI_EFFORTS, createAiSettingsStore, getAvailableModels, resolveAiConnection, selectAiCandidates } = require("./server/ai-settings");
 const { buildLearningSyncProfile } = require("./server/learning-sync");
@@ -1507,6 +1507,49 @@ function offlinePreviewPracticeSentences(state, previewData) {
   }).filter(Boolean);
 }
 
+const OFFLINE_AI_RECOVERY_VERSION = "v1";
+
+function offlineAiRecoveryKey(user) {
+  const secret = String(user && user.passwordHash || API_TOKEN || "");
+  if (!user || !user.id || !secret) throw Object.assign(new Error("当前账号无法签发离线题组恢复凭据"), { statusCode: 409 });
+  return crypto.createHash("sha256").update(`daily-english-review:offline-ai-recovery:${OFFLINE_AI_RECOVERY_VERSION}\0${user.id}\0${secret}`).digest();
+}
+
+function sealOfflineAiRecoveryReceipt(user, value) {
+  const set = sanitizeQuestionSet(value);
+  if (!set) return null;
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", offlineAiRecoveryKey(user), iv);
+  cipher.setAAD(Buffer.from(`${user.id}:${OFFLINE_AI_RECOVERY_VERSION}`, "utf8"));
+  const payload = Buffer.from(JSON.stringify({ version: 1, accountId: user.id, set }), "utf8");
+  const encrypted = Buffer.concat([cipher.update(payload), cipher.final()]);
+  return {
+    setId: set.id,
+    receipt: [OFFLINE_AI_RECOVERY_VERSION, iv.toString("base64url"), encrypted.toString("base64url"), cipher.getAuthTag().toString("base64url")].join(".")
+  };
+}
+
+function openOfflineAiRecoveryReceipt(user, receipt, expectedSetId) {
+  const parts = String(receipt || "").split(".");
+  if (parts.length !== 4 || parts[0] !== OFFLINE_AI_RECOVERY_VERSION) throw Object.assign(new Error("离线题组恢复凭据无效，请重新准备离线包"), { statusCode: 422 });
+  try {
+    const decipher = crypto.createDecipheriv("aes-256-gcm", offlineAiRecoveryKey(user), Buffer.from(parts[1], "base64url"));
+    decipher.setAAD(Buffer.from(`${user.id}:${OFFLINE_AI_RECOVERY_VERSION}`, "utf8"));
+    decipher.setAuthTag(Buffer.from(parts[3], "base64url"));
+    const payload = JSON.parse(Buffer.concat([decipher.update(Buffer.from(parts[2], "base64url")), decipher.final()]).toString("utf8"));
+    const set = sanitizeQuestionSet(payload && payload.set);
+    if (Number(payload && payload.version) !== 1 || String(payload && payload.accountId || "") !== String(user.id) || !set || set.id !== expectedSetId) throw new Error("receipt mismatch");
+    return set;
+  } catch (_) {
+    throw Object.assign(new Error("离线题组恢复凭据无效或不属于当前账号，请重新准备离线包"), { statusCode: 422 });
+  }
+}
+
+function offlineAiRecoveryReceipts(user, value) {
+  const practice = sanitizeAiPractice(value);
+  return [practice.currentSet, ...practice.queuedSets].map(set => sealOfflineAiRecoveryReceipt(user, set)).filter(Boolean).slice(0, 21);
+}
+
 function buildOfflinePack(user) {
   refreshContent();
   const state = getUserState(user);
@@ -1551,7 +1594,10 @@ function buildOfflinePack(user) {
       practiceSentences: offlinePreviewPracticeSentences(state, previewData),
       practice: sanitizePreviewPractice(state.previewPractice, previewContentForAccount(previewData))
     },
-    aiPractice: offlineAiPractice(state.aiPractice),
+    aiPractice: {
+      ...offlineAiPractice(state.aiPractice),
+      recoveryReceipts: offlineAiRecoveryReceipts(user, state.aiPractice)
+    },
     outbox: { mode: "client-fifo", formalEvidencePending: true }
   };
   let bytes = Buffer.byteLength(JSON.stringify(pack), "utf8");
@@ -4138,6 +4184,167 @@ function applyCompletedAiQuestionSet(user, expectedSet, results) {
   return userStates.users[user.id];
 }
 
+function compactRecoveryText(value) {
+  return String(value || "").toLocaleLowerCase().normalize("NFKC").replace(/[\p{P}\p{S}\s]+/gu, "");
+}
+
+function recoveryPromptMatches(direction, prompt, source) {
+  if (direction === "en-zh") return normalizeVariantEnglish(prompt) === normalizeVariantEnglish(source.english);
+  const accepted = Array.from(new Set([source.chinese, ...(Array.isArray(source.acceptedChinese) ? source.acceptedChinese : [])].filter(Boolean)));
+  return accepted.some(answer => compactRecoveryText(answer) === compactRecoveryText(prompt));
+}
+
+function legacyOfflineAiQuestion(state, value, allowedWords) {
+  const source = value && typeof value === "object" ? value : {};
+  const id = String(source.id || "").trim().slice(0, 80);
+  const direction = source.direction === "zh-en" ? "zh-en" : "en-zh";
+  const prompt = String(source.prompt || "").trim().slice(0, 300);
+  if (!id || !prompt) throw Object.assign(new Error("本机旧题组快照缺少稳定题目 ID 或题干，不能自动恢复"), { statusCode: 422 });
+  let authoritative = null;
+  if (source.contentType === "word" || source.wordId) {
+    const item = content.words.find(word => word.id === String(source.wordId || "") && word.preview !== true && word.learned && String(word.learned) <= today());
+    if (item && recoveryPromptMatches(direction, prompt, item)) {
+      authoritative = {
+        contentType: "word",
+        wordId: item.id,
+        direction,
+        english: item.english,
+        chinese: item.chinese,
+        acceptedEnglish: [item.english],
+        acceptedChinese: Array.from(new Set([item.chinese, ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])])).filter(Boolean).slice(0, 16)
+      };
+    }
+  } else {
+    const pool = sanitizeReviewVariantPool(state.reviewVariantPool);
+    const poolId = String(source.poolVariantId || "").trim();
+    const candidates = [
+      ...content.sentences.filter(item => item.preview !== true && item.learned && String(item.learned) <= today()),
+      ...pool.variants
+    ].filter(item => item && item.english && item.chinese && (!poolId || String(item.id || "") === poolId));
+    const matching = candidates.filter(item => recoveryPromptMatches(direction, prompt, item) && previewEnglishTokens(item.english).every(token => allowedWords.has(token)));
+    const unique = new Map(matching.map(item => [`${normalizeVariantEnglish(item.english)}\0${compactRecoveryText(item.chinese)}`, item]));
+    if (unique.size === 1) {
+      const item = Array.from(unique.values())[0];
+      authoritative = {
+        contentType: "sentence",
+        poolVariantId: poolId && String(item.id || "") === poolId ? poolId : "",
+        direction,
+        english: item.english,
+        chinese: item.chinese,
+        acceptedEnglish: Array.from(new Set([item.english, ...(Array.isArray(item.acceptedEnglish) ? item.acceptedEnglish : [])])).filter(Boolean).slice(0, 8),
+        acceptedChinese: expandRegisteredChineseAnswers(content, item.english, [item.chinese, ...(Array.isArray(item.acceptedChinese) ? item.acceptedChinese : [])], 16)
+      };
+    }
+  }
+  if (!authoritative) throw Object.assign(new Error("本机旧题组无法与当前已学词句安全核对，请保留草稿并重新准备离线包"), { statusCode: 422 });
+  return {
+    id,
+    ...authoritative,
+    userAnswer: String(source.userAnswer || "").trim().slice(0, MAX_AI_ANSWER_LENGTH),
+    correct: null,
+    score: null,
+    gradingStatus: "",
+    problemWords: [],
+    wordResults: [],
+    explanation: "",
+    detailedExplanation: "",
+    answeredAt: ""
+  };
+}
+
+function legacyOfflineAiSet(state, value, expectedSetId) {
+  const source = value && typeof value === "object" ? value : {};
+  const questions = Array.isArray(source.questions) ? source.questions : [];
+  if (String(source.id || "") !== expectedSetId || !questions.length || questions.length > 10) throw Object.assign(new Error("本机旧题组快照不完整，不能自动恢复"), { statusCode: 422 });
+  const allowedWords = new Set(buildLearningProfile(content, state, today()).allowedWords);
+  const recoveredQuestions = questions.map(question => legacyOfflineAiQuestion(state, question, allowedWords));
+  if (new Set(recoveredQuestions.map(question => question.id)).size !== recoveredQuestions.length) throw Object.assign(new Error("本机旧题组题目 ID 重复，不能自动恢复"), { statusCode: 422 });
+  return sanitizeQuestionSet({
+    ...source,
+    id: expectedSetId,
+    questions: recoveredQuestions,
+    completed: false,
+    phase: ["answering", "review", "grading"].includes(source.phase) ? source.phase : "answering"
+  });
+}
+
+function offlineAiRecoveryPhase(localPhase, operationPath) {
+  const pathName = String(operationPath || "").trim();
+  if (["/api/ai/questions/batch/draft", "/api/ai/questions/batch/edit", "/api/ai/questions/batch/review"].includes(pathName)) return "answering";
+  if (pathName === "/api/ai/questions/batch/grade") return "review";
+  throw Object.assign(new Error("离线题组恢复请求缺少可核验的 FIFO 操作阶段"), { statusCode: 422 });
+}
+
+function overlayOfflineAiSetProgress(authoritativeValue, localValue, expectedSetId, operationPath) {
+  const authoritative = sanitizeQuestionSet(authoritativeValue);
+  const local = localValue && typeof localValue === "object" ? localValue : {};
+  if (!authoritative || authoritative.id !== expectedSetId || String(local.id || "") !== expectedSetId) throw Object.assign(new Error("离线题组恢复快照与稳定 ID 不一致"), { statusCode: 409 });
+  const localQuestions = Array.isArray(local.questions) ? local.questions : [];
+  if (localQuestions.length !== authoritative.questions.length) throw Object.assign(new Error("离线题组题目数量已变化，不能自动恢复"), { statusCode: 409 });
+  const localById = new Map(localQuestions.map(question => [String(question && question.id || ""), question]));
+  const questions = authoritative.questions.map(question => {
+    const saved = localById.get(question.id);
+    const prompt = saved && String(saved.prompt || "");
+    if (!saved || !recoveryPromptMatches(question.direction, prompt, question)) throw Object.assign(new Error("离线题组题干与服务器签发快照不一致"), { statusCode: 409 });
+    return {
+      ...question,
+      userAnswer: String(saved.userAnswer || "").trim().slice(0, MAX_AI_ANSWER_LENGTH),
+      correct: null,
+      score: null,
+      gradingStatus: "",
+      problemWords: [],
+      wordResults: [],
+      explanation: "",
+      detailedExplanation: "",
+      answeredAt: ""
+    };
+  });
+  const phase = offlineAiRecoveryPhase(local.phase, operationPath);
+  if (["review", "grading"].includes(phase) && questions.some(question => !question.userAnswer)) throw Object.assign(new Error("离线题组尚有空白答案，不能恢复到核对或批改阶段"), { statusCode: 409 });
+  return sanitizeQuestionSet({
+    ...authoritative,
+    questions,
+    index: Math.min(Math.max(Number(local.index) || 0, 0), Math.max(0, questions.length - 1)),
+    phase,
+    completed: false,
+    gradeRequestId: String(local.gradeRequestId || "").trim().slice(0, 180),
+    reviewOpenedAt: phase === "answering" ? "" : String(local.reviewOpenedAt || "").slice(0, 40),
+    gradingStartedAt: phase === "grading" ? String(local.gradingStartedAt || "").slice(0, 40) : "",
+    completedAt: "",
+    lastError: "",
+    updatedAt: new Date().toISOString()
+  });
+}
+
+function aiSetHistoryCompleted(practice, setId, localSet) {
+  const questionIds = new Set((Array.isArray(localSet && localSet.questions) ? localSet.questions : []).map(question => String(question && question.id || "")).filter(Boolean));
+  if (!questionIds.size || questionIds.size !== localSet.questions.length) return false;
+  const completedIds = new Set(practice.history.filter(item => item.setId === setId).map(item => String(item.id || "").slice(setId.length + 1)));
+  return completedIds.size === questionIds.size && Array.from(questionIds).every(id => completedIds.has(id));
+}
+
+function recoverOfflineAiQuestionSet(user, state, practice, body) {
+  const setId = String(body.setId || "").trim().slice(0, 80);
+  const localSet = body.set && typeof body.set === "object" ? body.set : null;
+  if (!setId || !localSet || String(localSet.id || "") !== setId) throw Object.assign(new Error("离线题组恢复请求不完整"), { statusCode: 400 });
+  if (aiSetHistoryCompleted(practice, setId, localSet)) return { status: "completed", practice };
+  if (practice.currentSet) {
+    if (practice.currentSet.id === setId) return { status: "active", practice };
+    throw Object.assign(new Error("服务器已有另一组未完成题目；原草稿仍保留，请先完成当前服务器题组或明确处理冲突"), { statusCode: 409 });
+  }
+  const authoritative = String(body.receipt || "").trim()
+    ? openOfflineAiRecoveryReceipt(user, body.receipt, setId)
+    : legacyOfflineAiSet(state, localSet, setId);
+  const recovered = overlayOfflineAiSetProgress(authoritative, localSet, setId, body.operationPath);
+  practice.currentSet = recovered;
+  practice.queuedSets = practice.queuedSets.filter(set => set.id !== setId);
+  practice.updatedAt = recovered.updatedAt;
+  state.aiPractice = practice;
+  userStates.users[user.id] = sanitizeState(state);
+  persistUserStates();
+  return { status: "recovered", practice: sanitizeAiPractice(userStates.users[user.id].aiPractice) };
+}
+
 function handleAiQuestionBatch(req, res, url, user) {
   if (!user) return sendError(res, 401, "login required");
   const suffix = url.pathname.slice("/api/ai/questions/batch".length) || "/";
@@ -4146,6 +4353,14 @@ function handleAiQuestionBatch(req, res, url, user) {
     const state = getUserState(user);
     const practice = sanitizeAiPractice(state.aiPractice);
     const set = practice.currentSet;
+    if (suffix === "/recover" && req.method === "POST") {
+      try {
+        const recovered = recoverOfflineAiQuestionSet(user, state, practice, body);
+        return sendJson(res, 200, { status: recovered.status, recovered: recovered.status === "recovered", reused: recovered.status !== "recovered", practice: publicAiPractice(recovered.practice) });
+      } catch (error) {
+        return sendError(res, error.statusCode || 409, error.message);
+      }
+    }
     if (!set || set.id !== String(body.setId || "")) return sendError(res, 404, "AI question set not found");
     const now = new Date().toISOString();
     if (suffix === "/draft" && req.method === "PUT") {
@@ -5447,7 +5662,7 @@ async function handleAiFocusedPractice(req, res, url, user) {
 
 function mimeType(filePath) { return { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".webmanifest": "application/manifest+json; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".ogg": "audio/ogg", ".wav": "audio/wav" }[path.extname(filePath).toLowerCase()] || "application/octet-stream"; }
 
-const STATIC_ASSET_VERSION = "77";
+const STATIC_ASSET_VERSION = "78";
 const STATIC_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const STATIC_REVALIDATE_CACHE_CONTROL = "no-cache";
 

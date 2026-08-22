@@ -197,7 +197,14 @@ test("renewing an expired pack keeps pending AI, self-study, and preview drafts 
   local.selfStudy = { progress: { lesson: { stepIndex: 3 } } };
   local.preview = { practice: { draft: "预习草稿" } };
   const remote = pack("account-a", 1000);
-  remote.aiPractice = { currentSet: { id: "server-set" } };
+  remote.aiPractice = {
+    currentSet: { id: "server-set" },
+    recoveryReceipts: [
+      { setId: "server-set", receipt: "v1.remote-server-set" },
+      { setId: "local-set", receipt: "v1.remote-local-set" },
+      { setId: "unrelated-set", receipt: "v1.unrelated" }
+    ]
+  };
   remote.selfStudy = { progress: {} };
 
   const preserved = mergeOfflinePackRenewal(local, remote, { preserveLocalProgress: true });
@@ -207,9 +214,11 @@ test("renewing an expired pack keeps pending AI, self-study, and preview drafts 
   assert.equal(preserved.preview.practice.draft, "预习草稿");
   assert.equal(preserved.expiresAt, remote.expiresAt);
   assert.equal(preserved.recovery.pendingOutbox, true);
+  assert.deepEqual(preserved.aiPractice.recoveryReceipts, [{ setId: "local-set", receipt: "v1.remote-local-set" }]);
 
   const authoritative = mergeOfflinePackRenewal(local, remote, { preserveLocalProgress: false });
   assert.equal(authoritative.aiPractice.currentSet.id, "server-set");
+  assert.equal(authoritative.aiPractice.recoveryReceipts[0].receipt, "v1.remote-server-set");
   assert.equal(authoritative.recovery, undefined);
 });
 

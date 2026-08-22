@@ -53,7 +53,7 @@ test("static files use immutable version caches and stable conditional responses
   try {
     await waitForHealth(baseUrl, child);
 
-    const versioned = await fetch(`${baseUrl}/app.js?v=77`);
+    const versioned = await fetch(`${baseUrl}/app.js?v=78`);
     assert.equal(versioned.status, 200);
     assert.equal(versioned.headers.get("cache-control"), "public, max-age=31536000, immutable");
     assert.equal(Number(versioned.headers.get("content-length")) > 1000, true);
@@ -62,14 +62,14 @@ test("static files use immutable version caches and stable conditional responses
     assert.match(entityTag, /^"[0-9a-f]+-[0-9a-f]+"$/);
     assert.equal(Number.isFinite(Date.parse(lastModified)), true);
     const versionedBody = await versioned.text();
-    assert.match(versionedBody, /serviceWorker\.register\("\/sw\.js\?v=77"/);
+    assert.match(versionedBody, /serviceWorker\.register\("\/sw\.js\?v=78"/);
 
-    const byEntityTag = await fetch(`${baseUrl}/app.js?v=77`, { headers: { "If-None-Match": `W/${entityTag}` } });
+    const byEntityTag = await fetch(`${baseUrl}/app.js?v=78`, { headers: { "If-None-Match": `W/${entityTag}` } });
     assert.equal(byEntityTag.status, 304);
     assert.equal(await byEntityTag.text(), "");
     assert.equal(byEntityTag.headers.get("cache-control"), "public, max-age=31536000, immutable");
 
-    const byDate = await fetch(`${baseUrl}/app.js?v=77`, { headers: { "If-Modified-Since": lastModified } });
+    const byDate = await fetch(`${baseUrl}/app.js?v=78`, { headers: { "If-Modified-Since": lastModified } });
     assert.equal(byDate.status, 304);
     assert.equal(await byDate.text(), "");
 
@@ -82,11 +82,11 @@ test("static files use immutable version caches and stable conditional responses
     assert.equal(index.headers.get("cache-control"), "no-cache");
     assert.match(index.headers.get("etag"), /^"[0-9a-f]+-[0-9a-f]+"$/);
 
-    const serviceWorker = await fetch(`${baseUrl}/sw.js?v=77`);
+    const serviceWorker = await fetch(`${baseUrl}/sw.js?v=78`);
     assert.equal(serviceWorker.status, 200);
     assert.equal(serviceWorker.headers.get("cache-control"), "no-cache");
 
-    const head = await fetch(`${baseUrl}/app.js?v=77`, { method: "HEAD" });
+    const head = await fetch(`${baseUrl}/app.js?v=78`, { method: "HEAD" });
     assert.equal(head.status, 200);
     assert.equal(head.headers.get("content-length"), String(Buffer.byteLength(versionedBody)));
     assert.equal((await head.arrayBuffer()).byteLength, 0);

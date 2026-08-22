@@ -530,14 +530,16 @@
       const packedPractice = normalizeClientPreviewPractice(pack.preview && pack.preview.practice);
       if (localPractice.key === packedPractice.key && localPractice.updatedAt > packedPractice.updatedAt) pack.preview.practice = cloneJson(localPractice);
       const pending = await offlineStore.listOutbox(currentUser.id);
+      const accountId = String(currentUser.id || "");
       const renewed = typeof OFFLINE_STORAGE.mergeOfflinePackRenewal === "function"
         ? OFFLINE_STORAGE.mergeOfflinePackRenewal(offlinePack, pack, { preserveLocalProgress: pending.length > 0 })
         : pack;
-      offlinePack = await offlineStore.savePack(renewed, currentUser.id);
+      offlinePack = await offlineStore.savePack(renewed, accountId);
       offlinePackStatus = "usable";
-      offlineStore.activate(currentUser.id);
-      await refreshOfflineOutboxCount(currentUser.id);
-      showToast(pending.length ? `离线包已续期，${pending.length} 项草稿/记录仍按原顺序待同步` : "当前账号离线包已准备，可以在断网后继续学习");
+      offlineStore.activate(accountId);
+      await refreshOfflineOutboxCount(accountId);
+      showToast(pending.length ? `离线包已续期，正在恢复 ${pending.length} 项原题组草稿/记录` : "当前账号离线包已准备，可以在断网后继续学习");
+      if (pending.length) setTimeout(() => { if (currentUser && currentUser.id === accountId) void replayOfflineOutbox(); }, 0);
     } catch (error) {
       showToast(error.message || "离线包准备失败");
     } finally {
@@ -617,8 +619,10 @@
         accountId,
         fetch: window.fetch.bind(window),
         onProgress: progress => {
-          if (!accountRequestContextIsCurrent(context) || progress.phase !== "replay") return;
-          aiStatusMessage = `正在同步离线记录 ${progress.index + 1} / ${progress.total}…`;
+          if (!accountRequestContextIsCurrent(context)) return;
+          if (progress.phase === "recover") aiStatusMessage = "服务器原题组缺失，正在用本机不可变快照安全恢复…";
+          else if (progress.phase === "replay") aiStatusMessage = `正在同步离线记录 ${progress.index + 1} / ${progress.total}…`;
+          else return;
           if (activeView === "ai") renderAiView();
         }
       });
@@ -637,9 +641,15 @@
       await syncRemoteState();
       await Promise.all([loadPreview(), loadPreviewWords(), loadSelfStudy(true), loadAiOptions(), loadAiExams()]);
       await retryAiConnection();
+      const recovered = Array.isArray(result.recoveredSetIds) ? result.recoveredSetIds.length : 0;
+      const alreadyCompleted = Array.isArray(result.completedSetIds) ? result.completedSetIds.length : 0;
       aiStatusMessage = result.packError
         ? `离线记录已同步；${result.packError}，可手动重新准备离线包。`
-        : `离线记录已全部同步${result.replayed ? `（${result.replayed} 项）` : ""}，服务器结果已刷新。`;
+        : recovered
+          ? `原题组已安全恢复并同步完成${result.replayed ? `（${result.replayed} 项）` : ""}，题目和草稿保持不变。`
+          : alreadyCompleted
+            ? `服务器已保存原题组结果，已清理 ${alreadyCompleted} 组重复离线请求，未重复记分。`
+            : `离线记录已全部同步${result.replayed ? `（${result.replayed} 项）` : ""}，服务器结果已刷新。`;
       renderHome();
       renderAiView();
       renderOfflinePackStatus();
@@ -659,8 +669,12 @@
         offlineSession = Boolean(offlinePack);
         remoteReady = false;
         aiStatusMessage = error.code === "content_missing"
-          ? "服务器暂时找不到原题组；本机题目、草稿和队列已保留，请稍后重试或联网重新准备离线包。"
-          : `${error.message || "离线记录同步失败"}；队列已保留，可稍后重试。`;
+          ? "服务器和本机离线包都找不到可核验的原题组快照；草稿和队列已保留，请重新准备离线包后重试。"
+          : error.code === "content_conflict"
+            ? `${error.message || "服务器已有另一组未完成题目"}；原题组草稿和队列已保留，没有自动换题。`
+            : error.code === "content_corrupt"
+              ? `${error.message || "原题组快照无法安全核验"}；草稿和队列已保留，没有写入正式证据。`
+              : `${error.message || "离线记录同步失败"}；队列已保留，可稍后重试。`;
         showAppView();
         $("#dataStatus").textContent = offlineSession ? `词库同步至第 ${DATA.currentDay} 天 · 当前账号离线包` : `词库同步至第 ${DATA.currentDay} 天 · 离线队列待重试`;
         renderHome();
@@ -672,6 +686,7 @@
     } finally {
       offlineReplayInProgress = false;
       if (currentUser) await refreshOfflineOutboxCount(currentUser.id);
+      if (activeView === "ai") renderAiView();
     }
   }
 
@@ -8970,7 +8985,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=77", { updateViaCache: "none" }).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=78", { updateViaCache: "none" }).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;
