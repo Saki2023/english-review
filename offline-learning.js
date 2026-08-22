@@ -355,16 +355,20 @@
     const errorReasons = Array.from(new Set(incorrect.map(row => String(row.first && (row.first.detailedExplanation || row.first.explanation) || "").trim()).filter(Boolean))).slice(0, 8);
     const weakPoints = Array.from(new Set(incorrect.map(row => String(row.step.focus || row.step.title || row.step.category || "").trim()).filter(Boolean))).slice(0, 8);
     const words = Array.isArray(progress.snapshot.plannedContent && progress.snapshot.plannedContent.words) ? progress.snapshot.plannedContent.words.map(item => ({ id: item.id, english: item.english, chinese: item.chinese })) : [];
+    const supplements = Array.isArray(progress.snapshot.plannedContent && progress.snapshot.plannedContent.supplements) ? progress.snapshot.plannedContent.supplements.map(item => ({ id: item.id, type: item.type, title: item.title, forms: (Array.isArray(item.forms) ? item.forms : []).map(form => ({ id: form.id, english: form.english, wordId: form.wordId, lemma: form.lemma })) })) : [];
     const sentences = Array.isArray(progress.snapshot.plannedContent && progress.snapshot.plannedContent.sentences) ? progress.snapshot.plannedContent.sentences.map(item => ({ id: item.id, english: item.english, chinese: item.chinese })) : [];
     const nextReview = weakPoints.length ? `下次先复习：${weakPoints.join("、")}，并重新独立完成使用过提示或首答错误的题目。` : "下次按记忆曲线复习今天的新词，并在句子中再次独立回忆。";
+    const supplementFormCount = supplements.reduce((sum, item) => sum + item.forms.length, 0);
     const text = [
-      `今天学习了 ${words.length} 个新词、${sentences.length} 个新句型或句子。`,
+      supplementFormCount
+        ? `今天学习了 ${words.length} 个新基本词、${sentences.length} 个新句型或句子；另有 ${supplementFormCount} 个补充词形，不占新词名额。`
+        : `今天学习了 ${words.length} 个新词、${sentences.length} 个新句型或句子。`,
       `实际完成 ${completed.length}/${questionSteps.length} 道题：独立完成 ${independent.length} 道，提示后完成 ${assisted.length} 道，看答案后完成 ${revealed.length} 道；首答错误 ${incorrect.length} 道。`,
       pending.length ? `${pending.length} 道仍等待联网判定，不计为错误。` : "没有等待判定的题目。",
       errorReasons.length ? `实际错因：${errorReasons.join("；")}。` : "本次没有已确认的错误，未练习内容没有被写成答错。",
       nextReview
     ].join("\n");
-    return { schema: 1, source: "deterministic-offline", generatedAt: timestamp(now), lessonId: progress.lessonId, newWords: words, newSentences: sentences, completedQuestions: completed.length, totalQuestions: questionSteps.length, independentCorrect: independent.length, initiallyIncorrect: incorrect.length, corrected: incorrect.filter(row => row.state.status === "completed").length, assistedCompleted: assisted.length, revealedCompleted: revealed.length, pending: pending.length, unattempted: rows.filter(row => !row.first).length, errorReasons, weakPoints, nextReview, text, formalEvidence: false };
+    return { schema: 1, source: "deterministic-offline", generatedAt: timestamp(now), lessonId: progress.lessonId, newWords: words, supplements, newSentences: sentences, completedQuestions: completed.length, totalQuestions: questionSteps.length, independentCorrect: independent.length, initiallyIncorrect: incorrect.length, corrected: incorrect.filter(row => row.state.status === "completed").length, assistedCompleted: assisted.length, revealedCompleted: revealed.length, pending: pending.length, unattempted: rows.filter(row => !row.first).length, errorReasons, weakPoints, nextReview, text, formalEvidence: false };
   }
 
   async function operateSelfStudy(packValue, path, body = {}, options = {}) {

@@ -585,6 +585,10 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .library-usage-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
 .library-usage-heading h2 { margin-top: 5px; font-size: 15px; }
 .library-usage-heading p { max-width: 520px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; text-align: right; }
+.library-usage-shortcuts { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.library-usage-shortcuts .select-field { min-height: 34px; }
+.library-usage-status { flex: 0 0 auto; }
+.library-usage-shortcuts > p { flex: 1 1 240px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .library-usage-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .library-usage-filters .select-field { min-height: 34px; }
 .library-usage-filters input { min-width: 126px; height: 32px; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: 12px; }
@@ -733,6 +737,13 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
 .preview-word-meaning strong { font-size: 15px; font-weight: 600; }
 .preview-word-card > p { margin: 14px 0 0; padding-top: 13px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; line-height: 1.65; }
 .preview-words-empty { grid-column: 1 / -1; }
+.preview-supplements { display: grid; gap: 22px; margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--border); }
+.preview-supplement-group { min-width: 0; }
+.preview-supplement-heading { margin-bottom: 13px; }
+.preview-supplement-heading h2 { margin: 0 0 5px; color: var(--primary-deep); font-size: 17px; }
+.preview-supplement-heading p { max-width: 760px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+.preview-form-card { background: var(--surface-soft); }
+.preview-form-english code { font-size: 22px; }
 .preview-practice-heading { flex-wrap: wrap; }
 .practice-progress { min-width: 72px; padding: 9px 12px; border: 1px solid var(--border); border-radius: 999px; color: var(--primary-deep); background: var(--surface-soft); font-size: 13px; text-align: center; }
 .preview-practice-controls { display: flex; align-items: center; gap: 14px; margin-bottom: 15px; }
@@ -884,6 +895,9 @@ h2 { margin-bottom: 0; font-size: 17px; font-weight: 500; }
   .aggregate-item { padding: 16px; }
   .library-usage-heading { align-items: flex-start; flex-direction: column; gap: 6px; }
   .library-usage-heading p { max-width: none; text-align: left; }
+  .library-usage-shortcuts { align-items: stretch; }
+  .library-usage-shortcuts .select-field, .library-usage-status { flex: 1 1 140px; min-width: 0; }
+  .library-usage-shortcuts > p { flex-basis: 100%; }
   .library-usage-filters { align-items: stretch; }
   .library-usage-filters .select-field, .library-usage-filters button { flex: 1 1 140px; min-width: 0; }
   .library-usage-filters input, .library-usage-filters select { width: 100%; }

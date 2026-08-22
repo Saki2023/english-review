@@ -34,6 +34,7 @@ const { learningEvidenceRepairSignature, repairLearningEvidence } = require("./s
 const { mergeStudyTime, normalizeStudyTime } = require("./study-time");
 const {
   WORD_USAGE_MIGRATION_VERSION,
+  addDays: addWordUsageDays,
   activityEvents: buildWordUsageEvents,
   appendEvents: appendWordUsageEvents,
   migrateWordUsage,
@@ -60,6 +61,7 @@ const {
   saveSelfStudyDraft,
   selfStudyPreviewContent,
   selfStudyHistory,
+  supplementForms,
   startSelfStudyLesson,
   submitSelfStudyStep
 } = require("./server/self-study");
@@ -1046,7 +1048,21 @@ function withFormalPracticeLock(userId, operation, operationName = "formal-pract
 function selfStudyLearnedWords() {
   return content.words
     .filter(item => !item.preview && item.learned && String(item.learned) <= today())
-    .flatMap(item => previewEnglishTokens(item.english));
+    .map(item => ({ id: item.id, english: item.english }));
+}
+
+function completedSelfStudyWordForms(state) {
+  const selfStudy = state && state.selfStudy && typeof state.selfStudy === "object" ? state.selfStudy : {};
+  return Object.values(selfStudy.progress && typeof selfStudy.progress === "object" ? selfStudy.progress : {})
+    .filter(progress => progress && progress.status === "completed" && progress.snapshot)
+    .flatMap(progress => supplementForms(progress.snapshot));
+}
+
+function wordUsageContentForState(state, extraForms = []) {
+  return {
+    ...content,
+    wordForms: [...completedSelfStudyWordForms(state), ...(Array.isArray(extraForms) ? extraForms : [])]
+  };
 }
 
 function handleSelfStudyLessonSync(req, res, url) {
@@ -1207,8 +1223,11 @@ function appendSelfStudyWordUsage(accountState, selfStudyState, body, submission
   if (attempt && attempt.status !== "graded") return { added: [], reused: true };
   const plannedWords = progress.snapshot.plannedContent && Array.isArray(progress.snapshot.plannedContent.words) ? progress.snapshot.plannedContent.words : [];
   const plannedSentences = progress.snapshot.plannedContent && Array.isArray(progress.snapshot.plannedContent.sentences) ? progress.snapshot.plannedContent.sentences : [];
-  const usageContent = { ...content, words: [...content.words, ...plannedWords], sentences: [...content.sentences, ...plannedSentences] };
-  const globalWord = content.words.find(item => item.id === step.contentId && item.preview !== true && item.learned && String(item.learned) <= today());
+  const forms = supplementForms(progress.snapshot);
+  const form = forms.find(item => item.id === step.contentId) || null;
+  const usageContent = { ...wordUsageContentForState(accountState, forms), words: [...content.words, ...plannedWords], sentences: [...content.sentences, ...plannedSentences] };
+  const recalledWordId = form ? form.wordId : step.contentId;
+  const globalWord = content.words.find(item => item.id === recalledWordId && item.preview !== true && item.learned && String(item.learned) <= today());
   const directRecall = Boolean(globalWord && step.contentId && step.type !== "reading-question");
   const assistance = attempt && attempt.assistance || stepState.assistance || "";
   const result = attempt
@@ -1220,6 +1239,7 @@ function appendSelfStudyWordUsage(accountState, selfStudyState, body, submission
     taskId: `${progress.lessonId}:${step.stepId}`,
     wordIds: directRecall ? [globalWord.id] : (step.contentId && plannedWords.some(item => item.id === step.contentId) ? [step.contentId] : []),
     english: directRecall ? "" : [step.english, step.prompt, step.passage, step.content].filter(Boolean).join(" "),
+    formEvidence: directRecall && form ? { id: form.id, english: form.english, wordId: form.wordId, lemma: form.lemma, supplementId: form.supplementId } : null,
     kind: directRecall ? "recall" : "exposure",
     result,
     formalEvidence: directRecall,
@@ -1234,16 +1254,26 @@ function appendSelfStudyWordUsage(accountState, selfStudyState, body, submission
 function selfStudyTutorInput(accountState, context, message) {
   const stepState = context.progress.steps[context.step.stepId] || { attempts: [], questions: [], status: "unattempted" };
   const allowedWords = Array.from(new Set([
-    ...selfStudyLearnedWords(),
+    ...selfStudyLearnedWords().flatMap(item => previewEnglishTokens(item.english)),
+    ...supplementForms(context.lesson).flatMap(item => previewEnglishTokens(item.english)),
     ...previewEnglishTokens(context.step.prompt),
     ...previewEnglishTokens(context.step.passage),
     ...previewEnglishTokens(context.step.english),
     ...previewEnglishTokens(message)
   ]));
   const currentWordMeanings = context.lesson.plannedContent.words.filter(word => allowedWords.includes(String(word.english || "").toLocaleLowerCase()));
+  const baseMeanings = new Map([
+    ...content.words.filter(item => !item.preview).map(item => [String(item.id || ""), Array.from(new Set([item.chinese, ...(item.acceptedChinese || [])])).filter(Boolean)]),
+    ...context.lesson.plannedContent.words.map(item => [String(item.id || ""), Array.from(new Set([item.chinese, ...(item.acceptedChinese || [])])).filter(Boolean)])
+  ]);
+  const formMeanings = supplementForms(context.lesson).flatMap(form => {
+    const meanings = baseMeanings.get(form.wordId);
+    return meanings && form.english ? [[form.english, meanings]] : [];
+  });
   const wordMeanings = Object.fromEntries([
     ...content.words.filter(item => !item.preview).map(item => [String(item.english || "").toLocaleLowerCase(), Array.from(new Set([item.chinese, ...(item.acceptedChinese || [])])).filter(Boolean)]),
-    ...currentWordMeanings.map(item => [String(item.english || "").toLocaleLowerCase(), Array.from(new Set([item.chinese, ...(item.acceptedChinese || [])])).filter(Boolean)])
+    ...currentWordMeanings.map(item => [String(item.english || "").toLocaleLowerCase(), Array.from(new Set([item.chinese, ...(item.acceptedChinese || [])])).filter(Boolean)]),
+    ...formMeanings
   ]);
   const history = (stepState.questions || []).filter(item => item.status === "answered" && item.answer).slice(-6).flatMap(item => [
     { role: "user", content: item.question },
@@ -1417,12 +1447,17 @@ function handlePreview(req, res, user) {
 
 function selfStudyPreviewDocument(previewData) {
   const wordLines = previewData.words.map(item => `- ${item.english}：${item.chinese}${item.phonetic ? `（${item.phonetic}）` : ""}`);
+  const supplementLines = (Array.isArray(previewData.supplements) ? previewData.supplements : []).flatMap(item => [
+    `- ${item.title || "额外补充"}${item.note ? `：${item.note}` : ""}`,
+    ...(Array.isArray(item.forms) ? item.forms.map(form => `  - ${form.lemma} → ${form.english}${form.phonetic ? `（${form.phonetic}）` : ""}：${form.chinese || "沿用基本词词义"}`) : [])
+  ]);
   const sentenceLines = previewData.sentences.map(item => `- ${item.english}：${item.chinese}`);
   const note = previewData.note && typeof previewData.note === "object" ? previewData.note : {};
   const sections = [
     `第 ${previewData.nextDay} 天出门自学预习${previewData.formalDate ? `（${previewData.formalDate} 开始）` : ""}`,
     note.summary ? `\n学习重点\n${note.summary}` : "",
     wordLines.length ? `\n预习单词\n${wordLines.join("\n")}` : "",
+    supplementLines.length ? `\n额外补充（不占新基本词名额）\n${supplementLines.join("\n")}` : "",
     sentenceLines.length ? `\n预习句子\n${sentenceLines.join("\n")}` : "",
     previewData.nextPreview ? `\n下一步\n${previewData.nextPreview}` : ""
   ].filter(Boolean);
@@ -1468,6 +1503,21 @@ function accountPreviewData(user, stateValue = null) {
     if (!key || sentencesById.has(key)) return;
     sentencesById.set(key, { ...item, day: selectedNextDay, status: "planned", learned: "", preview: true, formalEvidence: false });
   });
+  const baseWordsById = new Map([...content.words, ...Array.from(wordsByEnglish.values())].map(item => [String(item.id || ""), item]));
+  const supplements = (selfStudy && Array.isArray(selfStudy.supplements) ? selfStudy.supplements : []).map(supplement => ({
+    ...supplement,
+    formalEvidence: false,
+    forms: (Array.isArray(supplement.forms) ? supplement.forms : []).map(form => {
+      const base = baseWordsById.get(String(form.wordId || ""));
+      return {
+        ...form,
+        supplementId: supplement.id,
+        chinese: String(base && base.chinese || (Array.isArray(form.acceptedChinese) ? form.acceptedChinese[0] : "") || ""),
+        acceptedChinese: Array.from(new Set([base && base.chinese, ...(Array.isArray(base && base.acceptedChinese) ? base.acceptedChinese : []), ...(Array.isArray(form.acceptedChinese) ? form.acceptedChinese : [])].map(value => String(value || "").trim()).filter(Boolean))).slice(0, 20),
+        formalEvidence: false
+      };
+    })
+  }));
   return {
     currentDay,
     nextDay: selectedNextDay,
@@ -1479,6 +1529,8 @@ function accountPreviewData(user, stateValue = null) {
     sourceLessonVersion: selfStudy?.lessonVersion || "",
     title: selfStudy?.title || "",
     words: Array.from(wordsByEnglish.values()),
+    supplements,
+    wordForms: supplements.flatMap(item => item.forms),
     sentences: Array.from(sentencesById.values()),
     note: selfStudy?.note || null,
     nextPreview: selfStudy?.nextPreview || ""
@@ -1489,14 +1541,15 @@ function previewContentForAccount(previewData) {
   return {
     ...content,
     words: [...content.words, ...previewData.words],
-    sentences: [...content.sentences, ...previewData.sentences]
+    sentences: [...content.sentences, ...previewData.sentences],
+    wordForms: Array.isArray(previewData.wordForms) ? previewData.wordForms : []
   };
 }
 
 function offlinePreviewPracticeSentences(state, previewData) {
   const accountContent = previewContentForAccount(previewData);
   const learnedWords = buildLearningProfile(content, state, today()).allowedWords;
-  const allowedWords = Array.from(new Set([...learnedWords, ...previewData.words.flatMap(item => previewEnglishTokens(item.english))]));
+  const allowedWords = Array.from(new Set([...learnedWords, ...previewData.words.flatMap(item => previewEnglishTokens(item.english)), ...previewData.wordForms.flatMap(item => previewEnglishTokens(item.english))]));
   const storedTasks = sanitizePreviewPractice(state.previewPractice, accountContent).tasks.filter(task => task.kind === "sentence");
   return previewData.words.map(target => {
     const stored = storedTasks.find(task => task.wordId === target.id && Array.isArray(task.requiredPreviewWordIds) && task.requiredPreviewWordIds.includes(target.id));
@@ -1590,6 +1643,7 @@ function buildOfflinePack(user) {
       formalEvidence: false,
       document: previewDocument,
       words: previewData.words.map(item => ({ ...item, formalEvidence: false })),
+      supplements: previewData.supplements.map(item => ({ ...item, formalEvidence: false })),
       sentences: previewData.sentences.map(item => ({ ...item, formalEvidence: false })),
       practiceSentences: offlinePreviewPracticeSentences(state, previewData),
       practice: sanitizePreviewPractice(state.previewPractice, previewContentForAccount(previewData))
@@ -1635,7 +1689,8 @@ function handlePreviewWords(req, res, user) {
     updatedAt: previewData.updatedAt,
     sourceLessonId: previewData.sourceLessonId,
     formalEvidence: false,
-    words: previewData.words
+    words: previewData.words,
+    supplements: previewData.supplements
   });
 }
 
@@ -1700,7 +1755,7 @@ async function handlePreviewPracticeSentences(req, res, user) {
     const profile = buildLearningProfile(content, state, today());
     const learnedWords = [...profile.allowedWords];
     const previewWordTokens = previewWords.map(item => ({ wordId: item.id, english: item.english }));
-    const allowedWords = Array.from(new Set([...learnedWords, ...previewWords.flatMap(item => previewEnglishTokens(item.english))]));
+    const allowedWords = Array.from(new Set([...learnedWords, ...previewWords.flatMap(item => previewEnglishTokens(item.english)), ...previewData.wordForms.flatMap(item => previewEnglishTokens(item.english))]));
     const accountContent = previewContentForAccount(previewData);
     const plannedByWord = new Map();
     targets.forEach(target => {
@@ -1771,19 +1826,37 @@ function previewWordsForPracticeGrade(user) {
   return accountPreviewData(user);
 }
 
+function previewSupplementFormTarget(previewData, formId) {
+  const form = (Array.isArray(previewData.wordForms) ? previewData.wordForms : []).find(item => item.id === formId);
+  if (!form) return null;
+  return {
+    id: form.id,
+    formId: form.id,
+    wordId: form.wordId,
+    english: form.english,
+    chinese: form.chinese,
+    acceptedChinese: form.acceptedChinese,
+    lemma: form.lemma,
+    supplementId: form.supplementId
+  };
+}
+
 function previewPracticeGradeTask(rawTask, previewData) {
   const source = rawTask && typeof rawTask === "object" ? rawTask : {};
   const direction = source.direction === "zh-en" ? "zh-en" : source.direction === "en-zh" ? "en-zh" : "";
   const kind = source.kind === "word" ? "word" : source.kind === "sentence" ? "sentence" : "";
   const wordId = String(source.wordId || "").trim();
-  const target = previewData.words.find(item => item.id === wordId);
+  const formId = String(source.formId || "").trim();
+  const target = formId ? previewSupplementFormTarget(previewData, formId) : previewData.words.find(item => item.id === wordId);
   if (!direction || !kind || !wordId || !target) return null;
+  if (formId && target.wordId !== wordId) return null;
   if (kind === "word") {
     return {
       id: String(source.id || `preview-word-${wordId}-${direction}`).trim().slice(0, 160),
       kind,
       direction,
       wordId,
+      formId,
       english: target.english,
       chinese: target.chinese,
       acceptedEnglish: [target.english],
@@ -1799,7 +1872,7 @@ function previewPracticeGradeTask(rawTask, previewData) {
   const learnedWords = content.words
     .filter(item => !item.preview && item.learned && String(item.learned) <= today())
     .flatMap(item => previewEnglishTokens(item.english));
-  const allowedWords = new Set([...learnedWords, ...previewData.words.flatMap(item => previewEnglishTokens(item.english))]);
+  const allowedWords = new Set([...learnedWords, ...previewData.words.flatMap(item => previewEnglishTokens(item.english)), ...previewData.wordForms.flatMap(item => previewEnglishTokens(item.english))]);
   const tokens = previewEnglishTokens(english);
   const targetTokens = previewEnglishTokens(target.english);
   if (!tokens.length || tokens.some(token => !allowedWords.has(token)) || !targetTokens.every(token => tokens.includes(token))) return null;
@@ -1886,19 +1959,23 @@ async function recordPreviewPracticeWordUsage(user, task, eventId, result) {
   if (!stableId) return { reused: true, added: 0 };
   return withFormalPracticeLock(user.id, async () => {
     const state = getUserState(user);
+    const previewData = accountPreviewData(user, state);
+    const usageContent = previewContentForAccount(previewData);
+    const form = task.formId ? previewSupplementFormTarget(previewData, task.formId) : null;
     const events = buildWordUsageEvents({
       eventId: stableId,
       source: "preview",
       taskId: task.id,
       wordIds: task.kind === "word" ? [task.wordId] : [],
       english: task.kind === "sentence" ? task.english : "",
+      formEvidence: form ? { id: form.formId, english: form.english, wordId: form.wordId, lemma: form.lemma, supplementId: form.supplementId } : null,
       kind: "exposure",
       result: result && result.correct === true && result.gradingStatus === "correct" ? "completed" : "wrong",
       formalEvidence: false,
       date: today(),
       occurredAt: new Date().toISOString()
-    }, previewContentForAccount(accountPreviewData(user, state)), { timeZone: APP_TIMEZONE });
-    const appended = appendWordUsageEvents(state.wordUsage, events, content);
+    }, usageContent, { timeZone: APP_TIMEZONE });
+    const appended = appendWordUsageEvents(state.wordUsage, events, usageContent);
     state.wordUsage = appended.state;
     if (appended.added.length) {
       userStates.users[user.id] = sanitizeState(state);
@@ -2012,20 +2089,32 @@ function handleWordUsage(req, res, url, user) {
   refreshContent();
   const requestedFrom = String(url.searchParams.get("from") || "").trim();
   const requestedTo = String(url.searchParams.get("to") || "").trim();
-  const from = validWordUsageDate(requestedFrom);
-  const to = validWordUsageDate(requestedTo);
+  const requestedRange = String(url.searchParams.get("range") || "").trim();
+  const range = ["today", "3d", "7d"].includes(requestedRange) ? requestedRange : "";
+  if (requestedRange && !range) return sendError(res, 400, "快捷时间范围不正确");
+  if (range && (requestedFrom || requestedTo)) return sendError(res, 400, "快捷时间范围不能与手工日期同时使用");
+  const currentDate = today();
+  const from = range
+    ? addWordUsageDays(currentDate, range === "today" ? 0 : range === "3d" ? -2 : -6)
+    : validWordUsageDate(requestedFrom);
+  const to = range ? currentDate : validWordUsageDate(requestedTo);
   if (requestedFrom && !from) return sendError(res, 400, "开始日期格式不正确");
   if (requestedTo && !to) return sendError(res, 400, "结束日期格式不正确");
   if (from && to && from > to) return sendError(res, 400, "开始日期不能晚于结束日期");
+  const requestedUsageStatus = String(url.searchParams.get("status") || "").trim();
+  const usageStatus = ["used", "unused"].includes(requestedUsageStatus) ? requestedUsageStatus : "all";
+  if (requestedUsageStatus && usageStatus === "all") return sendError(res, 400, "使用状态不正确");
   const sort = ["index", "usage", "correct", "wrong", "accuracy", "recent", "due"].includes(url.searchParams.get("sort"))
     ? url.searchParams.get("sort")
     : "index";
   const order = url.searchParams.get("order") === "desc" ? "desc" : "asc";
   const state = getUserState(user);
   return sendJson(res, 200, wordUsageRows(state.wordUsage, content, {
-    date: today(),
+    date: currentDate,
     from,
     to,
+    range: range || (from || to ? "custom" : "all"),
+    usageStatus,
     sort,
     order,
     timeZone: APP_TIMEZONE,
@@ -3182,6 +3271,7 @@ function appendQuestionWordUsage(state, { eventId, source, taskId, question, res
   const taskValue = String(taskId || question && question.taskId || "");
   const separator = taskValue.lastIndexOf(":");
   const taskWordId = separator > 0 ? taskValue.slice(0, separator) : taskValue;
+  const usageContent = wordUsageContentForState(state);
   const events = buildWordUsageEvents({
     eventId,
     source,
@@ -3193,8 +3283,8 @@ function appendQuestionWordUsage(state, { eventId, source, taskId, question, res
     formalEvidence,
     date,
     occurredAt
-  }, content, { timeZone: APP_TIMEZONE });
-  const appended = appendWordUsageEvents(state.wordUsage, events, content);
+  }, usageContent, { timeZone: APP_TIMEZONE });
+  const appended = appendWordUsageEvents(state.wordUsage, events, usageContent);
   state.wordUsage = appended.state;
   return appended;
 }
@@ -5662,7 +5752,7 @@ async function handleAiFocusedPractice(req, res, url, user) {
 
 function mimeType(filePath) { return { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".webmanifest": "application/manifest+json; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".ogg": "audio/ogg", ".wav": "audio/wav" }[path.extname(filePath).toLowerCase()] || "application/octet-stream"; }
 
-const STATIC_ASSET_VERSION = "78";
+const STATIC_ASSET_VERSION = "79";
 const STATIC_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const STATIC_REVALIDATE_CACHE_CONTROL = "no-cache";
 

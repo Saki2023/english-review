@@ -68,6 +68,13 @@ function courseLesson(lessonId, day, word, chinese, version = "1") {
     enabledFrom: "2026-08-01T00:00:00.000Z",
     plannedContent: {
       words: [{ id: `travel-d${day}-${word}`, english: word, chinese, phonetic: `/${word}/`, pronunciation: word, directions: ["en-zh", "zh-en"] }],
+      supplements: [{
+        id: `travel-d${day}-supplement`,
+        type: "word-forms",
+        title: "额外补充词形",
+        note: "只作词形练习，不占新词名额。",
+        forms: [{ id: `travel-d${day}-form-${word}s`, english: `${word}s`, wordId: `travel-d${day}-${word}`, lemma: word, phonetic: `/${word}z/`, pronunciation: "词尾接近 z", acceptedChinese: [chinese], grammarTags: ["third-person-singular"] }]
+      }],
       sentences: [{ id: `travel-d${day}-sentence`, english: `It is a ${word}.`, chinese: `它是一只${chinese}。`, directions: ["en-zh", "zh-en"] }],
       note: { summary: `学习 ${word}。`, review: `明天复习 ${word}。` }
     },
@@ -128,7 +135,7 @@ function answerForStep(step, word, chinese) {
 test("self-study API isolates accounts, resumes after restart, preserves corrections, and promotes only after six stages", async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "english-review-self-study-api-"));
   const savedUsers = loadUsers(dataDir);
-  createUser(savedUsers, { username: "traveler", password: "traveler-password" });
+  const travelerUser = createUser(savedUsers, { username: "traveler", password: "traveler-password" });
   createUser(savedUsers, { username: "other-user", password: "other-password" });
   saveUsers(dataDir, savedUsers);
   const apiToken = "self-study-api-token";
@@ -171,13 +178,31 @@ test("self-study API isolates accounts, resumes after restart, preserves correct
     assert.equal(travelerPreviewWords.data.words[0].preview, true);
     assert.equal(travelerPreviewWords.data.words[0].status, "planned");
     assert.equal(travelerPreviewWords.data.words[0].formalEvidence, false);
+    assert.equal(travelerPreviewWords.data.supplements.length, 1);
+    assert.deepEqual(travelerPreviewWords.data.supplements[0].forms.map(item => [item.english, item.wordId, item.lemma]), [["dogs", "travel-d9-dog", "dog"]]);
     const otherPreviewWords = await request(baseUrl, otherCookie, "/api/preview/words");
     assert.equal(otherPreviewWords.data.words.some(item => item.id === "travel-d9-dog"), false);
 
     const travelerPreview = await request(baseUrl, travelerCookie, "/api/preview");
     assert.match(travelerPreview.data.preview.name, /第 9 天出门自学预习/);
     assert.match(travelerPreview.data.preview.content, /dog：狗/);
+    assert.match(travelerPreview.data.preview.content, /额外补充（不占新基本词名额）/);
+    assert.match(travelerPreview.data.preview.content, /dog → dogs/);
     assert.match(travelerPreview.data.preview.content, /It is a dog\./);
+    const previewFormGrade = await request(baseUrl, travelerCookie, "/api/preview/practice/grade", "POST", {
+      eventId: "preview-form-dogs-once",
+      task: { id: "preview-word-travel-d9-form-dogs-en-zh", kind: "word", direction: "en-zh", wordId: "travel-d9-dog", formId: "travel-d9-form-dogs", english: "dogs", chinese: "狗" },
+      answer: "狗"
+    });
+    assert.equal(previewFormGrade.response.status, 200);
+    assert.equal(previewFormGrade.data.correct, true);
+    const storedAfterFormPreview = JSON.parse(fs.readFileSync(path.join(dataDir, "user-states.json"), "utf8"));
+    const storedTravelerAfterFormPreview = storedAfterFormPreview.users[travelerUser.id];
+    const formEvent = storedTravelerAfterFormPreview.wordUsage.events.find(item => item.eventId === "preview-form-dogs-once:travel-d9-dog");
+    assert.equal(formEvent.wordId, "travel-d9-dog");
+    assert.equal(formEvent.formId, "travel-d9-form-dogs");
+    assert.equal(formEvent.formalEvidence, false);
+    assert.equal(storedTravelerAfterFormPreview.wordUsage.memories["travel-d9-dog"], undefined);
     const plannedSentences = await request(baseUrl, travelerCookie, "/api/preview/practice/sentences", "POST", { wordIds: ["travel-d9-dog"] });
     assert.equal(plannedSentences.response.status, 200);
     assert.equal(plannedSentences.data.source, "self-study");
@@ -207,6 +232,8 @@ test("self-study API isolates accounts, resumes after restart, preserves correct
     assert.equal(offlinePack.data.account.username, "traveler");
     assert.ok(offlinePack.data.byteSize <= 6 * 1024 * 1024);
     assert.deepEqual(offlinePack.data.preview.words.map(item => item.id), ["travel-d9-dog"]);
+    assert.deepEqual(offlinePack.data.preview.supplements[0].forms.map(item => item.id), ["travel-d9-form-dogs"]);
+    assert.deepEqual(offlinePack.data.selfStudy.lessons[0].plannedContent.supplements[0].forms.map(item => item.wordId), ["travel-d9-dog"]);
     assert.equal(offlinePack.data.preview.formalEvidence, false);
     assert.equal(offlinePack.data.preview.practiceSentences[0].formalEvidence, false);
     assert.deepEqual(offlinePack.data.selfStudy.lessons.map(item => item.lessonId), ["trip-day-9", "trip-day-10"]);
@@ -324,6 +351,9 @@ test("self-study API isolates accounts, resumes after restart, preserves correct
     assert.equal(promotedWord.sourceLessonId, "trip-day-9");
     assert.ok(promotedWord.learnedAt);
     assert.ok(promotedWord.firstReviewDue);
+    assert.equal(afterContent.words.some(item => item.english === "dogs"), false, "supplement forms must not become vocabulary rows");
+    const stateAfterPromotion = await request(baseUrl, travelerCookie, "/api/state");
+    assert.equal(Object.keys(stateAfterPromotion.data.taskStates).some(taskId => taskId.includes("form-dogs")), false, "supplement forms must not create SRS tasks");
     assert.equal(afterContent.words.some(item => item.id === "travel-d10-duck"), false);
     assert.equal(fs.existsSync(path.join(dataDir, "self-study-transaction.json")), false);
 
@@ -337,6 +367,7 @@ test("self-study API isolates accounts, resumes after restart, preserves correct
     assert.equal(synced.selfStudyHistory[0].stages[1].steps[0].tutorHistory[0].status, "pending");
     assert.equal(synced.selfStudyPlannedLessons[0].lessonId, "trip-day-10");
     assert.equal(synced.selfStudyPlannedLessons[0].plannedContent.status, "planned");
+    assert.equal(synced.selfStudyPlannedLessons[0].plannedContent.supplements[0].forms.length, 1);
     const syncedAgain = await (await fetch(`${baseUrl}/api/sync/profile?username=traveler`, { headers: { Authorization: `Bearer ${readToken}` } })).json();
     assert.equal(syncedAgain.summary.selfStudyFormalAttempts, synced.summary.selfStudyFormalAttempts);
     assert.equal(syncedAgain.selfStudyHistory.length, synced.selfStudyHistory.length);

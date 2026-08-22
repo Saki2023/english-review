@@ -10,7 +10,7 @@
   <link rel="icon" href="data:,">
   <link rel="manifest" href="manifest.webmanifest">
   <title>每日英语复习</title>
-  <link rel="stylesheet" href="styles.css?v=78">
+  <link rel="stylesheet" href="styles.css?v=79">
 </head>
 <body>
   <div class="app-shell">
@@ -20,7 +20,7 @@
         <div>
           <div class="brand-title-row">
             <div class="brand-name">每日英语复习</div>
-            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v78">v78</span>
+            <span class="app-version" id="appVersionBadge" aria-label="当前版本 v79">v79</span>
           </div>
           <div class="brand-meta" id="dataStatus">词库同步至第 4 天</div>
         </div>
@@ -924,6 +924,14 @@
               <div><span class="stat-label">真实使用覆盖</span><h2 id="libraryUsageTitle">单词记忆曲线与使用统计</h2></div>
               <p id="libraryUsageSummary" role="status" aria-live="polite">正在读取服务端使用统计…</p>
             </div>
+            <div class="library-usage-shortcuts">
+              <label class="select-field"><span>时间范围</span><select id="libraryUsageRange" aria-label="真实使用快捷时间范围"><option value="all">全部日期</option><option value="today">今天</option><option value="3d">近 3 天</option><option value="7d">近 7 天</option><option value="custom" disabled>手工日期</option></select></label>
+              <div class="segmented-control library-usage-status" role="group" aria-label="真实使用状态">
+                <button class="segment" type="button" data-library-usage-status="used" aria-pressed="false">已使用</button>
+                <button class="segment" type="button" data-library-usage-status="unused" aria-pressed="false">未使用</button>
+              </div>
+              <p id="libraryUsageFilterHint">全部日期 · 全部使用状态（服务端北京时间）</p>
+            </div>
             <div class="library-usage-filters">
               <label class="select-field"><span>开始日期</span><input id="libraryUsageFrom" type="date" aria-label="统计开始日期"></label>
               <label class="select-field"><span>结束日期</span><input id="libraryUsageTo" type="date" aria-label="统计结束日期"></label>
@@ -1061,9 +1069,10 @@
           </div>
           <div class="preview-words-notice">
             <i data-lucide="shield-check" aria-hidden="true"></i>
-            <p><strong>只提前熟悉，不要求现在记住。</strong><span>这里仅显示紧邻下一课且尚未学过的单词；它们不会进入今日复习、听写或能力统计。</span></p>
+            <p><strong>只提前熟悉，不要求现在记住。</strong><span>新基本词与额外补充词形会分区显示；补充词形不占新词名额，不创建独立记忆卡，也不会因预习进入正式统计。</span></p>
           </div>
           <div class="preview-words-grid" id="previewWordsGrid"></div>
+          <section class="preview-supplements" id="previewSupplements" aria-label="额外补充词形" hidden></section>
           <p class="empty-message preview-words-empty" id="previewWordsEmpty" hidden>目前没有可预习的新单词。</p>
         </section>
 
@@ -1344,20 +1353,20 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="vendor/lucide.min.js?v=78"></script>
-  <script src="data.js?v=78"></script>
-  <script src="pronunciation-data.js?v=78"></script>
-  <script src="review-variants.js?v=78"></script>
-  <script src="answer-utils.js?v=78"></script>
-  <script src="study-time.js?v=78"></script>
-  <script src="review-session.js?v=78"></script>
-  <script src="review-batch-client.js?v=78"></script>
-  <script src="state-sync-client.js?v=78"></script>
-  <script src="library-usage.js?v=78"></script>
-  <script src="offline-store.js?v=78"></script>
-  <script src="offline-learning.js?v=78"></script>
-  <script src="offline-ai.js?v=78"></script>
-  <script src="offline-replay.js?v=78"></script>
+  <script src="vendor/lucide.min.js?v=79"></script>
+  <script src="data.js?v=79"></script>
+  <script src="pronunciation-data.js?v=79"></script>
+  <script src="review-variants.js?v=79"></script>
+  <script src="answer-utils.js?v=79"></script>
+  <script src="study-time.js?v=79"></script>
+  <script src="review-session.js?v=79"></script>
+  <script src="review-batch-client.js?v=79"></script>
+  <script src="state-sync-client.js?v=79"></script>
+  <script src="library-usage.js?v=79"></script>
+  <script src="offline-store.js?v=79"></script>
+  <script src="offline-learning.js?v=79"></script>
+  <script src="offline-ai.js?v=79"></script>
+  <script src="offline-replay.js?v=79"></script>
   <script>
     (async () => {
       if (location.protocol === "http:" || location.protocol === "https:") {
@@ -1373,7 +1382,7 @@
         }
       }
       const appScript = document.createElement("script");
-      appScript.src = "app.js?v=78";
+      appScript.src = "app.js?v=79";
       document.body.appendChild(appScript);
     })();
   </script>

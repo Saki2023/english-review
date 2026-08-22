@@ -66,6 +66,7 @@ function wordCatalog(content, date = studyDate()) {
   const words = Array.isArray(content && content.words) ? content.words : [];
   const byId = new Map();
   const byToken = new Map();
+  const byFormToken = new Map();
   words.forEach(item => {
     const id = cleanText(item && item.id, 120);
     if (!id) return;
@@ -73,7 +74,21 @@ function wordCatalog(content, date = studyDate()) {
     const tokens = englishTokens(item.english);
     if (tokens.length === 1 && !byToken.has(tokens[0])) byToken.set(tokens[0], item);
   });
-  return { date, words, byId, byToken };
+  const forms = [
+    ...(Array.isArray(content && content.wordForms) ? content.wordForms : []),
+    ...words.flatMap(word => (Array.isArray(word && word.forms) ? word.forms.map(form => ({ ...form, wordId: form.wordId || word.id, lemma: form.lemma || word.english })) : []))
+  ];
+  forms.forEach(raw => {
+    const form = raw && typeof raw === "object" ? raw : {};
+    const wordId = cleanText(form.wordId, 120);
+    const id = cleanText(form.id || form.formId, 120);
+    const tokens = englishTokens(form.english || form.form);
+    const base = byId.get(wordId);
+    const lemma = normalizeEnglish(form.lemma);
+    if (!id || !base || tokens.length !== 1 || lemma !== normalizeEnglish(base.english) || byFormToken.has(tokens[0])) return;
+    byFormToken.set(tokens[0], { id, wordId, lemma, english: tokens[0], supplementId: cleanText(form.supplementId, 120) });
+  });
+  return { date, words, byId, byToken, byFormToken };
 }
 
 function wordIdsForEnglish(content, english, options = {}) {
@@ -82,7 +97,8 @@ function wordIdsForEnglish(content, english, options = {}) {
   const ids = [];
   const seen = new Set();
   englishTokens(english).forEach(token => {
-    const item = catalog.byToken.get(token);
+    const form = catalog.byFormToken.get(token);
+    const item = form ? catalog.byId.get(form.wordId) : catalog.byToken.get(token);
     const id = cleanText(item && item.id, 120);
     if (!id || seen.has(id) || (!includePlanned && !learnedWord(item, catalog.date))) return;
     seen.add(id);
@@ -112,6 +128,12 @@ function sanitizeEvent(value) {
     formalEvidence: value.formalEvidence === true,
     date,
     occurredAt,
+    ...(cleanText(value.formId, 120) ? {
+      formId: cleanText(value.formId, 120),
+      surfaceForm: cleanText(value.surfaceForm || value.form, 120).toLocaleLowerCase(),
+      lemma: cleanText(value.lemma, 120).toLocaleLowerCase(),
+      supplementId: cleanText(value.supplementId, 120)
+    } : {}),
     legacy: value.legacy === true
   };
 }
@@ -166,6 +188,12 @@ function activityEvents(activity, content, options = {}) {
   const result = USAGE_RESULTS.has(source.result) ? source.result : (kind === "recall" ? "wrong" : "completed");
   if (!baseId || !date || (kind === "recall" && !RECALL_RESULTS.has(result))) return [];
   const catalog = wordCatalog(content, date);
+  const sourceTokens = englishTokens(source.english || source.prompt || source.sourceText);
+  const matchedForms = new Map(sourceTokens.flatMap(token => {
+    const form = catalog.byFormToken.get(token);
+    return form ? [[form.wordId, form]] : [];
+  }));
+  const explicitForm = source.formEvidence && typeof source.formEvidence === "object" ? source.formEvidence : null;
   const explicitIds = Array.isArray(source.wordIds) ? source.wordIds : [source.wordId];
   const ids = [
     ...explicitIds.map(value => cleanText(value, 120)).filter(Boolean),
@@ -177,6 +205,14 @@ function activityEvents(activity, content, options = {}) {
     const item = catalog.byId.get(wordId);
     if (source.formalEvidence === true && kind === "recall" && !learnedWord(item, date)) return [];
     seen.add(wordId);
+    const explicitSurface = cleanText(explicitForm && (explicitForm.english || explicitForm.surfaceForm), 120).toLocaleLowerCase();
+    const registeredExplicitForm = catalog.byFormToken.get(explicitSurface);
+    const form = explicitForm
+      && registeredExplicitForm
+      && registeredExplicitForm.wordId === wordId
+      && registeredExplicitForm.id === cleanText(explicitForm.id || explicitForm.formId, 120)
+      ? registeredExplicitForm
+      : matchedForms.get(wordId);
     return [sanitizeEvent({
       eventId: `${baseId}:${wordId}`,
       wordId,
@@ -187,6 +223,10 @@ function activityEvents(activity, content, options = {}) {
       formalEvidence: source.formalEvidence === true,
       date,
       occurredAt: source.occurredAt || source.completedAt || new Date().toISOString(),
+      formId: form && form.id,
+      surfaceForm: form && form.english,
+      lemma: form && form.lemma,
+      supplementId: form && form.supplementId,
       legacy: source.legacy === true
     })];
   }).filter(Boolean);
@@ -403,14 +443,19 @@ function usageRows(value, content, options = {}) {
   const date = validDate(options.date) || studyDate(options.now || new Date(), options.timeZone);
   const from = validDate(options.from);
   const to = validDate(options.to);
+  const range = ["today", "3d", "7d", "custom", "all"].includes(options.range)
+    ? options.range
+    : (from || to ? "custom" : "all");
+  const usageStatus = ["used", "unused"].includes(options.usageStatus) ? options.usageStatus : "all";
   const sort = ["index", "usage", "correct", "wrong", "accuracy", "recent", "due"].includes(options.sort) ? options.sort : "index";
   const order = options.order === "desc" ? "desc" : "asc";
   const allByWord = new Map();
-  state.events.forEach(event => {
+  const formalEvents = state.events.filter(event => event.formalEvidence === true);
+  formalEvents.forEach(event => {
     if (!allByWord.has(event.wordId)) allByWord.set(event.wordId, []);
     allByWord.get(event.wordId).push(event);
   });
-  const rows = (Array.isArray(content && content.words) ? content.words : []).filter(word => learnedWord(word, date)).map((word, index) => {
+  const allRows = (Array.isArray(content && content.words) ? content.words : []).filter(word => learnedWord(word, date)).map((word, index) => {
     const all = allByWord.get(word.id) || [];
     const period = all.filter(event => (!from || event.date >= from) && (!to || event.date <= to));
     const total = rowCounters(all);
@@ -451,23 +496,34 @@ function usageRows(value, content, options = {}) {
       coverageStatus: due ? "due" : absentDays >= 7 ? "overdue-coverage" : active && absentDays >= 3 ? "needs-coverage" : todayUsage ? "covered-today" : "scheduled"
     };
   });
+  const periodCovered = allRows.filter(row => row.periodUsage > 0).length;
+  const rows = allRows.filter(row => usageStatus === "used"
+    ? row.periodUsage > 0
+    : usageStatus === "unused"
+      ? row.periodUsage === 0
+      : true);
   rows.sort(compareRows(sort, order));
-  const uncoveredToday = rows.filter(row => row.todayUsage === 0).length;
-  const urgentCoverage = rows.filter(row => row.coverageDue).length;
+  const uncoveredToday = allRows.filter(row => row.todayUsage === 0).length;
+  const urgentCoverage = allRows.filter(row => row.coverageDue).length;
   return {
     schema: WORD_USAGE_SCHEMA,
     date,
     from,
     to,
+    range,
+    usageStatus,
     sort,
     order,
     rows,
     summary: {
-      learnedWords: rows.length,
-      coveredToday: rows.length - uncoveredToday,
+      learnedWords: allRows.length,
+      filteredWords: rows.length,
+      periodCovered,
+      periodUncovered: allRows.length - periodCovered,
+      coveredToday: allRows.length - uncoveredToday,
       uncoveredToday,
       urgentCoverage,
-      events: state.events.length,
+      events: formalEvents.length,
       capacityLimited: Math.max(0, urgentCoverage - Math.max(1, Number(options.capacity) || 10))
     },
     updatedAt: state.updatedAt

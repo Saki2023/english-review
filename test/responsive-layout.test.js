@@ -44,6 +44,7 @@ test("mobile styles keep AI, exam, ability, dictation, focused, pronunciation, n
   assert.match(tablet, /\.self-study-heading\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(tablet, /\.self-study-stage-list\s*\{[^}]*repeat\(3, minmax\(0, 1fr\)\)/s);
   assert.match(mobile, /\.preview-words-grid\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(css, /\.preview-supplement-group\s*\{[^}]*min-width:\s*0/s);
   assert.match(mobile, /\.preview-words-heading \.secondary-button,\s*\.preview-words-actions\s*\{[^}]*width:\s*100%/s);
   assert.match(mobile, /\.self-study-stage-list\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/s);
   assert.match(mobile, /\.self-study-answer-form \.primary-button\s*\{[^}]*width:\s*100%/s);
@@ -54,4 +55,6 @@ test("mobile styles keep AI, exam, ability, dictation, focused, pronunciation, n
   assert.match(css, /\.table-wrap\s*\{[^}]*overflow-x:\s*auto/s);
   assert.match(mobile, /\.library-pagination\s*\{[^}]*flex-direction:\s*column/s);
   assert.match(mobile, /\.library-page-actions\s*\{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto/s);
+  assert.match(tablet, /\.library-usage-shortcuts\s*\{[^}]*align-items:\s*stretch/s);
+  assert.match(tablet, /\.library-usage-shortcuts \.select-field, \.library-usage-status\s*\{[^}]*flex:\s*1 1 140px[^}]*min-width:\s*0/s);
 });

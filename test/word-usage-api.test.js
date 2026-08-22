@@ -9,7 +9,7 @@ const { once } = require("node:events");
 const { spawn } = require("node:child_process");
 const { test } = require("node:test");
 const { createUser, loadUsers, saveUsers } = require("../server/accounts");
-const { activityEvents, appendEvents } = require("../server/word-memory");
+const { activityEvents, addDays, appendEvents, studyDate } = require("../server/word-memory");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -62,6 +62,7 @@ function createAccounts(dataDir) {
 }
 
 function seedUsage(dataDir, ownerId) {
+  const currentDate = studyDate(new Date(), "Asia/Shanghai");
   const content = {
     words: [
       { id: "d1-man", day: 1, learned: "2026-08-01", english: "man", chinese: "男人", acceptedChinese: ["男人"] },
@@ -102,10 +103,16 @@ function seedUsage(dataDir, ownerId) {
       formalEvidence: true,
       date: "2026-08-17",
       occurredAt: "2026-08-17T01:00:00.000Z"
-    }, content)
+    }, content),
+    ...activityEvents({ eventId: "api-usage-cat-today", source: "review", taskId: "d2-cat:en-zh", wordIds: ["d2-cat"], kind: "recall", result: "wrong", formalEvidence: true, date: currentDate }, content),
+    ...activityEvents({ eventId: "api-usage-cat-three-day-edge", source: "review", taskId: "d2-cat:zh-en", wordIds: ["d2-cat"], kind: "recall", result: "independent-correct", formalEvidence: true, date: addDays(currentDate, -2) }, content),
+    ...activityEvents({ eventId: "api-usage-cat-seven-day-edge", source: "reading", taskId: "cat-reading", wordIds: ["d2-cat"], kind: "exposure", result: "completed", formalEvidence: true, date: addDays(currentDate, -6) }, content),
+    ...activityEvents({ eventId: "api-usage-cat-outside-seven-days", source: "reading", taskId: "cat-old-reading", wordIds: ["d2-cat"], kind: "exposure", result: "completed", formalEvidence: true, date: addDays(currentDate, -7) }, content),
+    ...activityEvents({ eventId: "api-preview-man-not-formal", source: "preview", taskId: "preview-man", wordIds: ["d1-man"], kind: "exposure", result: "completed", formalEvidence: false, date: currentDate }, content)
   ];
   const usage = appendEvents(null, events, content).state;
   fs.writeFileSync(path.join(dataDir, "user-states.json"), `${JSON.stringify({ schema: 1, users: { [ownerId]: { wordUsage: usage } } })}\n`, "utf8");
+  return { currentDate };
 }
 
 async function login(baseUrl, username, password) {
@@ -126,7 +133,7 @@ async function getUsage(baseUrl, cookie, query = "") {
 test("word usage API is date-filtered, account-isolated, read-only, and restart-stable", async () => {
   const dataDir = temporaryDataDir();
   const { owner, other } = createAccounts(dataDir);
-  seedUsage(dataDir, owner.id);
+  const { currentDate } = seedUsage(dataDir, owner.id);
   let app;
   try {
     app = await startApp(dataDir);
@@ -178,6 +185,38 @@ test("word usage API is date-filtered, account-isolated, read-only, and restart-
     assert.equal(allDatesMan.wrong, 1);
     assert.equal(allDatesMan.accuracy, 50);
 
+    const todayUsed = await getUsage(app.baseUrl, ownerCookie, "?range=today&status=used&sort=usage&order=desc");
+    assert.equal(todayUsed.response.status, 200);
+    assert.equal(todayUsed.body.date, currentDate);
+    assert.equal(todayUsed.body.from, currentDate);
+    assert.equal(todayUsed.body.to, currentDate);
+    assert.equal(todayUsed.body.range, "today");
+    assert.equal(todayUsed.body.usageStatus, "used");
+    assert.deepEqual(todayUsed.body.rows.map(row => row.id), ["d2-cat"], "non-formal preview activity must not make man used");
+    assert.equal(todayUsed.body.summary.filteredWords, 1);
+
+    const todayUnused = await getUsage(app.baseUrl, ownerCookie, "?range=today&status=unused&sort=index&order=asc");
+    assert.equal(todayUnused.response.status, 200);
+    assert.equal(todayUnused.body.rows.some(row => row.id === "d1-man"), true);
+    assert.equal(todayUnused.body.rows.some(row => row.id === "d2-cat"), false);
+
+    const threeDays = await getUsage(app.baseUrl, ownerCookie, "?range=3d&status=used");
+    assert.equal(threeDays.response.status, 200);
+    assert.equal(threeDays.body.from, addDays(currentDate, -2));
+    assert.equal(threeDays.body.rows.find(row => row.id === "d2-cat").periodUsage, 2);
+
+    const sevenDays = await getUsage(app.baseUrl, ownerCookie, "?range=7d&status=used");
+    assert.equal(sevenDays.response.status, 200);
+    assert.equal(sevenDays.body.from, addDays(currentDate, -6));
+    assert.equal(sevenDays.body.rows.find(row => row.id === "d2-cat").periodUsage, 3, "the event seven calendar days ago must be outside the inclusive six-day lookback");
+
+    const conflictingRange = await getUsage(app.baseUrl, ownerCookie, "?range=today&from=2026-08-19");
+    assert.equal(conflictingRange.response.status, 400);
+    const invalidRange = await getUsage(app.baseUrl, ownerCookie, "?range=month");
+    assert.equal(invalidRange.response.status, 400);
+    const invalidStatus = await getUsage(app.baseUrl, ownerCookie, "?status=maybe");
+    assert.equal(invalidStatus.response.status, 400);
+
     const isolated = await getUsage(app.baseUrl, otherCookie, "?from=2026-08-18&to=2026-08-19");
     assert.equal(isolated.response.status, 200);
     assert.equal(isolated.body.rows.find(row => row.id === "d1-man").totalUsage, 0);
@@ -201,7 +240,8 @@ test("word usage API is date-filtered, account-isolated, read-only, and restart-
     const afterRestart = await getUsage(app.baseUrl, await login(app.baseUrl, "usage-owner", "usage-owner-password"), "?from=2026-08-18&to=2026-08-19");
     assert.equal(afterRestart.response.status, 200);
     assert.equal(afterRestart.body.rows.find(row => row.id === "d1-man").periodUsage, 2);
-    assert.equal(afterRestart.body.rows.find(row => row.id === "d2-cat").periodUsage, 0);
+    const afterRestartToday = await getUsage(app.baseUrl, await login(app.baseUrl, "usage-owner", "usage-owner-password"), "?range=today&status=used");
+    assert.deepEqual(afterRestartToday.body.rows.map(row => row.id), ["d2-cat"], "quick filters must survive a service restart without rewriting evidence");
   } finally {
     await stopApp(app);
     fs.rmSync(dataDir, { recursive: true, force: true });

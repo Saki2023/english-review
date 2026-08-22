@@ -38,6 +38,22 @@ test("learning profile prioritizes weak learned content and excludes future less
   assert.equal(profile.recentAccuracy, 0);
 });
 
+test("completed self-study forms extend sentence AI vocabulary without becoming word-question cards", () => {
+  const content = {
+    currentDay: 15,
+    words: [{ id: "d9-see", day: 9, learned: "2026-08-15", english: "see", chinese: "看见", acceptedChinese: ["看见", "看到"], directions: ["en-zh", "zh-en"] }],
+    sentences: [{ id: "form-sentence", day: 15, learned: "2026-08-22", english: "see sees", chinese: "看与看见的词形", directions: ["en-zh"] }]
+  };
+  const state = {
+    selfStudy: { progress: { day15: { status: "completed", snapshot: { plannedContent: { supplements: [{ id: "supp-s", forms: [{ id: "form-sees", english: "sees", wordId: "d9-see", lemma: "see" }] }] } } } } }
+  };
+  const profile = buildLearningProfile(content, state, "2026-08-22");
+  assert.deepEqual(new Set(profile.allowedWords), new Set(["see", "sees"]));
+  assert.deepEqual(profile.wordMeanings.sees, ["看见", "看到"]);
+  assert.deepEqual(profile.learnedWords.map(item => item.id), ["d9-see"]);
+  assert.deepEqual(profile.wordForms, [{ id: "form-sees", english: "sees", wordId: "d9-see", lemma: "see", supplementId: "supp-s" }]);
+});
+
 test("AI practice state keeps a bounded current set, prepared groups, and per-account settings", () => {
   const question = { direction: "en-zh", english: "cat", chinese: "猫", acceptedEnglish: ["cat"], acceptedChinese: ["猫"], focus: "单词复习" };
   const selection = { providerId: "provider-a", providerName: "NewAPI", model: "model-a", reasoningEffort: "max" };

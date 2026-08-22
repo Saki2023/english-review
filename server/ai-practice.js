@@ -555,13 +555,31 @@ function buildLearningProfile(content, state, studyDate = "") {
     const rankB = usageRank.get(b.id) ?? Number.MAX_SAFE_INTEGER;
     return rankA - rankB || weakA.incorrect - weakB.incorrect || weakA.level - weakB.level || Number(b.day || 0) - Number(a.day || 0);
   }).slice(0, 120);
-  const allowedWords = Array.from(new Set(rankedWords.flatMap(item => englishTokens(item.english))));
+  const learnedById = new Map(rankedWords.map(item => [String(item.id || ""), item]));
+  const completedWordForms = Object.values(state.selfStudy && state.selfStudy.progress && typeof state.selfStudy.progress === "object" ? state.selfStudy.progress : {})
+    .filter(progress => progress && progress.status === "completed" && progress.snapshot && progress.snapshot.plannedContent)
+    .flatMap(progress => (Array.isArray(progress.snapshot.plannedContent.supplements) ? progress.snapshot.plannedContent.supplements : []).flatMap(supplement => (
+      Array.isArray(supplement && supplement.forms) ? supplement.forms.map(form => ({ ...form, supplementId: supplement.id })) : []
+    )))
+    .filter(form => {
+      const word = learnedById.get(String(form && form.wordId || ""));
+      return word && englishTokens(form.english).length === 1 && englishTokens(form.lemma).join(" ") === englishTokens(word.english).join(" ");
+    });
+  const allowedWords = Array.from(new Set([
+    ...rankedWords.flatMap(item => englishTokens(item.english)),
+    ...completedWordForms.flatMap(item => englishTokens(item.english))
+  ]));
   const allowedSet = new Set(allowedWords);
-  const wordMeanings = Object.fromEntries(rankedWords.flatMap(item => {
+  const wordMeanings = Object.fromEntries([...rankedWords.flatMap(item => {
     const tokens = englishTokens(item.english);
     const meanings = wordChineseMeanings(item);
     return tokens.length === 1 && meanings.length ? [[tokens[0], meanings]] : [];
-  }));
+  }), ...completedWordForms.flatMap(form => {
+    const word = learnedById.get(String(form.wordId || ""));
+    const tokens = englishTokens(form.english);
+    const meanings = wordChineseMeanings(word);
+    return tokens.length === 1 && meanings.length ? [[tokens[0], meanings]] : [];
+  })]);
   const rankedSentences = [...learnedSentences].sort((a, b) => {
     const weakA = itemWeakness(a, taskStates);
     const weakB = itemWeakness(b, taskStates);
@@ -612,6 +630,7 @@ function buildLearningProfile(content, state, studyDate = "") {
     currentDay: Number(content.currentDay) || 1,
     allowedWords,
     wordMeanings,
+    wordForms: completedWordForms.map(form => ({ id: form.id, english: form.english, wordId: form.wordId, lemma: form.lemma, supplementId: form.supplementId })),
     learnedWords: rankedWords.map(item => ({
       id: item.id,
       english: item.english,

@@ -100,8 +100,8 @@ function createWorker({ fetchImpl, setTimeoutImpl = setTimeout } = {}) {
 test("service worker serves cached static assets without touching the network and bypasses APIs", async () => {
   let fetchCalls = 0;
   const worker = createWorker({ fetchImpl: async () => { fetchCalls += 1; throw new Error("network should not be used"); } });
-  const cache = worker.cacheFor("daily-english-review-v78");
-  const asset = new Request(`${ORIGIN}/app.js?v=78`);
+  const cache = worker.cacheFor("daily-english-review-v79");
+  const asset = new Request(`${ORIGIN}/app.js?v=79`);
   await cache.put(asset, new Response("cached-app"));
 
   const cachedEvent = worker.dispatchFetch(asset);
@@ -117,7 +117,7 @@ test("service worker serves cached static assets without touching the network an
   assert.equal(postEvent.responsePromise, undefined);
 });
 
-test("install precaches the complete v78 app shell and immediately activates the worker", async () => {
+test("install precaches the complete v79 app shell and immediately activates the worker", async () => {
   const fetched = [];
   const worker = createWorker({
     fetchImpl: async request => {
@@ -129,13 +129,13 @@ test("install precaches the complete v78 app shell and immediately activates the
   await worker.dispatchLifecycle("install");
 
   assert.equal(worker.counts().skippedWaiting, 1);
-  assert.deepEqual(await worker.caches.keys(), ["daily-english-review-v78"]);
+  assert.deepEqual(await worker.caches.keys(), ["daily-english-review-v79"]);
   assert.equal(fetched.length, 19);
   assert.equal(new Set(fetched).size, 19);
   assert.ok(fetched.includes("/index.html"));
-  assert.ok(fetched.includes("/app.js?v=78"));
-  assert.ok(fetched.includes("/offline-store.js?v=78"));
-  assert.ok(fetched.includes("/vendor/lucide.min.js?v=78"));
+  assert.ok(fetched.includes("/app.js?v=79"));
+  assert.ok(fetched.includes("/offline-store.js?v=79"));
+  assert.ok(fetched.includes("/vendor/lucide.min.js?v=79"));
   assert.equal(fetched.some(entry => entry.includes("v=76")), false);
 });
 
@@ -146,7 +146,7 @@ test("slow navigation returns cached HTML while the delayed network refresh stay
     fetchImpl: async () => network,
     setTimeoutImpl: callback => { queueMicrotask(callback); return 1; }
   });
-  const cache = worker.cacheFor("daily-english-review-v78");
+  const cache = worker.cacheFor("daily-english-review-v79");
   await cache.put("/index.html", new Response("cached-index"));
 
   const event = worker.dispatchFetch({ url: `${ORIGIN}/`, method: "GET", mode: "navigate" });
@@ -165,6 +165,6 @@ test("first navigation waits for a real response and activation retires the old 
   await Promise.all(event.waits);
 
   await worker.dispatchLifecycle("activate");
-  assert.deepEqual(await worker.caches.keys(), ["daily-english-review-v78"]);
+  assert.deepEqual(await worker.caches.keys(), ["daily-english-review-v79"]);
   assert.equal(worker.counts().clientsClaimed, 1);
 });

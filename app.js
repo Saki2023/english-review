@@ -103,12 +103,17 @@
   let libraryType = "word";
   let libraryPage = 1;
   let libraryUsageRows = new Map();
+  let libraryUsageSummary = null;
   let libraryUsageLoading = false;
   let libraryUsageError = "";
   let libraryUsageRequestSerial = 0;
   let libraryUsageKey = "";
   let libraryUsageFrom = "";
   let libraryUsageTo = "";
+  let libraryUsageRange = "all";
+  let libraryUsageStatus = "all";
+  let libraryUsageResolvedFrom = "";
+  let libraryUsageResolvedTo = "";
   let libraryUsageSort = "index";
   let libraryUsageOrder = "asc";
   let libraryUsageVisibilityRefreshAt = 0;
@@ -226,7 +231,7 @@
   const focusedSpeechCache = new Map();
   let previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
   let selectedPreviewName = "";
-  let previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
+  let previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], supplements: [], error: "" };
   let previewPracticeSentencePreparation = null;
   let previewPracticeRetryTimer = null;
   let previewPracticeRetryKey = "";
@@ -325,12 +330,19 @@
       memories,
       summary: {
         learnedWords: Math.max(0, Number(summary.learnedWords) || 0),
+        filteredWords: Math.max(0, Number(summary.filteredWords) || 0),
+        periodCovered: Math.max(0, Number(summary.periodCovered) || 0),
+        periodUncovered: Math.max(0, Number(summary.periodUncovered) || 0),
         coveredToday: Math.max(0, Number(summary.coveredToday) || 0),
         uncoveredToday: Math.max(0, Number(summary.uncoveredToday) || 0),
         urgentCoverage: Math.max(0, Number(summary.urgentCoverage) || 0),
         events: Math.max(0, Number(summary.events) || 0),
         capacityLimited: Math.max(0, Number(summary.capacityLimited) || 0)
       },
+      from: /^\d{4}-\d{2}-\d{2}$/.test(String(source.from || "")) ? String(source.from) : "",
+      to: /^\d{4}-\d{2}-\d{2}$/.test(String(source.to || "")) ? String(source.to) : "",
+      range: ["all", "today", "3d", "7d", "custom"].includes(source.range) ? source.range : "all",
+      usageStatus: ["used", "unused"].includes(source.usageStatus) ? source.usageStatus : "all",
       rows,
       updatedAt: String(source.updatedAt || "").slice(0, 40)
     };
@@ -344,10 +356,11 @@
     const previousRevision = wordUsageRevision(model && model.wordUsage);
     const merged = mergeModels(model, remote);
     if (remote && remote.wordUsage && wordUsageRevision(merged.wordUsage) !== previousRevision) {
-      const canUseSnapshotRows = !libraryUsageFrom && !libraryUsageTo;
+      const canUseSnapshotRows = !libraryUsageFrom && !libraryUsageTo && libraryUsageRange === "all" && libraryUsageStatus === "all";
       libraryUsageRows = canUseSnapshotRows
         ? new Map((merged.wordUsage.rows || []).map(row => [String(row.id || ""), row]).filter(([id]) => id))
         : new Map();
+      libraryUsageSummary = canUseSnapshotRows ? (merged.wordUsage.summary || null) : null;
       invalidateLibraryUsage({ preserveRows: canUseSnapshotRows });
     }
     return merged;
@@ -451,7 +464,8 @@
       currentDay: preview.currentDay,
       nextDay: preview.nextDay,
       updatedAt: preview.updatedAt || pack.generatedAt,
-      words: preview.words || []
+      words: preview.words || [],
+      supplements: preview.supplements || []
     });
     const packedPractice = normalizeClientPreviewPractice(preview.practice);
     const localPractice = normalizeClientPreviewPractice(model.previewPractice);
@@ -636,7 +650,7 @@
       remoteReady = false;
       selfStudyLoaded = false;
       previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
-      previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
+      previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], supplements: [], error: "" };
       showAppView();
       await syncRemoteState();
       await Promise.all([loadPreview(), loadPreviewWords(), loadSelfStudy(true), loadAiOptions(), loadAiExams()]);
@@ -1790,6 +1804,7 @@
         kind,
         direction,
         wordId: String(item.wordId || "").trim().slice(0, 100),
+        formId: String(item.formId || "").trim().slice(0, 100),
         requiredPreviewWordIds: Array.from(new Set((Array.isArray(item.requiredPreviewWordIds) ? item.requiredPreviewWordIds : []).map(value => String(value || "").trim().slice(0, 100)).filter(Boolean))).slice(0, 8),
         english,
         chinese,
@@ -2287,7 +2302,7 @@
       syncPreviewMaskGlobals();
       previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
       selectedPreviewName = "";
-      previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
+      previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], supplements: [], error: "" };
       selfStudyState = normalizeClientSelfStudy(null);
       selfStudyLoaded = false;
       selfStudyLastPromotion = null;
@@ -2326,7 +2341,7 @@
     if (API_ENABLED) { try { await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }); } catch (_) {} }
     previewState = { loaded: false, loading: false, updatedAt: "", preview: null, previews: [], error: "" };
     selectedPreviewName = "";
-    previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], error: "" };
+    previewWordsState = { loaded: false, loading: false, currentDay: Number(DATA.currentDay) || 1, nextDay: (Number(DATA.currentDay) || 1) + 1, updatedAt: "", words: [], supplements: [], error: "" };
     selfStudyState = normalizeClientSelfStudy(null);
     selfStudyLoaded = false;
     selfStudyLastPromotion = null;
@@ -3779,11 +3794,42 @@
     };
   }
 
+  function normalizeClientPreviewSupplement(value) {
+    if (!value || typeof value !== "object") return null;
+    const id = String(value.id || "").trim().slice(0, 100);
+    const type = String(value.type || "").trim().slice(0, 80);
+    if (!id || !type) return null;
+    const forms = (Array.isArray(value.forms) ? value.forms : []).map(form => {
+      if (!form || typeof form !== "object") return null;
+      const formId = String(form.id || "").trim().slice(0, 100);
+      const english = String(form.english || "").trim().toLocaleLowerCase().slice(0, 100);
+      const wordId = String(form.wordId || "").trim().slice(0, 100);
+      const lemma = String(form.lemma || "").trim().toLocaleLowerCase().slice(0, 100);
+      if (!formId || !english || !wordId || !lemma) return null;
+      return {
+        id: formId,
+        english,
+        wordId,
+        lemma,
+        phonetic: String(form.phonetic || "").trim().slice(0, 100),
+        pronunciation: String(form.pronunciation || "").trim().slice(0, 300),
+        chinese: String(form.chinese || "").trim().slice(0, 180),
+        acceptedChinese: Array.from(new Set((Array.isArray(form.acceptedChinese) ? form.acceptedChinese : [form.chinese]).map(item => String(item || "").trim()).filter(Boolean))).slice(0, 8),
+        grammarTags: Array.from(new Set((Array.isArray(form.grammarTags) ? form.grammarTags : []).map(item => String(item || "").trim()).filter(Boolean))).slice(0, 12),
+        supplementId: id,
+        formalEvidence: false
+      };
+    }).filter(Boolean);
+    if (!forms.length) return null;
+    return { id, type, title: String(value.title || "额外补充").trim().slice(0, 160), note: String(value.note || "").trim().slice(0, 1000), forms, formalEvidence: false };
+  }
+
   function normalizePreviewWordsResponse(value) {
     const source = value && typeof value === "object" ? value : {};
     const currentDay = Math.max(1, Number(source.currentDay) || Number(DATA.currentDay) || 1);
     const nextDay = currentDay + 1;
     const words = (Array.isArray(source.words) ? source.words : []).map(normalizeClientPreviewWord).filter(item => item && item.day === nextDay);
+    const supplements = (Array.isArray(source.supplements) ? source.supplements : []).map(normalizeClientPreviewSupplement).filter(Boolean);
     return {
       loaded: true,
       loading: false,
@@ -3791,6 +3837,7 @@
       nextDay,
       updatedAt: String(source.updatedAt || "").slice(0, 40),
       words,
+      supplements,
       error: ""
     };
   }
@@ -3799,7 +3846,7 @@
     if (previewWordsState.loading) return;
     if (offlineSession && offlinePack) {
       const preview = offlinePack.preview || {};
-      previewWordsState = normalizePreviewWordsResponse({ currentDay: preview.currentDay, nextDay: preview.nextDay, updatedAt: preview.updatedAt || offlinePack.generatedAt, words: preview.words || [] });
+      previewWordsState = normalizePreviewWordsResponse({ currentDay: preview.currentDay, nextDay: preview.nextDay, updatedAt: preview.updatedAt || offlinePack.generatedAt, words: preview.words || [], supplements: preview.supplements || [] });
       ensurePreviewPracticeState();
       installOfflinePreviewSentences(offlinePack);
       renderPreviewWords();
@@ -3808,7 +3855,7 @@
       return;
     }
     if (!API_ENABLED) {
-      previewWordsState = { ...previewWordsState, loaded: true, loading: false, words: [], error: "预习单词需要登录网站后读取。" };
+      previewWordsState = { ...previewWordsState, loaded: true, loading: false, words: [], supplements: [], error: "预习单词需要登录网站后读取。" };
       renderPreviewWords();
       renderStudyTimer();
       return;
@@ -3834,8 +3881,14 @@
     return (Array.isArray(previewWordsState.words) ? previewWordsState.words : []).filter(item => item && item.preview === true && !String(item.learned || "").trim() && Number(item.day) === expectedNextDay && !learnedEnglish.has(String(item.english || "").toLocaleLowerCase()));
   }
 
+  function previewPracticeForms() {
+    return (Array.isArray(previewWordsState.supplements) ? previewWordsState.supplements : []).flatMap(supplement => (
+      Array.isArray(supplement.forms) ? supplement.forms : []
+    ));
+  }
+
   function previewPracticeKey(words = previewPracticeWords()) {
-    return `${previewWordsState.currentDay}|${previewWordsState.nextDay}|${words.map(item => item.id).sort().join(",")}`;
+    return `${previewWordsState.currentDay}|${previewWordsState.nextDay}|${words.map(item => item.id).sort().join(",")}|forms:${previewPracticeForms().map(item => item.id).sort().join(",")}`;
   }
 
   function newPreviewPracticeRoundId() {
@@ -3845,11 +3898,12 @@
 
   function previewWordPracticeTasks(words) {
     return words.flatMap(word => ["en-zh", "zh-en"].map(direction => ({
-      id: `preview-word-${word.id}-${direction}`,
+      id: `preview-word-${word.formId || word.id}-${direction}`,
       kind: "word",
       direction,
-      wordId: word.id,
-      requiredPreviewWordIds: [word.id],
+      wordId: word.wordId || word.id,
+      formId: word.formId || "",
+      requiredPreviewWordIds: [word.wordId || word.id],
       english: word.english,
       chinese: word.chinese,
       acceptedEnglish: [word.english],
@@ -3884,6 +3938,7 @@
 
   function ensurePreviewPracticeState() {
     const words = previewPracticeWords();
+    const forms = previewPracticeForms().map(form => ({ ...form, formId: form.id }));
     const key = previewPracticeKey(words);
     const stored = model.previewPractice;
     const current = normalizeClientPreviewPractice(stored);
@@ -3902,7 +3957,7 @@
       currentDay: Number(previewWordsState.currentDay) || Number(DATA.currentDay) || 1,
       nextDay: Number(previewWordsState.nextDay) || (Number(DATA.currentDay) || 1) + 1,
       mode: current.mode || "mixed",
-      tasks: previewWordPracticeTasks(words),
+      tasks: previewWordPracticeTasks([...words, ...forms]),
       index: 0,
       answers: {},
       results: {},
@@ -8049,20 +8104,30 @@
   }
 
   function libraryUsageRequestKey() {
-    return [libraryUsageFrom, libraryUsageTo, libraryUsageSort, libraryUsageOrder, currentUser && currentUser.id || "", offlineSession ? "offline" : "online"].join("|");
+    return [libraryUsageRange, libraryUsageStatus, libraryUsageFrom, libraryUsageTo, libraryUsageSort, libraryUsageOrder, currentUser && currentUser.id || "", offlineSession ? "offline" : "online"].join("|");
+  }
+
+  function libraryUsageFilterActive() {
+    return libraryUsageRange !== "all" || libraryUsageStatus !== "all" || Boolean(libraryUsageFrom || libraryUsageTo);
   }
 
   function resetLibraryUsageCache() {
     libraryUsageRequestSerial += 1;
     libraryUsageRows = new Map();
+    libraryUsageSummary = null;
     libraryUsageLoading = false;
     libraryUsageError = "";
     libraryUsageKey = "";
+    libraryUsageResolvedFrom = "";
+    libraryUsageResolvedTo = "";
   }
 
   function invalidateLibraryUsage(options = {}) {
     libraryUsageRequestSerial += 1;
-    if (options.preserveRows !== true) libraryUsageRows = new Map();
+    if (options.preserveRows !== true) {
+      libraryUsageRows = new Map();
+      libraryUsageSummary = null;
+    }
     libraryUsageLoading = false;
     libraryUsageError = "";
     libraryUsageKey = "";
@@ -8094,27 +8159,54 @@
     libraryUsageError = "";
     if (offlineSession || !API_ENABLED || !currentUser) {
       const rows = model.wordUsage && Array.isArray(model.wordUsage.rows) ? model.wordUsage.rows : [];
-      libraryUsageRows = new Map(rows.map(row => [String(row.id || ""), row]).filter(([id]) => id));
+      if (libraryUsageFilterActive()) {
+        libraryUsageRows = new Map();
+        libraryUsageSummary = null;
+        libraryUsageError = "离线状态不能按服务端北京时间重新筛选；联网后可立即重试。";
+      } else {
+        libraryUsageRows = new Map(rows.map(row => [String(row.id || ""), row]).filter(([id]) => id));
+        libraryUsageSummary = model.wordUsage && model.wordUsage.summary || null;
+      }
       if (activeView === "library") renderLibrary();
       return;
     }
     const serial = ++libraryUsageRequestSerial;
     const requestUserId = String(currentUser.id || "");
+    libraryUsageResolvedFrom = "";
+    libraryUsageResolvedTo = "";
     libraryUsageLoading = true;
     if (activeView === "library") renderLibrary();
     try {
       const query = new URLSearchParams({ sort: libraryUsageSort, order: libraryUsageOrder });
-      if (libraryUsageFrom) query.set("from", libraryUsageFrom);
-      if (libraryUsageTo) query.set("to", libraryUsageTo);
+      if (["today", "3d", "7d"].includes(libraryUsageRange)) query.set("range", libraryUsageRange);
+      else {
+        if (libraryUsageFrom) query.set("from", libraryUsageFrom);
+        if (libraryUsageTo) query.set("to", libraryUsageTo);
+      }
+      if (libraryUsageStatus !== "all") query.set("status", libraryUsageStatus);
       const response = await fetch(`/api/word-usage?${query}`, { credentials: "same-origin", cache: "no-store" });
       const data = await responseJson(response);
       if (serial !== libraryUsageRequestSerial || !currentUser || String(currentUser.id || "") !== requestUserId) return;
       const normalized = normalizeClientWordUsage(data);
       libraryUsageRows = new Map(normalized.rows.map(row => [row.id, row]));
-      model.wordUsage = normalized;
-      saveModel({ remote: false });
+      libraryUsageSummary = normalized.summary;
+      libraryUsageResolvedFrom = normalized.from;
+      libraryUsageResolvedTo = normalized.to;
+      if (!libraryUsageFilterActive()) {
+        model.wordUsage = {
+          ...normalized,
+          rankedWordIds: Array.isArray(model.wordUsage?.rankedWordIds) ? model.wordUsage.rankedWordIds : normalized.rankedWordIds,
+          memories: model.wordUsage?.memories && typeof model.wordUsage.memories === "object" ? model.wordUsage.memories : normalized.memories
+        };
+        saveModel({ remote: false });
+      }
     } catch (error) {
-      if (serial === libraryUsageRequestSerial) libraryUsageError = error.message || "词库统计暂时无法读取";
+      if (serial === libraryUsageRequestSerial) {
+        const message = String(error && error.message || "");
+        libraryUsageError = /failed to fetch|network|load failed/i.test(message)
+          ? "网络不可用，无法按服务端北京时间筛选；联网后切换条件即可重试。"
+          : message || "词库统计暂时无法读取";
+      }
     } finally {
       if (serial === libraryUsageRequestSerial) {
         libraryUsageLoading = false;
@@ -8133,9 +8225,12 @@
       && (!rawSearch.trim()
         || normalizeChinese(item.chinese).includes(searchChinese)
         || normalizeEnglish(item.english).includes(searchEnglish)));
-    const filteredItems = libraryType === "word" && typeof LIBRARY_USAGE.sortItems === "function"
-      ? LIBRARY_USAGE.sortItems(matchingItems, libraryUsageRows, libraryUsageSort, libraryUsageOrder)
+    const usageFilteredItems = libraryType === "word" && typeof LIBRARY_USAGE.filterItems === "function"
+      ? LIBRARY_USAGE.filterItems(matchingItems, libraryUsageRows, libraryUsageStatus)
       : matchingItems;
+    const filteredItems = libraryType === "word" && typeof LIBRARY_USAGE.sortItems === "function"
+      ? LIBRARY_USAGE.sortItems(usageFilteredItems, libraryUsageRows, libraryUsageSort, libraryUsageOrder)
+      : usageFilteredItems;
     const requestedPageSize = Number($("#libraryPageSize").value);
     const pageSize = LIBRARY_PAGE_SIZES.includes(requestedPageSize) ? requestedPageSize : LIBRARY_PAGE_SIZES[0];
     if (requestedPageSize !== pageSize) $("#libraryPageSize").value = String(pageSize);
@@ -8151,7 +8246,7 @@
       const dayLabel = item.preview ? `第 ${item.day} 天预习` : `第 ${item.day} 天`;
       const usage = usageRowForItem(item);
       const usageDescription = usage && typeof LIBRARY_USAGE.describeRow === "function"
-        ? LIBRARY_USAGE.describeRow(usage, libraryUsageFrom, libraryUsageTo)
+        ? LIBRARY_USAGE.describeRow(usage, libraryUsageResolvedFrom || libraryUsageFrom, libraryUsageResolvedTo || libraryUsageTo)
         : null;
       const usageHtml = usage
         ? `<div class="library-usage-cell"><span>今日 ${usage.todayUsage} · 总计 ${usage.totalUsage}</span>${usageDescription?.period ? `<span>${escapeHtml(usageDescription.period)}</span>` : ""}<span>${escapeHtml(usageDescription?.results || `累计对 ${usage.independentCorrect} · 错 ${usage.wrong} · 提示 ${usage.assisted}`)}</span><span>${escapeHtml(usageDescription?.accuracy || `累计正确率 ${usage.accuracy == null ? "—" : `${usage.accuracy}%`}`)}</span><span>最近 ${formatUsageDate(usage.lastUsedDate)}</span><span>下次 ${formatUsageDate(usage.nextDue, "未安排")}</span></div>`
@@ -8165,22 +8260,36 @@
     const hasItems = filteredItems.length > 0;
     const endIndex = startIndex + items.length;
     $("#libraryEmpty").hidden = hasItems;
+    $("#libraryEmpty").textContent = libraryUsageError || (libraryType === "word" && libraryUsageStatus !== "all"
+      ? `没有符合当前时间和“${libraryUsageStatus === "used" ? "已使用" : "未使用"}”条件的基本词。`
+      : "还没有符合条件的内容。");
     $("#libraryRange").textContent = hasItems ? `显示第 ${startIndex + 1}-${endIndex} 条，共 ${filteredItems.length} 条` : "共 0 条";
     $("#libraryPageStatus").textContent = hasItems ? `第 ${libraryPage} / ${totalPages} 页` : "第 0 / 0 页";
     $("#libraryPrevPage").disabled = !hasItems || libraryPage <= 1;
     $("#libraryNextPage").disabled = !hasItems || libraryPage >= totalPages;
-    const summary = model.wordUsage && model.wordUsage.summary || {};
+    const summary = libraryUsageSummary || model.wordUsage && model.wordUsage.summary || {};
     const summaryNode = $("#libraryUsageSummary");
     const usageScope = typeof LIBRARY_USAGE.dateScope === "function"
-      ? LIBRARY_USAGE.dateScope(libraryUsageFrom, libraryUsageTo)
-      : { active: Boolean(libraryUsageFrom || libraryUsageTo), label: libraryUsageFrom || libraryUsageTo || "全部日期" };
+      ? LIBRARY_USAGE.dateScope(libraryUsageResolvedFrom || libraryUsageFrom, libraryUsageResolvedTo || libraryUsageTo)
+      : { active: Boolean(libraryUsageResolvedFrom || libraryUsageResolvedTo || libraryUsageFrom || libraryUsageTo), label: libraryUsageResolvedFrom || libraryUsageFrom || libraryUsageResolvedTo || libraryUsageTo || "全部日期" };
+    const rangeLabels = { all: "全部日期", today: "今天", "3d": "近 3 天", "7d": "近 7 天", custom: "手工日期" };
+    const statusLabels = { all: "全部使用状态", used: "已使用", unused: "未使用" };
+    const rangeSelect = $("#libraryUsageRange");
+    if (rangeSelect) rangeSelect.value = libraryUsageRange;
+    $$('[data-library-usage-status]').forEach(button => {
+      const active = button.dataset.libraryUsageStatus === libraryUsageStatus;
+      button.classList.toggle("is-selected", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    const filterHint = $("#libraryUsageFilterHint");
+    if (filterHint) filterHint.textContent = `${rangeLabels[libraryUsageRange] || usageScope.label} · ${statusLabels[libraryUsageStatus]}${libraryUsageRange === "custom" ? "（手工日期优先）" : "（服务端北京时间）"}`;
     if (summaryNode) {
       summaryNode.textContent = libraryUsageLoading
         ? "正在读取服务端使用统计…"
         : libraryUsageError
           ? libraryUsageError
           : libraryType === "word"
-            ? `今日已覆盖 ${summary.coveredToday || 0} / ${summary.learnedWords || learnedItems.filter(item => item.type === "word").length} 个词 · 未覆盖 ${summary.uncoveredToday || 0} · 到期/薄弱 ${summary.urgentCoverage || 0}${summary.capacityLimited ? ` · 当前容量不足 ${summary.capacityLimited} 个` : ""} · ${usageScope.active ? `行内所选区间：${usageScope.label}` : "行内对/错/提示/正确率：全部日期累计"}`
+            ? `${libraryUsageStatus !== "all" ? `${rangeLabels[libraryUsageRange] || usageScope.label}${statusLabels[libraryUsageStatus]} ${summary.filteredWords || 0} 个词 · 当前列表 ${filteredItems.length} 条 · ` : ""}今日已覆盖 ${summary.coveredToday || 0} / ${summary.learnedWords || learnedItems.filter(item => item.type === "word").length} 个词 · 未覆盖 ${summary.uncoveredToday || 0} · 到期/薄弱 ${summary.urgentCoverage || 0}${summary.capacityLimited ? ` · 当前容量不足 ${summary.capacityLimited} 个` : ""} · ${usageScope.active ? `行内所选区间：${usageScope.label}` : "行内对/错/提示/正确率：全部日期累计"}`
             : "句子使用统计只在实际完成后计入；生成、展示和未作答不计数。";
     }
     $$('[data-practice]').forEach(button => button.addEventListener("click", () => practiceTask(`${button.dataset.practice}:en-zh`)));
@@ -8407,9 +8516,6 @@
   }
 
   function renderMaskedPreviewWordCards(words) {
-    const validIds = new Set(words.map(item => String(item.id || "").trim()).filter(Boolean));
-    previewRevealedIds = Object.fromEntries(Object.entries(previewRevealedIds).filter(([id, revealed]) => validIds.has(id) && revealed === true));
-    model.previewRevealedIds = { ...previewRevealedIds };
     $$('[data-preview-mask-mode]').forEach(control => {
       const selected = control.dataset.previewMaskMode === previewMaskMode;
       control.classList.toggle("is-selected", selected);
@@ -8432,12 +8538,38 @@
     }).join("");
   }
 
+  function renderMaskedPreviewSupplements(supplements) {
+    return supplements.map(supplement => {
+      const forms = (Array.isArray(supplement.forms) ? supplement.forms : []).map(form => {
+        const id = String(form.id || "").trim();
+        const revealed = previewRevealedIds[id] === true;
+        const hideChinese = previewMaskMode === "hide-chinese" && !revealed;
+        const hideEnglish = previewMaskMode === "hide-english" && !revealed;
+        const revealLabel = previewMaskMode === "hide-chinese" ? "查看中文" : "查看英文";
+        const englishHtml = hideEnglish ? "" : '<div class="preview-word-english preview-form-english"><code>' + escapeHtml(form.lemma) + ' → ' + escapeHtml(form.english) + '</code><span>' + escapeHtml(form.phonetic || "补充词形") + '</span></div>';
+        const chineseHtml = hideChinese ? "" : '<div class="preview-word-meaning"><span>沿用基本词词义</span><strong>' + escapeHtml(form.chinese || "见基本词") + '</strong></div>';
+        const speechHtml = hideEnglish ? "" : speechButtonHtml(form.english, "慢速播放补充词形 " + form.english);
+        const detail = hideChinese || hideEnglish ? (revealed ? "已查看本项内容。" : `${revealLabel}后显示本项内容。`) : (form.pronunciation || "这是基本词的词形变化，不单独计算新词或记忆卡。");
+        const revealHtml = hideChinese || hideEnglish ? '<button class="secondary-button compact-button preview-word-reveal" type="button" data-preview-reveal-id="' + escapeHtml(id) + '"><i data-lucide="eye" aria-hidden="true"></i>' + revealLabel + '</button>' : "";
+        return '<article class="preview-word-card preview-form-card"><header><span class="type-badge">额外补充 · 不占名额</span><span class="preview-word-header-actions">' + speechHtml + revealHtml + '</span></header>' + englishHtml + chineseHtml + '<p class="preview-word-masked-note">' + escapeHtml(detail) + '</p></article>';
+      }).join("");
+      return '<section class="preview-supplement-group"><div class="preview-supplement-heading"><h2>' + escapeHtml(supplement.title || "额外补充") + '</h2><p>' + escapeHtml(supplement.note || "这些词形用于紧邻语法和认读练习，不增加新基本词数量。") + '</p></div><div class="preview-words-grid">' + forms + '</div></section>';
+    }).join("");
+  }
+
   function renderPreviewWords() {
     const words = Array.isArray(previewWordsState.words) ? previewWordsState.words : [];
+    const supplements = Array.isArray(previewWordsState.supplements) ? previewWordsState.supplements : [];
+    const formCount = supplements.reduce((sum, item) => sum + (Array.isArray(item.forms) ? item.forms.length : 0), 0);
+    const validIds = new Set([...words.map(item => item.id), ...supplements.flatMap(item => (Array.isArray(item.forms) ? item.forms.map(form => form.id) : []))].map(item => String(item || "").trim()).filter(Boolean));
+    previewRevealedIds = Object.fromEntries(Object.entries(previewRevealedIds).filter(([id, revealed]) => validIds.has(id) && revealed === true));
+    model.previewRevealedIds = { ...previewRevealedIds };
     const nextDay = Math.max(1, Number(previewWordsState.nextDay) || (Number(DATA.currentDay) || 1) + 1);
     const button = $("#refreshPreviewWordsButton");
     button.disabled = previewWordsState.loading;
     $("#previewWordsGrid").innerHTML = renderMaskedPreviewWordCards(words);
+    $("#previewSupplements").innerHTML = renderMaskedPreviewSupplements(supplements);
+    $("#previewSupplements").hidden = supplements.length === 0;
     $("#previewWordsEmpty").hidden = words.length > 0 || previewWordsState.loading;
 
     if (previewWordsState.loading && !words.length) {
@@ -8447,7 +8579,7 @@
     } else if (!words.length) {
       $("#previewWordsStatus").textContent = `当前课程第 ${previewWordsState.currentDay} 天 · 第 ${nextDay} 天暂无未学新词`;
     } else {
-      $("#previewWordsStatus").textContent = `当前课程第 ${previewWordsState.currentDay} 天 · 只显示第 ${nextDay} 天的 ${words.length} 个未学单词`;
+      $("#previewWordsStatus").textContent = `当前课程第 ${previewWordsState.currentDay} 天 · 第 ${nextDay} 天 ${words.length} 个新基本词${formCount ? ` + ${formCount} 个额外补充词形（不占名额）` : ""}`;
     }
     $$('[data-preview-reveal-id]').forEach(control => control.addEventListener("click", () => {
       const id = String(control.dataset.previewRevealId || "").trim();
@@ -8698,6 +8830,35 @@
     ["#libraryUsageFrom", "#libraryUsageTo"].forEach(selector => $(selector).addEventListener("change", event => {
       if (selector === "#libraryUsageFrom") libraryUsageFrom = event.target.value;
       else libraryUsageTo = event.target.value;
+      libraryUsageRange = libraryUsageFrom || libraryUsageTo ? "custom" : "all";
+      $("#libraryUsageRange").value = libraryUsageRange;
+      libraryUsageResolvedFrom = "";
+      libraryUsageResolvedTo = "";
+      libraryUsageRows = new Map();
+      libraryPage = 1;
+      void loadLibraryUsage(true);
+    }));
+    $("#libraryUsageRange").addEventListener("change", event => {
+      libraryUsageRange = ["today", "3d", "7d"].includes(event.target.value) ? event.target.value : "all";
+      libraryUsageFrom = "";
+      libraryUsageTo = "";
+      $("#libraryUsageFrom").value = "";
+      $("#libraryUsageTo").value = "";
+      libraryUsageResolvedFrom = "";
+      libraryUsageResolvedTo = "";
+      libraryUsageRows = new Map();
+      libraryPage = 1;
+      void loadLibraryUsage(true);
+    });
+    $$('[data-library-usage-status]').forEach(button => button.addEventListener("click", () => {
+      const requested = button.dataset.libraryUsageStatus;
+      libraryUsageStatus = libraryUsageStatus === requested ? "all" : requested;
+      if (libraryUsageStatus !== "all" && libraryUsageRange === "all" && !libraryUsageFrom && !libraryUsageTo) {
+        libraryUsageRange = "today";
+        $("#libraryUsageRange").value = libraryUsageRange;
+      }
+      libraryUsageResolvedFrom = "";
+      libraryUsageResolvedTo = "";
       libraryUsageRows = new Map();
       libraryPage = 1;
       void loadLibraryUsage(true);
@@ -8715,8 +8876,13 @@
     $("#libraryUsageClear").addEventListener("click", () => {
       libraryUsageFrom = "";
       libraryUsageTo = "";
+      libraryUsageRange = "all";
+      libraryUsageStatus = "all";
+      libraryUsageResolvedFrom = "";
+      libraryUsageResolvedTo = "";
       $("#libraryUsageFrom").value = "";
       $("#libraryUsageTo").value = "";
+      $("#libraryUsageRange").value = "all";
       libraryUsageRows = new Map();
       libraryPage = 1;
       void loadLibraryUsage(true);
@@ -8985,7 +9151,7 @@
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=78", { updateViaCache: "none" }).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=79", { updateViaCache: "none" }).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

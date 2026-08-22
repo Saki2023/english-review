@@ -45,6 +45,42 @@ test("usage events deduplicate the same word inside one activity and stay idempo
   assert.deepEqual(second.state.memories, {}, "sentence exposure must not advance word recall memory");
 });
 
+test("registered word forms create base-word usage and non-card form evidence", () => {
+  const withForms = {
+    ...content,
+    wordForms: [
+      { id: "form-dogs", english: "dogs", wordId: "dog", lemma: "dog", supplementId: "supp-plural" }
+    ]
+  };
+  const exposure = activityEvents({
+    eventId: "sentence-with-forms",
+    source: "self-study",
+    english: "A cat sees dogs.",
+    kind: "exposure",
+    result: "completed",
+    formalEvidence: true,
+    date: "2026-08-19"
+  }, withForms);
+  assert.deepEqual(exposure.map(event => event.wordId), ["cat", "dog"]);
+  assert.equal(exposure.find(event => event.wordId === "dog").formId, "form-dogs");
+  assert.equal(exposure.find(event => event.wordId === "dog").surfaceForm, "dogs");
+  assert.equal(exposure.some(event => event.wordId === "form-dogs"), false);
+  const recall = activityEvents({
+    eventId: "recall-dogs",
+    source: "self-study",
+    wordIds: ["dog"],
+    formEvidence: { id: "form-dogs", english: "dogs", wordId: "dog", lemma: "dog", supplementId: "supp-plural" },
+    kind: "recall",
+    result: "independent-correct",
+    formalEvidence: true,
+    date: "2026-08-19"
+  }, withForms);
+  const state = appendEvents(null, recall, withForms).state;
+  assert.equal(recall[0].wordId, "dog");
+  assert.equal(recall[0].formId, "form-dogs");
+  assert.deepEqual(Object.keys(state.memories), ["dog"]);
+});
+
 test("SM-2 mapping keeps wrong, assisted, and independent recall distinct", () => {
   const base = { wordId: "cat", repetitions: 2, intervalDays: 3, easiness: 2.5, nextDue: "2026-08-19" };
   const wrong = applyRecall(base, {
@@ -140,6 +176,27 @@ test("aggregates support inclusive dates and stable sorting without leaking answ
   assert.equal(cat.wrong, 0);
   assert.equal(JSON.stringify(aggregate).includes("answer"), false);
   assert.deepEqual(aggregate.rows.slice(0, 2).map(row => row.id), ["cat", "dog"]);
+});
+
+test("used and unused filters count only completed formal usage and keep form evidence on the base word", () => {
+  const withForms = {
+    ...content,
+    wordForms: [{ id: "form-dogs", english: "dogs", wordId: "dog", lemma: "dog", supplementId: "supp-plural" }]
+  };
+  const state = appendEvents(null, [
+    ...activityEvents({ eventId: "formal-dogs", source: "self-study", english: "dogs", kind: "exposure", result: "completed", formalEvidence: true, date: "2026-08-19" }, withForms),
+    ...activityEvents({ eventId: "preview-cat", source: "preview", wordIds: ["cat"], kind: "exposure", result: "completed", formalEvidence: false, date: "2026-08-19" }, withForms)
+  ], withForms).state;
+  const used = usageRows(state, withForms, { date: "2026-08-19", from: "2026-08-19", to: "2026-08-19", usageStatus: "used" });
+  const unused = usageRows(state, withForms, { date: "2026-08-19", from: "2026-08-19", to: "2026-08-19", usageStatus: "unused" });
+  assert.deepEqual(used.rows.map(row => row.id), ["dog"]);
+  assert.equal(used.rows[0].periodUsage, 1);
+  assert.deepEqual(unused.rows.map(row => row.id), ["cat", "pool"]);
+  assert.equal(used.summary.learnedWords, 3);
+  assert.equal(used.summary.filteredWords, 1);
+  assert.equal(used.summary.events, 1, "preview/non-formal exposure must not enter real-use coverage");
+  assert.equal(state.events.find(event => event.eventId === "formal-dogs:dog").formId, "form-dogs");
+  assert.equal(state.events.some(event => event.wordId === "form-dogs"), false);
 });
 
 test("coverage ranking applies due, weak, unused-today, three-day and seven-day priorities", () => {

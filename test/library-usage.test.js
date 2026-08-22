@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { dateScope, describeRow, revision, sortItems } = require("../library-usage");
+const { dateScope, describeRow, filterItems, revision, sortItems, usageStatus } = require("../library-usage");
 
 const items = [
   { id: "a", preview: false },
@@ -28,6 +28,15 @@ test("library usage sorts before pagination and keeps planned words stably last"
   assert.deepEqual(ids(sortItems(items, rows, "due", "asc")), ["c", "b", "a", "planned"]);
   assert.deepEqual(ids(sortItems(items, rows, "index", "desc")), ["c", "b", "a", "planned"]);
   assert.deepEqual(ids(sortItems([items[0], items[2], items[3]], rows, "usage", "asc")), ["c", "a", "planned"], "search/day filtering can run before stable sorting");
+});
+
+test("library usage filters learned base words by the server period counters", () => {
+  assert.deepEqual(ids(filterItems(items, rows, "used")), ["a"]);
+  assert.deepEqual(ids(filterItems(items, rows, "unused")), ["b", "c"]);
+  assert.deepEqual(ids(filterItems(items, rows, "all")), ["a", "b", "c", "planned"]);
+  assert.equal(usageStatus("used"), "used");
+  assert.equal(usageStatus("unused"), "unused");
+  assert.equal(usageStatus("unexpected"), "all");
 });
 
 test("word usage revisions change when counters change even at the same timestamp", () => {

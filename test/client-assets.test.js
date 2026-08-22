@@ -118,8 +118,8 @@ test("formal review batch start has bounded recovery and an explicit retry gate"
   const css = read("styles.css");
   const serviceWorker = read("sw.js");
   const server = read("server.js");
-  assert.match(html, /review-batch-client\.js\?v=78/);
-  assert.match(serviceWorker, /review-batch-client\.js\?v=78/);
+  assert.match(html, /review-batch-client\.js\?v=79/);
+  assert.match(serviceWorker, /review-batch-client\.js\?v=79/);
   assert.match(html, /id="reviewBatchStartRetryActions"[\s\S]*id="reviewBatchStartRetryButton"[\s\S]*重试保存题目快照/);
   assert.match(app, /REVIEW_BATCH_START_TIMEOUT_MS = Number\(REVIEW_BATCH_CLIENT\.DEFAULT_START_TIMEOUT_MS\) \|\| 12000/);
   assert.match(app, /REVIEW_BATCH_RECOVERY_TIMEOUT_MS = Number\(REVIEW_BATCH_CLIENT\.DEFAULT_RECOVERY_TIMEOUT_MS\) \|\| 6000/);
@@ -275,14 +275,14 @@ test("pronunciation lesson lists and filters reference sounds without pretending
   assert.match(html, /data-pronunciation-filter="vowel"/);
   assert.match(html, /data-pronunciation-filter="consonant"/);
   assert.match(html, /data-pronunciation-filter="all"/);
-  assert.match(html, /pronunciation-data\.js\?v=78/);
+  assert.match(html, /pronunciation-data\.js\?v=79/);
   assert.match(app, /function renderPronunciation\(\)/);
   assert.match(app, /item\.learned === true/);
   assert.match(app, /phonemeSoundButtonHtml\(item\)/);
   assert.match(app, /speechButtonHtml\(item\.example, `慢速播放完整示范词/);
   assert.match(app, /data-pronunciation-sound/);
   assert.match(app, /中文辅助/);
-  assert.match(serviceWorker, /pronunciation-data\.js\?v=78/);
+  assert.match(serviceWorker, /pronunciation-data\.js\?v=79/);
 });
 
 test("daily preview loads the latest synced document and renders bounded Markdown safely", () => {
@@ -338,9 +338,10 @@ test("library paginates filtered English and Chinese results with continuous seq
   assert.match(app, /class=\\"sequence-cell\\">序号/);
   assert.match(app, /normalizeChinese\(item\.chinese\)\.includes\(searchChinese\)/);
   assert.match(app, /normalizeEnglish\(item\.english\)\.includes\(searchEnglish\)/);
-  assert.match(html, /library-usage\.js\?v=78/);
-  assert.match(serviceWorker, /library-usage\.js\?v=78/);
-  assert.match(app, /LIBRARY_USAGE\.sortItems\(matchingItems, libraryUsageRows, libraryUsageSort, libraryUsageOrder\)/);
+  assert.match(html, /library-usage\.js\?v=79/);
+  assert.match(serviceWorker, /library-usage\.js\?v=79/);
+  assert.match(app, /LIBRARY_USAGE\.filterItems\(matchingItems, libraryUsageRows, libraryUsageStatus\)/);
+  assert.match(app, /LIBRARY_USAGE\.sortItems\(usageFilteredItems, libraryUsageRows, libraryUsageSort, libraryUsageOrder\)/);
   assert.match(libraryUsage, /Planned\/preview words do not have formal usage rows/);
   assert.match(app, /filteredItems\.slice\(startIndex, startIndex \+ pageSize\)/);
   assert.match(app, /items\.map\(\(item, index\) =>/);
@@ -364,13 +365,35 @@ test("completed learning invalidates word usage rows without crossing account st
   assert.match(app, /async function submitFocusedPractice\(event\)[\s\S]*invalidateLibraryUsage\(\)/);
   assert.match(app, /async function submitExam\(event\)[\s\S]*invalidateLibraryUsage\(\)/);
   assert.match(app, /if \(path === "\/submit"\) invalidateLibraryUsage\(\)/);
-  assert.match(app, /LIBRARY_USAGE\.describeRow\(usage, libraryUsageFrom, libraryUsageTo\)/);
+  assert.match(app, /LIBRARY_USAGE\.describeRow\(usage, libraryUsageResolvedFrom \|\| libraryUsageFrom, libraryUsageResolvedTo \|\| libraryUsageTo\)/);
   assert.match(app, /usageDescription\?\.period/);
   assert.match(app, /行内所选区间：\$\{usageScope\.label\}/);
   assert.match(app, /行内对\/错\/提示\/正确率：全部日期累计/);
   assert.match(app, /libraryUsageRows = new Map\(\);\s*libraryPage = 1;\s*void loadLibraryUsage\(true\)/);
   assert.match(usage, /所选区间 \$\{Math\.max\(0, Number\(row\.periodUsage\) \|\| 0\)\} 次/);
   assert.match(usage, /const prefix = scope\.active \? "区间" : "累计"/);
+});
+
+test("library real-use filters combine server Beijing ranges with used and unused base-word states", () => {
+  const app = read("app.js");
+  const html = read("index.html");
+  const css = read("styles.css");
+  const server = read("server.js");
+  const memory = read("server/word-memory.js");
+  assert.match(html, /id="libraryUsageRange"[\s\S]*value="today">今天<[\s\S]*value="3d">近 3 天<[\s\S]*value="7d">近 7 天</);
+  assert.match(html, /data-library-usage-status="used"[\s\S]*>已使用<[\s\S]*data-library-usage-status="unused"[\s\S]*>未使用</);
+  assert.match(app, /query\.set\("range", libraryUsageRange\)/);
+  assert.match(app, /query\.set\("status", libraryUsageStatus\)/);
+  assert.match(app, /const summary = libraryUsageSummary \|\| model\.wordUsage && model\.wordUsage\.summary \|\| \{\}/);
+  assert.match(app, /libraryUsageStatus !== "all" && libraryUsageRange === "all"[\s\S]*libraryUsageRange = "today"/);
+  assert.match(app, /libraryUsageRange = libraryUsageFrom \|\| libraryUsageTo \? "custom" : "all"/);
+  assert.match(app, /离线状态不能按服务端北京时间重新筛选/);
+  assert.match(server, /addWordUsageDays\(currentDate, range === "today" \? 0 : range === "3d" \? -2 : -6\)/);
+  assert.match(server, /快捷时间范围不能与手工日期同时使用/);
+  assert.match(memory, /const formalEvents = state\.events\.filter\(event => event\.formalEvidence === true\)/);
+  assert.match(memory, /usageStatus === "used"[\s\S]*row\.periodUsage > 0[\s\S]*usageStatus === "unused"/);
+  assert.match(css, /\.library-usage-shortcuts\s*\{[^}]*flex-wrap:\s*wrap/s);
+  assert.match(css, /\.library-usage-shortcuts \.select-field, \.library-usage-status\s*\{[^}]*min-width:\s*0/s);
 });
 
 test("preview words have a next-day-only page with speech and learned-feature isolation", () => {
@@ -380,17 +403,22 @@ test("preview words have a next-day-only page with speech and learned-feature is
   const server = read("server.js");
   assert.match(html, /data-view="preview-words"/);
   assert.match(html, /id="previewWordsGrid"/);
+  assert.match(html, /id="previewSupplements"/);
   assert.match(html, /id="refreshPreviewWordsButton"/);
   assert.match(app, /fetch\("\/api\/preview\/words", \{ cache: "no-store", credentials: "same-origin" \}\)/);
   assert.match(app, /function normalizePreviewWordsResponse\(value\)/);
   assert.match(app, /item => item && item\.day === nextDay/);
   assert.match(app, /function renderMaskedPreviewWordCards\(words\)/);
+  assert.match(app, /function normalizeClientPreviewSupplement\(value\)/);
+  assert.match(app, /function renderMaskedPreviewSupplements\(supplements\)/);
+  assert.match(app, /额外补充词形（不占名额）/);
   assert.match(app, /speechButtonHtml\(item\.english, "慢速播放预习单词 " \+ item\.english\)/);
   assert.match(app, /data-preview-reveal-id/);
   assert.match(html, /data-preview-mask-mode="hide-chinese"/);
   assert.match(html, /data-preview-mask-mode="hide-english"/);
   assert.match(app, /const learnedItems = allItems\.filter\(item => !item\.preview\)/);
   assert.match(css, /\.preview-words-grid\s*\{[^}]*grid-template-columns:/s);
+  assert.match(css, /\.preview-supplements\s*\{[^}]*min-width|\.preview-supplement-group\s*\{[^}]*min-width:\s*0/s);
   assert.match(server, /url\.pathname === "\/api\/preview\/words"/);
   assert.match(server, /content\.words\.filter\(item => !item\.preview && item\.learned/);
 });
@@ -407,6 +435,8 @@ test("preview practice keeps word and sentence exercises isolated from formal re
   assert.match(html, /data-preview-practice-mode="word"/);
   assert.match(html, /data-preview-practice-mode="sentence"/);
   assert.match(app, /function previewPracticeWords\(\)/);
+  assert.match(app, /function previewPracticeForms\(\)/);
+  assert.match(app, /formId: word\.formId \|\| ""/);
   assert.match(app, /function previewPracticeGrade\(task, answer\)/);
   assert.match(app, /function clientPreviewAcceptedChinese\(english, chinese, acceptedChinese = \[\]\)/);
   assert.match(app, /REVIEW_VARIANTS\.expandRegisteredChineseAnswers\(DATA, english, answers, 16\)/);
@@ -561,8 +591,8 @@ test("remote state saves are narrow, serialized, and skip server-authoritative r
   const serviceWorker = read("sw.js");
   const server = read("server.js");
   const stateSync = read("state-sync-client.js");
-  assert.match(html, /state-sync-client\.js\?v=78/);
-  assert.match(serviceWorker, /state-sync-client\.js\?v=78/);
+  assert.match(html, /state-sync-client\.js\?v=79/);
+  assert.match(serviceWorker, /state-sync-client\.js\?v=79/);
   assert.match(app, /STATE_SYNC\.createStateSaveQueue/);
   assert.match(app, /remoteStateQueue\.scheduleState\(model/);
   assert.match(app, /remoteStateQueue\?\.markServerState\(remote\)/);
@@ -692,7 +722,7 @@ test("exam UI supports A3 pages, printing, draft recovery, and paper-photo gradi
   assert.match(css, /\.exam-page-content\s*\{[^}]*column-count:\s*2/s);
 });
 
-test("PWA client assets consistently use the displayed cache version 78", () => {
+test("PWA client assets consistently use the displayed cache version 79", () => {
   const index = read("index.html");
   const app = read("app.js");
   const serviceWorker = read("sw.js");
@@ -703,15 +733,15 @@ test("PWA client assets consistently use the displayed cache version 78", () => 
   assert.ok(displayedVersion, "the current version should be visible in the page header");
   assert.ok(versions.length > 0);
   assert.deepEqual(new Set(versions), new Set([displayedVersion[1]]));
-  assert.equal(displayedVersion[1], "78");
-  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v78"/);
+  assert.equal(displayedVersion[1], "79");
+  assert.match(serviceWorker, /const CACHE_NAME = "daily-english-review-v79"/);
 });
 
 test("PWA cached reloads do not wait on every static network request", () => {
   const app = read("app.js");
   const serviceWorker = read("sw.js");
   const server = read("server.js");
-  assert.match(server, /const STATIC_ASSET_VERSION = "78"/);
+  assert.match(server, /const STATIC_ASSET_VERSION = "79"/);
   assert.match(server, /public, max-age=31536000, immutable/);
   assert.match(server, /res\.setHeader\("ETag", entityTag\)/);
   assert.match(server, /res\.setHeader\("Last-Modified", stats\.mtime\.toUTCString\(\)\)/);
@@ -722,7 +752,7 @@ test("PWA cached reloads do not wait on every static network request", () => {
   assert.match(serviceWorker, /request\.method !== "GET"[\s\S]*url\.pathname\.startsWith\("\/api\/"\)/);
   assert.match(serviceWorker, /event\.respondWith\(cacheFirst\(request\)\)/);
   assert.doesNotMatch(serviceWorker, /event\.respondWith\(fetch\(request\)/);
-  assert.match(app, /serviceWorker\.register\("\/sw\.js\?v=78", \{ updateViaCache: "none" \}\)/);
+  assert.match(app, /serviceWorker\.register\("\/sw\.js\?v=79", \{ updateViaCache: "none" \}\)/);
   assert.doesNotMatch(app, /registration\.update\(\)/);
 });
 
@@ -781,10 +811,10 @@ test("offline travel mode is explicit, account-bound, FIFO replayed, and never c
   assert.match(html, /id="deleteOfflinePack"/);
   assert.match(html, /id="offlinePackStatus"/);
   assert.match(html, /id="startNextOfflineAiBatch"/);
-  assert.match(html, /offline-store\.js\?v=78/);
-  assert.match(html, /offline-learning\.js\?v=78/);
-  assert.match(html, /offline-ai\.js\?v=78/);
-  assert.match(html, /offline-replay\.js\?v=78/);
+  assert.match(html, /offline-store\.js\?v=79/);
+  assert.match(html, /offline-learning\.js\?v=79/);
+  assert.match(html, /offline-ai\.js\?v=79/);
+  assert.match(html, /offline-replay\.js\?v=79/);
   assert.match(app, /function enterPreparedOfflineSession\(\)/);
   assert.match(app, /offlineStore\.activeAccountId\(\) !== accountId/);
   assert.match(app, /async function replayOfflineOutbox\(\)/);
@@ -810,8 +840,8 @@ test("offline travel mode is explicit, account-bound, FIFO replayed, and never c
   assert.doesNotMatch(`${app}\n${server}`, /\/api\/offline\/replay/);
   assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)\) return/);
   assert.doesNotMatch(serviceWorker, /\/api\/state/);
-  assert.match(serviceWorker, /offline-store\.js\?v=78/);
-  assert.match(serviceWorker, /offline-replay\.js\?v=78/);
+  assert.match(serviceWorker, /offline-store\.js\?v=79/);
+  assert.match(serviceWorker, /offline-replay\.js\?v=79/);
   assert.match(css, /@media \(max-width: 520px\)[\s\S]*\.self-study-mode-actions button:not\(\.offline-pack-delete\)/);
 });
 
@@ -845,6 +875,6 @@ test("daily study plan offers six free-choice projects and records sixty minutes
   assert.doesNotMatch(app, /String\(stage\.index \+ 1\)/);
   assert.doesNotMatch(app, /按顺序完成/);
   assert.doesNotMatch(html, /按顺序学习/);
-  assert.match(html, /study-time\.js\?v=78/);
-  assert.match(serviceWorker, /study-time\.js\?v=78/);
+  assert.match(html, /study-time\.js\?v=79/);
+  assert.match(serviceWorker, /study-time\.js\?v=79/);
 });

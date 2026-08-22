@@ -65,6 +65,7 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 | POST | `/api/preview/practice/sentences` | 按当前预习词生成预习句子练习，需要登录及已配置的 AI |
 | POST | `/api/preview/practice/grade` | 判定预习翻译；继承正式词库同义词但始终保持非正式证据 |
 | GET | `/api/abilities` | 获取当前账号七维能力分析，需要登录 |
+| GET | `/api/word-usage` | 只读获取当前账号基本词真实使用聚合；支持北京时间快捷范围、使用状态、手工日期和排序 |
 | POST | `/api/review/sentence-variants` | 创建或恢复今日复习的后台 AI 句子变式任务，需要登录；返回 `202` 时按 `jobId` 查询 |
 | GET | `/api/review/sentence-variants?jobId=...` | 查询当前账号的后台句子变式任务；单次上游等待最多 10 分钟，网络/上游失败后每 5 分钟重试，内容连续 3 轮不合格后停止自动重试 |
 | GET | `/api/review/sentence-stats` | 只读获取当前账号、当前句子池的正式练习聚合统计；支持 `from`、`to`、`sort`、`order` |
@@ -105,6 +106,8 @@ VPS 使用 Cloudflare Tunnel，不开放 80、443 或 8080。HTTPS、域名和�
 “今日复习”和“AI 出题”的整组批次在 `answering`、`review`、`grading`、`completed` 四种状态间转换。`answering` 只保存草稿，`review` 只公开题目和用户答案；只有整组批改成功后，`completed` 才公开参考答案、逐题判定和得分，并一次性写入 SRS、错题、能力和句子统计。重复提交同一批次/请求 ID 会复用原结果；AI 或网络失败会退回可重试的核对状态，不返回半组结果，也不写半组证据。
 
 `GET /api/review/sentence-stats` 的日期按 `Asia/Shanghai` 解释并包含起止日。`sort` 可用 `index`、`attempts`、`correct`、`wrong`、`accuracy`、`recent`，`order` 可用 `asc` 或 `desc`。接口仅返回当前账号当前句子池的序号、稳定句子 ID 和聚合次数，不返回用户答案或参考答案；读取、筛选和排序不会修改账号状态。
+
+`GET /api/word-usage` 的 `range=today|3d|7d` 由服务端按 `Asia/Shanghai` 当前自然日换算，分别包含当天、当天及前 2 天、当天及前 6 天；`status=used|unused` 按该区间内是否存在至少一次正式完成 usage event 筛选基本词。快捷范围不能与手工 `from`/`to` 同时提交。正确、错误、订正或正式完成 exposure 都算使用，预习、planned、仅展示、生成和未提交草稿不算；显式词形事件归到其基本词 ID，不新增词库行。接口的 `rows`、`summary.filteredWords`、`from`、`to` 和 `usageStatus` 是同一次只读查询结果，读取不会更新记忆或学习证据。
 
 AI 队列按账号保存。`generationQueue` 仅公开请求时间、模型、强度、题数、组序号和就绪/失败状态，不公开后续题目；后台生成不会替换当前组。失败请求保留原 FIFO 位置，可用同一 `requestId` 原位重试，后续请求不能越过它。
 
@@ -206,11 +209,22 @@ Invoke-RestMethod -Uri 'http://localhost:8080/api/content' -Headers $headers
   "updatedAt": "2026-08-04",
   "words": [
     { "id": "d6-dog", "day": 6, "learned": "", "preview": true, "english": "dog", "phonetic": "/dɔɡ/", "chinese": "狗" }
+  ],
+  "supplements": [
+    {
+      "id": "d15-supp-third-person-s",
+      "type": "word-forms",
+      "title": "动作动词第三人称单数",
+      "formalEvidence": false,
+      "forms": [
+        { "id": "d15-form-has", "english": "has", "wordId": "d15-have", "lemma": "have", "phonetic": "/hæz/", "formalEvidence": false }
+      ]
+    }
   ]
 }
 ```
 
-响应只包含紧邻下一天、尚无正式学习日期且未在正式词库学过的词。预习词不会进入今日复习、听写、能力证据或同步档案中的 `learnedContent`。
+`words` 只包含紧邻下一天、尚无正式学习日期且未在正式词库学过的新基本词。`supplements` 是独立补充区：每个 form 通过稳定 `wordId + lemma` 关联基本词，不占新词名额，不生成独立词库行、覆盖额度或 SRS 卡。预习展示和练习均为 `formalEvidence: false`，不会进入今日复习、听写、能力证据或同步档案中的 `learnedContent`；实际练习事件归到基本词 ID，并可保留 form 审计字段。
 
 ### 预习句子练习
 

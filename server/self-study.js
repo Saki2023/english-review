@@ -359,6 +359,62 @@ function sanitizePlannedWord(value, lessonDay) {
   };
 }
 
+function sanitizeSupplementForm(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const english = cleanInline(source.english || source.form, 200).toLocaleLowerCase();
+  const lemma = cleanInline(source.lemma, 200).toLocaleLowerCase();
+  const wordId = cleanId(source.wordId, "supplement form wordId");
+  if (!english || !lemma) fail("supplement form requires english, wordId, and lemma");
+  return {
+    id: cleanId(source.id, "supplement form id"),
+    english,
+    wordId,
+    lemma,
+    phonetic: cleanInline(source.phonetic, 200),
+    pronunciation: cleanInline(source.pronunciation, 500),
+    acceptedChinese: uniqueStrings(source.acceptedChinese, 20, 300),
+    grammarTags: uniqueStrings(source.grammarTags, 12, 80),
+    note: cleanText(source.note, 1000)
+  };
+}
+
+function sanitizeSupplement(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const type = cleanInline(source.type, 80).toLocaleLowerCase();
+  if (!type) fail("supplement requires type");
+  const forms = (Array.isArray(source.forms) ? source.forms : []).slice(0, 50).map(sanitizeSupplementForm);
+  if (!forms.length) fail("supplement requires at least one form");
+  return {
+    id: cleanId(source.id, "supplement id"),
+    type,
+    title: cleanInline(source.title, 200),
+    note: cleanText(source.note, 2000),
+    forms
+  };
+}
+
+function supplementForms(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return (Array.isArray(source.plannedContent && source.plannedContent.supplements) ? source.plannedContent.supplements : [])
+    .flatMap(item => Array.isArray(item && item.forms) ? item.forms.map(form => ({ ...form, supplementId: item.id, supplementType: item.type })) : []);
+}
+
+function learnedWordCatalog(value) {
+  const byId = new Map();
+  const english = new Set();
+  (Array.isArray(value) ? value : []).forEach(item => {
+    if (item && typeof item === "object") {
+      const id = cleanInline(item.id, 120);
+      const lemma = cleanInline(item.english, 200).toLocaleLowerCase();
+      if (lemma) englishTokens(lemma).forEach(token => english.add(token));
+      if (id && lemma) byId.set(id, lemma);
+      return;
+    }
+    englishTokens(item).forEach(token => english.add(token));
+  });
+  return { byId, english };
+}
+
 function sanitizePlannedSentence(value, lessonDay) {
   const source = value && typeof value === "object" ? value : {};
   const english = cleanInline(source.english, 1000);
@@ -402,8 +458,29 @@ function sanitizePlannedNote(value, lessonDay) {
   };
 }
 
-function validateLessonVocabulary(lesson, learnedWords) {
-  const baseAllowed = new Set([...(Array.isArray(learnedWords) ? learnedWords : []), ...lesson.plannedContent.words.flatMap(item => englishTokens(item.english))].map(item => String(item).toLocaleLowerCase()).filter(Boolean));
+function validateLessonVocabulary(lesson, learnedWords, learnedForms = []) {
+  const catalog = learnedWordCatalog(learnedWords);
+  lesson.plannedContent.words.forEach(item => {
+    catalog.byId.set(item.id, String(item.english || "").toLocaleLowerCase());
+    englishTokens(item.english).forEach(token => catalog.english.add(token));
+  });
+  const forms = supplementForms(lesson);
+  const formIds = new Set();
+  const formEnglish = new Set();
+  forms.forEach(form => {
+    if (formIds.has(form.id)) fail(`${lesson.lessonId} contains duplicate supplement form id: ${form.id}`);
+    if (formEnglish.has(form.english)) fail(`${lesson.lessonId} contains duplicate supplement form: ${form.english}`);
+    formIds.add(form.id);
+    formEnglish.add(form.english);
+    const expectedLemma = catalog.byId.get(form.wordId);
+    if (!expectedLemma) fail(`${lesson.lessonId}/${form.id} references unknown base word id: ${form.wordId}`);
+    if (expectedLemma !== form.lemma) fail(`${lesson.lessonId}/${form.id} lemma does not match ${form.wordId}`);
+  });
+  const baseAllowed = new Set([
+    ...catalog.english,
+    ...(Array.isArray(learnedForms) ? learnedForms : []).flatMap(item => englishTokens(item && typeof item === "object" ? item.english : item)),
+    ...forms.flatMap(item => englishTokens(item.english))
+  ]);
   const assertAllowed = (value, allowed, label) => {
     const invalid = Array.from(new Set(englishTokens(value).filter(token => !allowed.has(token))));
     if (invalid.length) fail(`${label} contains unapproved English words: ${invalid.join(", ")}`);
@@ -473,9 +550,10 @@ function sanitizeSelfStudyLesson(value, options = {}) {
   });
   const plannedSource = source.plannedContent && typeof source.plannedContent === "object" ? source.plannedContent : {};
   const plannedWords = (Array.isArray(plannedSource.words) ? plannedSource.words : (Array.isArray(source.words) ? source.words : [])).slice(0, 100).map(item => sanitizePlannedWord(item, studyDay));
+  const plannedSupplements = (Array.isArray(plannedSource.supplements) ? plannedSource.supplements : (Array.isArray(source.supplements) ? source.supplements : [])).slice(0, 30).map(sanitizeSupplement);
   const plannedSentences = (Array.isArray(plannedSource.sentences) ? plannedSource.sentences : (Array.isArray(source.sentences) ? source.sentences : [])).slice(0, 100).map(item => sanitizePlannedSentence(item, studyDay));
   const contentIds = new Set();
-  [...plannedWords, ...plannedSentences].forEach(item => {
+  [...plannedWords, ...plannedSupplements, ...plannedSupplements.flatMap(item => item.forms), ...plannedSentences].forEach(item => {
     if (contentIds.has(item.id)) fail(`${lessonId} contains duplicate planned content id: ${item.id}`);
     contentIds.add(item.id);
   });
@@ -496,13 +574,14 @@ function sanitizeSelfStudyLesson(value, options = {}) {
     stages,
     plannedContent: {
       words: plannedWords,
+      supplements: plannedSupplements,
       sentences: plannedSentences,
       note: sanitizePlannedNote(plannedSource.note || source.note, studyDay)
     },
     nextPreview: cleanText(source.nextPreview || source.preview, 5000)
   };
   validateTestBlueprint(lesson);
-  if (options.skipVocabularyValidation !== true) validateLessonVocabulary(lesson, options.learnedWords || []);
+  if (options.skipVocabularyValidation !== true) validateLessonVocabulary(lesson, options.learnedWords || [], options.learnedForms || []);
   return lesson;
 }
 
@@ -818,11 +897,15 @@ function mergeSelfStudyLessons(value, packageValue, options = {}) {
     incomingIds.add(lesson.lessonId);
   });
   const incomingById = new Map(incoming.map(lesson => [lesson.lessonId, lesson]));
-  const rollingWords = new Set((Array.isArray(options.learnedWords) ? options.learnedWords : []).map(word => String(word).toLocaleLowerCase()).filter(Boolean));
+  const rollingWords = (Array.isArray(options.learnedWords) ? options.learnedWords : []).map(word => (
+    word && typeof word === "object" ? { id: word.id, english: word.english } : word
+  ));
+  const rollingForms = (Array.isArray(options.learnedForms) ? options.learnedForms : []).map(item => item && typeof item === "object" ? item.english : item).filter(Boolean);
   const validationCatalog = [...state.lessons.filter(lesson => !incomingById.has(lesson.lessonId)), ...incoming].sort((left, right) => left.studyDay - right.studyDay || left.lessonId.localeCompare(right.lessonId));
   validationCatalog.forEach(lesson => {
-    if (incomingById.has(lesson.lessonId)) validateLessonVocabulary(lesson, Array.from(rollingWords));
-    lesson.plannedContent.words.flatMap(item => englishTokens(item.english)).forEach(word => rollingWords.add(word));
+    if (incomingById.has(lesson.lessonId)) validateLessonVocabulary(lesson, rollingWords, rollingForms);
+    lesson.plannedContent.words.forEach(word => rollingWords.push({ id: word.id, english: word.english }));
+    supplementForms(lesson).forEach(form => rollingForms.push(form.english));
   });
   const map = new Map(state.lessons.map(lesson => [lesson.lessonId, lesson]));
   incoming.forEach(lesson => map.set(lesson.lessonId, lesson));
@@ -925,6 +1008,18 @@ function selfStudyPreviewContent(value, now = new Date()) {
       formalEvidence: false,
       sourceLessonId: lesson.lessonId,
       sourceLessonVersion: lesson.version
+    })),
+    supplements: clone(lesson.plannedContent.supplements || []).map(item => ({
+      ...item,
+      formalEvidence: false,
+      sourceLessonId: lesson.lessonId,
+      sourceLessonVersion: lesson.version,
+      forms: (Array.isArray(item.forms) ? item.forms : []).map(form => ({
+        ...form,
+        formalEvidence: false,
+        sourceLessonId: lesson.lessonId,
+        sourceLessonVersion: lesson.version
+      }))
     })),
     sentences: clone(lesson.plannedContent.sentences).map(item => ({
       ...item,
@@ -1101,14 +1196,25 @@ function selfStudyAutomaticSummary(progress, now = new Date()) {
   const words = progress.snapshot.plannedContent && Array.isArray(progress.snapshot.plannedContent.words)
     ? progress.snapshot.plannedContent.words.map(item => ({ id: item.id, english: item.english, chinese: item.chinese }))
     : [];
+  const supplements = progress.snapshot.plannedContent && Array.isArray(progress.snapshot.plannedContent.supplements)
+    ? progress.snapshot.plannedContent.supplements.map(item => ({
+      id: item.id,
+      type: item.type,
+      title: item.title,
+      forms: (Array.isArray(item.forms) ? item.forms : []).map(form => ({ id: form.id, english: form.english, wordId: form.wordId, lemma: form.lemma }))
+    }))
+    : [];
   const sentences = progress.snapshot.plannedContent && Array.isArray(progress.snapshot.plannedContent.sentences)
     ? progress.snapshot.plannedContent.sentences.map(item => ({ id: item.id, english: item.english, chinese: item.chinese }))
     : [];
   const nextReview = weakPoints.length
     ? `下次先复习：${weakPoints.join("、")}，并重新独立完成使用过提示或首答错误的题目。`
     : "下次按记忆曲线复习今天的新词，并在句子中再次独立回忆。";
+  const supplementFormCount = supplements.reduce((sum, item) => sum + item.forms.length, 0);
   const text = [
-    `今天学习了 ${words.length} 个新词、${sentences.length} 个新句型或句子。`,
+    supplementFormCount
+      ? `今天学习了 ${words.length} 个新基本词、${sentences.length} 个新句型或句子；另有 ${supplementFormCount} 个补充词形，不占新词名额。`
+      : `今天学习了 ${words.length} 个新词、${sentences.length} 个新句型或句子。`,
     `实际完成 ${completed.length}/${questionSteps.length} 道题：独立完成 ${independent.length} 道，提示后完成 ${assisted.length} 道，看答案后完成 ${revealed.length} 道；首答错误 ${initiallyIncorrect.length} 道，已订正 ${corrected.length} 道。`,
     pending.length ? `${pending.length} 道仍等待判定，不计为错误。` : "没有等待判定的题目。",
     errorReasons.length ? `实际错因：${errorReasons.join("；")}。` : "本次没有已确认的错误，未练习内容没有被写成答错。",
@@ -1120,6 +1226,7 @@ function selfStudyAutomaticSummary(progress, now = new Date()) {
     generatedAt: now.toISOString(),
     lessonId: progress.lessonId,
     newWords: words,
+    supplements,
     newSentences: sentences,
     completedQuestions: completed.length,
     totalQuestions: questionSteps.length,
@@ -1641,6 +1748,7 @@ function selfStudyHistory(value) {
       plannedContent: {
         status: progress.status === "completed" ? "learned" : "planned",
         words: plannedContent.words,
+        supplements: plannedContent.supplements || [],
         sentences: plannedContent.sentences,
         note: plannedContent.note
       }
@@ -1664,6 +1772,7 @@ function selfStudyHistory(value) {
     plannedContent: {
       status: "planned",
       words: clone(lesson.plannedContent.words),
+      supplements: clone(lesson.plannedContent.supplements || []),
       sentences: clone(lesson.plannedContent.sentences),
       note: clone(lesson.plannedContent.note)
     }
@@ -1723,6 +1832,7 @@ module.exports = {
   selfStudyHistory,
   selfStudyAutomaticSummary,
   selfStudyScheduledDate,
+  supplementForms,
   startSelfStudyLesson,
   submitSelfStudyStep,
   testSummary

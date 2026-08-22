@@ -116,6 +116,7 @@ function normalizeTask(value, content) {
     kind,
     direction,
     wordId: clean(source.wordId, 120),
+    formId: clean(source.formId, 120),
     requiredPreviewWordIds: Array.from(new Set((Array.isArray(source.requiredPreviewWordIds) ? source.requiredPreviewWordIds : []).map(item => clean(item, 120)).filter(Boolean))).slice(0, 8),
     english,
     chinese,

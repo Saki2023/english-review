@@ -45,6 +45,23 @@
       .map(row => [String(row.id), row]));
   }
 
+  function usageStatus(value) {
+    return ["used", "unused"].includes(value) ? value : "all";
+  }
+
+  function filterItems(itemsValue, rowsValue, statusValue = "all") {
+    const items = Array.isArray(itemsValue) ? itemsValue : [];
+    const rows = rowMap(rowsValue);
+    const status = usageStatus(statusValue);
+    if (status === "all") return [...items];
+    return items.filter(item => {
+      const row = rows.get(String(item && item.id || ""));
+      if (!row) return false;
+      const used = Math.max(0, Number(row.periodUsage) || 0) > 0;
+      return status === "used" ? used : !used;
+    });
+  }
+
   function compareValue(left, right, sort) {
     if (sort === "usage") return Number(left.periodUsage || 0) - Number(right.periodUsage || 0);
     if (sort === "correct") return Number(left.independentCorrect || 0) - Number(right.independentCorrect || 0);
@@ -83,5 +100,5 @@
     ].join("|");
   }
 
-  return { dateScope, describeRow, revision, sortItems };
+  return { dateScope, describeRow, filterItems, revision, sortItems, usageStatus };
 });

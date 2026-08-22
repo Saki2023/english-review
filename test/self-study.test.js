@@ -194,6 +194,45 @@ test("later planned lessons may reuse words introduced by an earlier planned les
   );
 });
 
+test("self-study supplements map stable surface forms to base words without becoming planned words", () => {
+  const source = lesson();
+  source.plannedContent.supplements = [{
+    id: "d9-supp-third-person-s",
+    type: "word-forms",
+    title: "额外补充",
+    note: "dogs 和 sees 是基本词的词形，不占新词名额。",
+    forms: [
+      { id: "d9-form-dogs", english: "dogs", wordId: "d9-dog", lemma: "dog", phonetic: "/dɒɡz/", pronunciation: "词尾接近 z", grammarTags: ["plural"] },
+      { id: "d9-form-sees", english: "sees", wordId: "d9-see", lemma: "see", phonetic: "/siːz/", pronunciation: "词尾接近 z", grammarTags: ["third-person-singular"] }
+    ]
+  }];
+  source.stages[1].steps[0].content = "dog dogs sees";
+  const learnedCatalog = [...LEARNED_WORDS, { id: "d9-see", english: "see" }];
+  const normalized = sanitizeSelfStudyLesson(source, { learnedWords: learnedCatalog });
+  assert.equal(normalized.plannedContent.words.length, 1);
+  assert.equal(normalized.plannedContent.supplements.length, 1);
+  assert.deepEqual(normalized.plannedContent.supplements[0].forms.map(form => [form.id, form.wordId, form.lemma]), [
+    ["d9-form-dogs", "d9-dog", "dog"],
+    ["d9-form-sees", "d9-see", "see"]
+  ]);
+  const state = mergeSelfStudyLessons(null, { lessons: [source] }, { learnedWords: learnedCatalog }).state;
+  const preview = selfStudyPreviewContent(state, new Date("2026-08-07T01:00:00.000Z"));
+  assert.equal(preview.words.length, 1);
+  assert.equal(preview.supplements[0].forms.length, 2);
+  assert.equal(preview.supplements[0].formalEvidence, false);
+  assert.equal(selfStudyHistory(state).plannedLessons[0].plannedContent.supplements[0].forms.length, 2);
+
+  const wrongLemma = structuredClone(source);
+  wrongLemma.plannedContent.supplements[0].forms[1].lemma = "look";
+  assert.throws(() => sanitizeSelfStudyLesson(wrongLemma, { learnedWords: learnedCatalog }), /lemma does not match/);
+  const unknownBase = structuredClone(source);
+  unknownBase.plannedContent.supplements[0].forms[1].wordId = "missing-see";
+  assert.throws(() => sanitizeSelfStudyLesson(unknownBase, { learnedWords: learnedCatalog }), /unknown base word id/);
+  const undeclared = structuredClone(source);
+  undeclared.plannedContent.supplements = [];
+  assert.throws(() => sanitizeSelfStudyLesson(undeclared, { learnedWords: learnedCatalog }), /unapproved English words: dogs, sees/);
+});
+
 test("self-study schedule anchors day 12 on 2026-08-18 and keeps day 10/11 dates", () => {
   assert.equal(SELF_STUDY_SCHEDULE_ANCHOR_DAY, 12);
   assert.equal(SELF_STUDY_SCHEDULE_ANCHOR_DATE, "2026-08-18");
