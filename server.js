@@ -5447,11 +5447,50 @@ async function handleAiFocusedPractice(req, res, url, user) {
 
 function mimeType(filePath) { return { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8", ".webmanifest": "application/manifest+json; charset=utf-8", ".txt": "text/plain; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon", ".ogg": "audio/ogg", ".wav": "audio/wav" }[path.extname(filePath).toLowerCase()] || "application/octet-stream"; }
 
+const STATIC_ASSET_VERSION = "77";
+const STATIC_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const STATIC_REVALIDATE_CACHE_CONTROL = "no-cache";
+
+function staticCacheControl(filePath, url) {
+  const name = path.basename(filePath);
+  if (name === "index.html" || name === "sw.js") return STATIC_REVALIDATE_CACHE_CONTROL;
+  if (url.searchParams.get("v") === STATIC_ASSET_VERSION) return STATIC_IMMUTABLE_CACHE_CONTROL;
+  if (url.searchParams.has("v")) return STATIC_REVALIDATE_CACHE_CONTROL;
+  return "public, max-age=3600";
+}
+
+function staticEntityTag(stats) {
+  return `"${stats.size.toString(16)}-${Math.trunc(stats.mtimeMs).toString(16)}"`;
+}
+
+function staticRequestIsFresh(req, stats, entityTag) {
+  const ifNoneMatch = String(req.headers["if-none-match"] || "").trim();
+  if (ifNoneMatch) {
+    const normalizedEntityTag = entityTag.replace(/^W\//, "");
+    return ifNoneMatch === "*" || ifNoneMatch.split(",").some(value => value.trim().replace(/^W\//, "") === normalizedEntityTag);
+  }
+  const ifModifiedSince = Date.parse(String(req.headers["if-modified-since"] || ""));
+  if (!Number.isFinite(ifModifiedSince)) return false;
+  return Math.floor(stats.mtimeMs / 1000) * 1000 <= ifModifiedSince;
+}
+
 function serveStatic(req, res, url) {
   let relative = decodeURIComponent(url.pathname); if (relative === "/") relative = "/index.html";
   if (relative.includes("\0") || relative.includes("..") || relative.startsWith("/server/")) return sendError(res, 404, "not found");
   const filePath = path.resolve(ROOT, `.${relative}`); if (!filePath.startsWith(ROOT + path.sep)) return sendError(res, 404, "not found");
-  fs.stat(filePath, (error, stats) => { if (error || !stats.isFile()) return sendError(res, 404, "not found"); setCommonHeaders(res, mimeType(filePath)); res.setHeader("Cache-Control", ["index.html", "styles.css", "data.js", "pronunciation-data.js", "review-variants.js", "answer-utils.js", "study-time.js", "review-session.js", "review-batch-client.js", "state-sync-client.js", "library-usage.js", "offline-store.js", "offline-learning.js", "offline-ai.js", "offline-replay.js", "app.js", "sw.js"].some(name => filePath.endsWith(name)) ? "no-cache" : "public, max-age=3600"); res.writeHead(200); fs.createReadStream(filePath).pipe(res); });
+  fs.stat(filePath, (error, stats) => {
+    if (error || !stats.isFile()) return sendError(res, 404, "not found");
+    setCommonHeaders(res, mimeType(filePath));
+    const entityTag = staticEntityTag(stats);
+    res.setHeader("Cache-Control", staticCacheControl(filePath, url));
+    res.setHeader("ETag", entityTag);
+    res.setHeader("Last-Modified", stats.mtime.toUTCString());
+    if (staticRequestIsFresh(req, stats, entityTag)) { res.writeHead(304); return res.end(); }
+    res.setHeader("Content-Length", stats.size);
+    if (req.method === "HEAD") { res.writeHead(200); return res.end(); }
+    res.writeHead(200);
+    fs.createReadStream(filePath).pipe(res);
+  });
 }
 
 const server = http.createServer((req, res) => {
