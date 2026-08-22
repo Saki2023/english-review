@@ -320,6 +320,103 @@ test("self-study unlock boundaries follow the anchored dates and preview stays p
   assert.equal(candidate.lesson.lessonId, "trip-day-boundary-13");
 });
 
+test("authoritative schedule persists and never skips an unfinished course day", () => {
+  const day15 = lesson("1", "trip-day-015", 15);
+  day15.formalDate = "2026-08-21";
+  day15.enabledFrom = "2026-08-20T16:00:00.000Z";
+  day15.expiresAt = "2026-08-21T16:00:00.000Z";
+  const day16 = lesson("1", "trip-day-016", 16);
+  day16.formalDate = "2026-08-22";
+  day16.enabledFrom = "2026-08-21T16:00:00.000Z";
+  day16.expiresAt = "2026-09-22T16:00:00.000Z";
+  const state = mergeSelfStudyLessons(null, {
+    updatedAt: "2026-08-20T00:00:00.000Z",
+    scheduleRevision: "course-days-15-17-v1",
+    lessons: [day15, day16]
+  }, { learnedWords: LEARNED_WORDS }).state;
+  assert.equal(state.schema, 2);
+  assert.equal(state.schedule.revision, "course-days-15-17-v1");
+  assert.equal(state.schedule.timeZone, "Asia/Shanghai");
+  assert.deepEqual(sanitizeSelfStudyState(state).schedule, state.schedule);
+
+  const candidate = currentLessonCandidate(state, new Date("2026-08-22T12:00:00.000Z"));
+  assert.equal(candidate.lesson, null);
+  assert.equal(candidate.waitingLesson.lessonId, "trip-day-015");
+  assert.equal(candidate.waitingReason, "schedule-expired");
+  assert.notEqual(candidate.waitingLesson.lessonId, "trip-day-016");
+
+  const unknown = lesson("1", "home-course-018", 18);
+  unknown.formalDate = "";
+  unknown.enabledFrom = "";
+  unknown.expiresAt = "";
+  const unknownState = mergeSelfStudyLessons(null, { updatedAt: "2026-08-22T00:00:00.000Z", scheduleRevision: "home-v1", lessons: [unknown] }, { learnedWords: LEARNED_WORDS }).state;
+  const unknownCandidate = currentLessonCandidate(unknownState, new Date("2036-08-22T12:00:00.000Z"));
+  assert.equal(unknownCandidate.lesson, null);
+  assert.equal(unknownCandidate.waitingLesson.lessonId, "home-course-018");
+  assert.equal(unknownCandidate.waitingReason, "schedule-unknown");
+});
+
+test("completed day 10 through 14 history keeps its dates and selects day 15 without calendar auto-advance", () => {
+  const dates = {
+    10: "2026-08-09",
+    11: "2026-08-10",
+    12: "2026-08-18",
+    13: "2026-08-19",
+    14: "2026-08-20",
+    15: "2026-08-21",
+    16: "2026-08-22",
+    17: "2026-08-23"
+  };
+  const lessons = Object.entries(dates).map(([dayText, formalDate]) => {
+    const studyDay = Number(dayText);
+    const item = lesson("1", `trip-day-${String(studyDay).padStart(3, "0")}`, studyDay);
+    item.formalDate = formalDate;
+    item.enabledFrom = new Date(`${formalDate}T00:00:00+08:00`).toISOString();
+    item.expiresAt = "2026-09-30T15:59:59.000Z";
+    item.plannedContent.note.date = formalDate;
+    return item;
+  });
+  const state = mergeSelfStudyLessons(null, {
+    updatedAt: "2026-08-20T12:00:00.000Z",
+    scheduleRevision: "returned-home-authoritative-v1",
+    lessons
+  }, { learnedWords: LEARNED_WORDS }).state;
+  for (const studyDay of [10, 11, 12, 13, 14]) {
+    const item = state.lessons.find(value => value.studyDay === studyDay);
+    state.progress[item.lessonId] = {
+      lessonId: item.lessonId,
+      lessonVersion: item.version,
+      status: "completed",
+      startedAt: studyDay === 11 ? "2026-08-17T01:00:00.000Z" : `${dates[studyDay]}T01:00:00.000Z`,
+      updatedAt: `${dates[studyDay]}T02:00:00.000Z`,
+      completedAt: `${dates[studyDay]}T02:00:00.000Z`,
+      pausedAt: "",
+      pauseReason: "",
+      activeSeconds: 3600,
+      lastActiveAt: `${dates[studyDay]}T02:00:00.000Z`,
+      stageIndex: 5,
+      stepIndex: 1,
+      snapshot: structuredClone(item),
+      steps: {},
+      promotion: null
+    };
+  }
+
+  const normalized = sanitizeSelfStudyState(state);
+  assert.equal(normalized.progress["trip-day-011"].snapshot.formalDate, "2026-08-10");
+  assert.equal(normalized.progress["trip-day-011"].startedAt, "2026-08-17T01:00:00.000Z");
+  assert.equal(Object.hasOwn(normalized.progress, "trip-day-015"), false);
+  assert.equal(Object.hasOwn(normalized.progress, "trip-day-016"), false);
+
+  const now = new Date("2026-08-22T08:00:00.000Z");
+  const candidate = currentLessonCandidate(normalized, now);
+  assert.equal(candidate.lesson.lessonId, "trip-day-015");
+  const preview = selfStudyPreviewContent(normalized, now);
+  assert.equal(preview.nextDay, 15);
+  assert.equal(preview.lessonId, "trip-day-015");
+  assert.equal(preview.formalEvidence, false);
+});
+
 test("active legacy snapshots use the anchored schedule without changing answers or evidence", () => {
   const source = lesson("1", "trip-day-active-legacy", 12);
   source.formalDate = "2026-08-11";

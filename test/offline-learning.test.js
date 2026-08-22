@@ -229,3 +229,30 @@ test("an offline summary is generated from evidence, survives restart, and repla
   assert.equal(replay.replayed, 1);
   assert.deepEqual(replayedBodies.map(body => body.answer), [completed.operation.body.answer]);
 });
+
+test("offline course availability uses the server snapshot and never trusts a changed device clock", async () => {
+  const futureLesson = lesson();
+  futureLesson.lessonId = "offline-future-day";
+  futureLesson.formalDate = "2026-08-20";
+  futureLesson.enabledFrom = "2026-08-19T16:00:00.000Z";
+  const selfStudy = offlineSelfStudyPackage({ enabled: true, lessons: [futureLesson], progress: {}, updatedAt: "2026-08-15T00:00:00.000Z" }, {
+    nonce: "offline-clock-test",
+    now: new Date("2026-08-15T00:00:00.000Z")
+  });
+  assert.equal(selfStudy.lessons[0].availability, "waiting");
+  const farFuture = publicSelfStudyState(selfStudy, new Date("2036-08-20T00:00:00.000Z"));
+  assert.equal(farFuture.availableLesson, null);
+  assert.equal(farFuture.waitingReason, "not-enabled");
+  await assert.rejects(
+    operateSelfStudy({ account: { id: "account-a" }, selfStudy }, "/start", { lessonId: futureLesson.lessonId }, { crypto: webcrypto, now: new Date("2036-08-20T00:00:00.000Z") }),
+    /当前不可开始/
+  );
+
+  const legacy = structuredClone(selfStudy);
+  delete legacy.lessons[0].availability;
+  delete legacy.schedule;
+  delete legacy.clock;
+  const legacyView = publicSelfStudyState(legacy, new Date("2036-08-20T00:00:00.000Z"));
+  assert.equal(legacyView.availableLesson, null);
+  assert.equal(legacyView.waitingReason, "schedule-unknown");
+});

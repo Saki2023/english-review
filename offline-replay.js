@@ -66,7 +66,8 @@
       if (!response.ok) {
         const message = String(data.error || `待同步操作失败（HTTP ${response.status}）`).slice(0, 300);
         await store.enqueue({ ...attempt, updatedAt: Date.now(), lastError: message }, accountId);
-        throw replayError(message, "operation_failed", response.status, data);
+        const missingContent = response.status === 404 && /^\/api\/(?:ai\/questions|self-study)(?:\/|$)/.test(attempt.path);
+        throw replayError(message, missingContent ? "content_missing" : "operation_failed", response.status, data);
       }
       await store.removeOutbox(attempt.id, accountId);
       responses.push({ id: attempt.id, path: attempt.path, statusCode: response.status, data });

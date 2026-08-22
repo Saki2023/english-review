@@ -82,21 +82,15 @@
     return Number.isFinite(date.getTime()) ? date.toISOString() : new Date().toISOString();
   }
 
-  function lessonEnabled(lesson, now) {
-    return !lesson.enabledFrom || Date.parse(lesson.enabledFrom) <= now.getTime();
-  }
-
-  function lessonExpired(lesson, now) {
-    return Boolean(lesson.expiresAt && Date.parse(lesson.expiresAt) <= now.getTime());
-  }
-
   function normalizeState(value) {
     const source = value && typeof value === "object" ? clone(value) : {};
     return {
-      schema: 1,
+      schema: Math.max(1, Number(source.schema) || 1),
       enabled: source.enabled === true,
       lessons: (Array.isArray(source.lessons) ? source.lessons : []).filter(lesson => lesson && lesson.lessonId && Array.isArray(lesson.stages)).slice(0, 60),
       progress: source.progress && typeof source.progress === "object" ? source.progress : {},
+      schedule: source.schedule && typeof source.schedule === "object" ? source.schedule : { schema: 0, revision: "", timeZone: "Asia/Shanghai", synchronizedAt: "", entries: [] },
+      clock: source.clock && typeof source.clock === "object" ? source.clock : null,
       updatedAt: String(source.updatedAt || ""),
       answerDigest: String(source.answerDigest || "sha256-answer-key-v1")
     };
@@ -108,9 +102,11 @@
     for (const lesson of state.lessons) {
       const progress = state.progress[lesson.lessonId];
       if (progress) continue;
-      if (lessonExpired(lesson, now)) continue;
-      if (!lessonEnabled(lesson, now)) return { progress: null, lesson: null, waitingLesson: lesson };
-      return { progress: null, lesson, waitingLesson: null };
+      if (lesson.availability === "available") return { progress: null, lesson, waitingLesson: null, waitingReason: "" };
+      const waitingReason = lesson.availability === "waiting"
+        ? "not-enabled"
+        : lesson.availability === "expired" ? "schedule-expired" : "schedule-unknown";
+      return { progress: null, lesson: null, waitingLesson: lesson, waitingReason };
     }
     return { progress: null, lesson: null, waitingLesson: null };
   }
@@ -255,7 +251,10 @@
       lessonId: progress.lessonId,
       lessonVersion: progress.lessonVersion,
       studyDay: progress.snapshot.studyDay,
+      formalDate: progress.snapshot.formalDate || "",
       title: progress.snapshot.title,
+      enabledFrom: progress.snapshot.enabledFrom || "",
+      expiresAt: progress.snapshot.expiresAt || "",
       status: progress.status,
       startedAt: progress.startedAt,
       updatedAt: progress.updatedAt,
@@ -293,8 +292,17 @@
       completedLessons,
       pendingSyncLessons,
       current,
-      availableLesson: !progress && candidate.lesson ? { lessonId: candidate.lesson.lessonId, studyDay: candidate.lesson.studyDay, title: candidate.lesson.title, version: candidate.lesson.version } : null,
+      availableLesson: !progress && candidate.lesson ? { lessonId: candidate.lesson.lessonId, studyDay: candidate.lesson.studyDay, formalDate: candidate.lesson.formalDate || "", title: candidate.lesson.title, version: candidate.lesson.version, enabledFrom: candidate.lesson.enabledFrom || "", expiresAt: candidate.lesson.expiresAt || "" } : null,
       waitingUntil: candidate.waitingLesson ? candidate.waitingLesson.enabledFrom : "",
+      waitingReason: String(candidate.waitingReason || ""),
+      schedule: {
+        schema: Number(state.schedule && state.schedule.schema) || 0,
+        revision: String(state.schedule && state.schedule.revision || ""),
+        timeZone: String(state.schedule && state.schedule.timeZone || "Asia/Shanghai"),
+        synchronizedAt: String(state.schedule && state.schedule.synchronizedAt || ""),
+        status: state.lessons.some(lesson => !["available", "waiting", "expired"].includes(lesson.availability)) ? "incomplete" : "authoritative"
+      },
+      serverNow: String(state.clock && state.clock.serverNow || ""),
       updatedAt: state.updatedAt,
       offline: true
     };
@@ -379,7 +387,14 @@
       if (state.progress[lessonId]) duplicate = true;
       else {
         const candidate = candidateFor(state, now);
-        if (!candidate.lesson || candidate.lesson.lessonId !== lessonId) throw new Error("这一天的课程当前不可开始");
+        if (!candidate.lesson || candidate.lesson.lessonId !== lessonId) {
+          const message = candidate.waitingReason === "schedule-unknown"
+            ? "课程日期尚未由服务器确认，请联网同步后再开始"
+            : candidate.waitingReason === "schedule-expired"
+              ? "课程开放信息已过期，请联网续期后再开始"
+              : "这一天的课程当前不可开始";
+          throw new Error(message);
+        }
         state.progress[lessonId] = initializeProgress(candidate.lesson, now);
         state.updatedAt = timestamp(now);
       }

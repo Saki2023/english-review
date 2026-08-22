@@ -1534,7 +1534,7 @@ function buildOfflinePack(user) {
       learned: item.learned
     })),
     wordUsage: publicWordUsage(state.wordUsage, content, { date: today(), timeZone: APP_TIMEZONE, capacity: 10 }),
-    selfStudy: offlineSelfStudyPackage(state.selfStudy, { limit: OFFLINE_PACK_DAYS, nonce: `${user.id}:${generatedAt.getTime()}:${crypto.randomBytes(12).toString("hex")}` }),
+    selfStudy: offlineSelfStudyPackage(state.selfStudy, { limit: OFFLINE_PACK_DAYS, nonce: `${user.id}:${generatedAt.getTime()}:${crypto.randomBytes(12).toString("hex")}`, now: generatedAt }),
     selfStudyPublic: publicSelfStudyState(state.selfStudy),
     preview: {
       currentDay: previewData.currentDay,

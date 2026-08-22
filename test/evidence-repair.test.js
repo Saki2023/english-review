@@ -531,3 +531,136 @@ test("deep evidence repair clears only false 很深 penalties across review, AI,
   assert.deepEqual(secondPass.state, repaired.state);
   assert.equal(secondPass.changed, false);
 });
+
+test("known self-study answer-key defects and the exact and-to-与 AI record are repaired once", () => {
+  const targetSteps = [
+    { stepId: "reading-check-2", type: "reading-question", prompt: "牛在哪里？", passage: "They see a brown cow on a road.", acceptedAnswers: ["房子旁边"], referenceAnswer: "房子旁边" },
+    { stepId: "reading-check-3", type: "reading-question", prompt: "他们在哪里玩游戏？", passage: "They play a game in a room.", acceptedAnswers: ["湖边"], referenceAnswer: "湖边" },
+    { stepId: "reading-line-04-translate", type: "en-zh", direction: "en-zh", prompt: "They see a mouse in a house.", english: "They see a mouse in a house.", acceptedAnswers: ["他们看到一只老鼠在一所房子里。"], referenceAnswer: "他们看到一只老鼠在一所房子里。" },
+    { stepId: "test-ez1", type: "en-zh", direction: "en-zh", prompt: "They see a brown cow on a road.", english: "They see a brown cow on a road.", acceptedAnswers: ["他们看到一头棕色的牛在一条路上。"], referenceAnswer: "他们看到一头棕色的牛在一条路上。" },
+    { stepId: "test-ez2", type: "en-zh", direction: "en-zh", prompt: "They play a game in a room.", english: "They play a game in a room.", acceptedAnswers: ["他们在房间里玩一个游戏。"], referenceAnswer: "他们在房间里玩一个游戏。" }
+  ];
+  const attempts = {
+    "reading-check-2": [
+      { attemptId: "cow-road", answer: "路上", status: "graded", correct: false, score: 0, gradingStatus: "incorrect", formalEvidence: true },
+      { attemptId: "cow-wrong-key", answer: "房子旁边", status: "graded", correct: true, score: 1, gradingStatus: "correct", assistance: "revealed", hintLevel: 3, formalEvidence: true }
+    ],
+    "reading-check-3": [
+      { attemptId: "game-room", answer: "房间里", status: "graded", correct: false, score: 0, gradingStatus: "incorrect", formalEvidence: true },
+      { attemptId: "game-wrong-key", answer: "湖边", status: "graded", correct: true, score: 1, gradingStatus: "correct", assistance: "revealed", hintLevel: 3, formalEvidence: true }
+    ],
+    "reading-line-04-translate": [{ attemptId: "mouse-house", answer: "他们看见一只老鼠在一所房子里", status: "graded", correct: false, score: 0, gradingStatus: "incorrect", formalEvidence: true }],
+    "test-ez1": [{ attemptId: "cow-road-translation", answer: "他们看见一头棕色的牛在道路上", status: "graded", correct: false, score: 0, gradingStatus: "incorrect", formalEvidence: true }],
+    "test-ez2": [{ attemptId: "game-room-translation", answer: "他们在一个房间里玩一个游戏", status: "graded", correct: false, score: 0, gradingStatus: "incorrect", formalEvidence: true }]
+  };
+  const steps = Object.fromEntries(targetSteps.map(step => [step.stepId, {
+    status: "completed",
+    firstAttemptId: attempts[step.stepId][0].attemptId,
+    attempts: attempts[step.stepId],
+    assistance: attempts[step.stepId].length > 1 ? "revealed" : "",
+    hintLevel: attempts[step.stepId].length > 1 ? 3 : 0
+  }]));
+  const summaryStep = { stepId: "summary-1", type: "summary", prompt: "总结今天的学习。", required: true, formalEvidence: false };
+  const lesson = {
+    lessonId: "trip-day-014",
+    studyDay: 14,
+    stages: [
+      { stageId: "reading", type: "reading", steps: targetSteps },
+      { stageId: "summary", type: "summary", steps: [summaryStep] }
+    ],
+    plannedContent: { words: [], sentences: [], note: {} }
+  };
+  steps[summaryStep.stepId] = {
+    status: "completed",
+    attempts: [],
+    automaticSummary: {
+      schema: 1,
+      source: "deterministic",
+      generatedAt: "2026-08-20T12:30:00.000Z",
+      lessonId: lesson.lessonId,
+      independentCorrect: 0,
+      initiallyIncorrect: 5,
+      corrected: 5,
+      weakPoints: ["旧错误答案键"],
+      formalEvidence: false
+    }
+  };
+  const usageEvents = Object.values(attempts).flat().map(attempt => ({
+    eventId: `self-study:${attempt.attemptId}:d14-word`, wordId: "d14-word", source: "self-study", taskId: "trip-day-014:step", kind: "exposure", result: attempt.correct ? "revealed" : "wrong", formalEvidence: false, date: "2026-08-20", occurredAt: "2026-08-20T12:00:00.000Z"
+  }));
+  const aiId = "ai-zoo-and";
+  const strictAiHistory = [
+    { id: "ai-zoo-wrong-person", userAnswer: "萨姆与艾米在一家动物园里" },
+    { id: "ai-zoo-wrong-place", userAnswer: "萨姆与汤姆在一家学校里" },
+    { id: "ai-zoo-wrong-number", userAnswer: "萨姆在一家动物园里" }
+  ].map(item => ({
+    ...item,
+    direction: "en-zh",
+    prompt: "Sam and Tom are in a zoo.",
+    correctAnswer: "萨姆和汤姆在一家动物园里。",
+    correct: false,
+    score: 0,
+    gradingStatus: "incorrect",
+    explanation: "人物、地点或数量不对应。",
+    problemWords: ["Sam", "Tom", "zoo"]
+  }));
+  const state = {
+    evidenceRepairVersion: 7,
+    taskStates: {}, history: {}, attempts: [], mistakes: [],
+    selfStudy: {
+      enabled: false,
+      lessons: [lesson],
+      progress: {
+        "trip-day-014": { lessonId: "trip-day-014", status: "completed", snapshot: structuredClone(lesson), steps }
+      }
+    },
+    wordUsage: { schema: 1, events: usageEvents, memories: {} },
+    sentencePracticeEvents: [
+      { id: aiId, correct: false, source: "ai" },
+      ...strictAiHistory.map(item => ({ id: item.id, correct: false, source: "ai" }))
+    ],
+    aiPractice: {
+      history: [
+        { id: aiId, direction: "en-zh", prompt: "Sam and Tom are in a zoo.", userAnswer: "萨姆与汤姆在一家动物园里", correctAnswer: "萨姆和汤姆在一家动物园里。", correct: false, score: 0, gradingStatus: "incorrect", explanation: "and 注册义不包括 与", problemWords: ["and"] },
+        ...strictAiHistory
+      ]
+    },
+    aiExam: { history: [] }
+  };
+
+  const beforeAbilities = analyzeAbilities({ words: [], sentences: [] }, state);
+  const repaired = repairLearningEvidence({ words: [], sentences: [] }, state);
+  assert.equal(repaired.changed, true);
+  const progress = repaired.state.selfStudy.progress["trip-day-014"];
+  assert.deepEqual(progress.snapshot.stages[0].steps.find(step => step.stepId === "reading-check-2").acceptedAnswers.slice(0, 2), ["路上", "道路上"]);
+  assert.equal(progress.steps["reading-check-2"].attempts[0].correct, true);
+  assert.equal(progress.steps["reading-check-2"].attempts[0].assistance, "");
+  assert.equal(progress.steps["reading-check-2"].attempts[1].status, "invalidated");
+  assert.equal(progress.steps["reading-check-2"].attempts[1].formalEvidence, false);
+  assert.equal(progress.steps["reading-check-2"].assistance, "");
+  assert.equal(progress.steps["reading-check-3"].attempts[0].correct, true);
+  assert.equal(progress.steps["reading-line-04-translate"].attempts[0].correct, true);
+  assert.equal(progress.steps["test-ez1"].attempts[0].correct, true);
+  assert.equal(progress.steps["test-ez2"].attempts[0].correct, true);
+  assert.equal(repaired.state.wordUsage.events.some(event => event.eventId.includes("wrong-key")), false);
+  assert.equal(repaired.state.wordUsage.events.find(event => event.eventId.includes("cow-road:")).result, "completed");
+  const summary = progress.steps[summaryStep.stepId].automaticSummary;
+  assert.equal(summary.generatedAt, "2026-08-20T12:30:00.000Z");
+  assert.equal(summary.initiallyIncorrect, 0);
+  assert.equal(summary.independentCorrect, 5);
+  assert.deepEqual(summary.weakPoints, []);
+  assert.equal(repaired.state.aiPractice.history[0].correct, true);
+  assert.equal(repaired.state.aiPractice.history[0].score, 1);
+  assert.equal(repaired.state.sentencePracticeEvents[0].correct, true);
+  assert.deepEqual(repaired.state.aiPractice.history.slice(1).map(item => item.correct), [false, false, false]);
+  assert.deepEqual(repaired.state.sentencePracticeEvents.slice(1).map(item => item.correct), [false, false, false]);
+  const beforeReading = beforeAbilities.abilities.find(item => item.id === "reading");
+  const afterReading = analyzeAbilities({ words: [], sentences: [] }, repaired.state).abilities.find(item => item.id === "reading");
+  assert.equal(beforeReading.measuredAccuracy, 0);
+  assert.equal(afterReading.measuredAccuracy, 25);
+  assert.deepEqual(repaired.state.mistakes, []);
+
+  const second = repairLearningEvidence({ words: [], sentences: [] }, repaired.state);
+  assert.equal(second.changed, false);
+  assert.deepEqual(second.state, repaired.state);
+});

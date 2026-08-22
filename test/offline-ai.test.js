@@ -13,7 +13,7 @@ class MemoryStorage {
 }
 
 function question(id) {
-  return { id, direction: "en-zh", prompt: `Question ${id}`, userAnswer: "", answeredAt: "" };
+  return { id, contentType: id.endsWith("q1") ? "word" : "sentence", direction: id.endsWith("q1") ? "en-zh" : "zh-en", prompt: `Question ${id}`, userAnswer: "", answeredAt: "" };
 }
 
 function set(id, count = 2) {
@@ -29,11 +29,12 @@ function set(id, count = 2) {
 }
 
 function pack() {
+  const generatedAt = new Date(Date.now() - 60 * 60 * 1000);
   return {
     schemaVersion: 1,
     account: { id: "account-a", username: "account-a" },
-    generatedAt: "2026-08-15T00:00:00.000Z",
-    expiresAt: "2026-08-20T00:00:00.000Z",
+    generatedAt: generatedAt.toISOString(),
+    expiresAt: new Date(generatedAt.getTime() + 14 * 86400000).toISOString(),
     aiPractice: {
       currentSet: set("set-1"),
       preparedSets: [set("set-2"), set("set-3")],
@@ -109,6 +110,7 @@ test("offline AI consumes downloaded groups in FIFO order only after confirmatio
   await store.enqueue(result.operation, "account-a");
   const restored = await store.loadPack("account-a", new Date("2026-08-16T00:00:00.000Z"));
   assert.equal(restored.aiPractice.currentSet.id, "set-2");
+  assert.deepEqual(restored.aiPractice.currentSet.questions.map(item => item.contentType), ["word", "sentence"]);
   assert.deepEqual(restored.aiPractice.preparedSets.map(item => item.id), ["set-3"]);
   assert.deepEqual((await store.listOutbox("account-a")).map(item => item.id), ["ai-next:set-2"]);
 });

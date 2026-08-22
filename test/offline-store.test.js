@@ -5,6 +5,7 @@ const { test } = require("node:test");
 const {
   ACTIVE_ACCOUNT_KEY,
   createOfflineStore,
+  mergeOfflinePackRenewal,
   normalizeOfflinePack,
   normalizeOutboxOperation,
   packIsUsable
@@ -158,6 +159,58 @@ test("offline packs require the matching account, supported version, capacity, a
   assert.equal(packIsUsable(value, "account-b"), false);
   assert.throws(() => normalizeOfflinePack({ ...value, schemaVersion: 99 }, "account-a"), /版本不兼容/);
   assert.throws(() => normalizeOfflinePack({ ...value, expiresAt: "2020-01-01T00:00:00.000Z" }, "account-a"), /已过期/);
+});
+
+test("expired packs remain inspectable and preserve local progress until explicit removal", async () => {
+  const localStorage = new MemoryStorage();
+  const store = createOfflineStore({ localStorage });
+  const value = pack("account-a");
+  value.expiresAt = "2026-08-20T00:00:00.000Z";
+  value.localDraft = { setId: "set-one", answer: "草稿" };
+  await store.savePack(value, "account-a");
+
+  const status = await store.inspectPack("account-a", new Date("2026-08-22T00:00:00.000Z"));
+  assert.equal(status.status, "expired");
+  assert.equal(status.pack.localDraft.answer, "草稿");
+  assert.equal(await store.loadPack("account-a", new Date("2026-08-22T00:00:00.000Z")), null);
+  assert.equal((await store.loadPack("account-a", new Date("2026-08-22T00:00:00.000Z"), { allowExpired: true })).localDraft.answer, "草稿");
+  assert.notEqual(localStorage.getItem("daily-english-review-offline-pack-v1-account-a"), null);
+});
+
+test("missing, corrupt, and account-mismatched packs have distinct non-destructive states", async () => {
+  const localStorage = new MemoryStorage();
+  const store = createOfflineStore({ localStorage });
+  assert.equal((await store.inspectPack("account-a")).status, "missing");
+
+  localStorage.setItem("daily-english-review-offline-pack-v1-account-a", JSON.stringify({ accountId: "account-a", pack: { schemaVersion: 1, account: { id: "account-a" } }, savedAt: 1 }));
+  assert.equal((await store.inspectPack("account-a")).status, "corrupt");
+  assert.notEqual(localStorage.getItem("daily-english-review-offline-pack-v1-account-a"), null);
+
+  localStorage.setItem("daily-english-review-offline-pack-v1-account-a", JSON.stringify({ accountId: "account-a", pack: pack("account-b"), savedAt: 2 }));
+  assert.equal((await store.inspectPack("account-a")).status, "account_mismatch");
+});
+
+test("renewing an expired pack keeps pending AI, self-study, and preview drafts without reviving them when no outbox remains", () => {
+  const local = pack("account-a");
+  local.expiresAt = "2026-08-20T00:00:00.000Z";
+  local.aiPractice = { currentSet: { id: "local-set", questions: [{ id: "q1", userAnswer: "草稿" }] } };
+  local.selfStudy = { progress: { lesson: { stepIndex: 3 } } };
+  local.preview = { practice: { draft: "预习草稿" } };
+  const remote = pack("account-a", 1000);
+  remote.aiPractice = { currentSet: { id: "server-set" } };
+  remote.selfStudy = { progress: {} };
+
+  const preserved = mergeOfflinePackRenewal(local, remote, { preserveLocalProgress: true });
+  assert.equal(preserved.aiPractice.currentSet.id, "local-set");
+  assert.equal(preserved.aiPractice.currentSet.questions[0].userAnswer, "草稿");
+  assert.equal(preserved.selfStudy.progress.lesson.stepIndex, 3);
+  assert.equal(preserved.preview.practice.draft, "预习草稿");
+  assert.equal(preserved.expiresAt, remote.expiresAt);
+  assert.equal(preserved.recovery.pendingOutbox, true);
+
+  const authoritative = mergeOfflinePackRenewal(local, remote, { preserveLocalProgress: false });
+  assert.equal(authoritative.aiPractice.currentSet.id, "server-set");
+  assert.equal(authoritative.recovery, undefined);
 });
 
 test("offline outbox IDs are scoped by account and active access requires an explicit matching marker", async () => {

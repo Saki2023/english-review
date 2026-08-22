@@ -19,12 +19,27 @@ const {
   englishFunctionWordsMatch,
   englishSourceWordResults,
   englishWordResults,
+  normalizeChinese,
   normalizeEnglish,
   repairReviewEvidence
 } = require("../answer-utils");
 const { expandRegisteredChineseAnswers, naturalizePlainDeepChinese } = require("../review-variants");
+const { selfStudyAutomaticSummary } = require("./self-study");
 
-const LEARNING_EVIDENCE_REPAIR_VERSION = 1;
+const LEARNING_EVIDENCE_REPAIR_VERSION = 2;
+
+const SELF_STUDY_ANSWER_REPAIRS = Object.freeze({
+  "trip-day-011": Object.freeze({
+    "reading-line-01-translate": Object.freeze(["萨姆和汤姆在一条船里。", "萨姆和汤姆在一艘船里。", "萨姆和汤姆在船里。", "萨姆和汤姆在船上。"])
+  }),
+  "trip-day-014": Object.freeze({
+    "reading-line-04-translate": Object.freeze(["他们看见一只老鼠在房子里。", "他们看见一只老鼠在一所房子里。", "他们看到一只老鼠在一所房子里。"]),
+    "reading-check-2": Object.freeze(["路上", "道路上", "在路上", "在道路上", "一条路上", "在一条路上"]),
+    "reading-check-3": Object.freeze(["房间里", "在房间里", "一个房间里", "在一个房间里"]),
+    "test-ez1": Object.freeze(["他们看见一头棕色的牛在路上。", "他们看见一头棕色的牛在道路上。", "他们看到一头棕色的牛在一条路上。"]),
+    "test-ez2": Object.freeze(["他们在一个房间里玩游戏。", "他们在一个房间里玩一个游戏。", "他们在房间里玩一个游戏。"])
+  })
+});
 
 function repairContentItemSignature(value) {
   const item = value && typeof value === "object" ? value : {};
@@ -57,7 +72,11 @@ function correctedAiHistoryItem(value, content = {}) {
   const sourceCorrectAnswer = String(item.correctAnswer || "");
   const correctAnswer = item.direction === "en-zh" ? naturalizePlainDeepChinese(item.prompt, sourceCorrectAnswer) : sourceCorrectAnswer;
   const acceptedAnswers = item.direction === "en-zh"
-    ? expandRegisteredChineseAnswers(content, item.prompt, [correctAnswer, sourceCorrectAnswer], 16)
+    ? expandRegisteredChineseAnswers(content, item.prompt, [
+      correctAnswer,
+      sourceCorrectAnswer,
+      ...(normalizeEnglish(item.prompt) === "sam and tom are in a zoo" ? ["萨姆与汤姆在一家动物园里。"] : [])
+    ], 16)
     : (sourceCorrectAnswer ? [sourceCorrectAnswer] : []);
   let correct = item.correct === true;
   let score = Number.isFinite(Number(item.score)) ? Math.max(0, Math.min(1, Number(item.score))) : (correct ? 1 : 0);
@@ -285,13 +304,155 @@ function repairAiExam(value, content = {}) {
   return { changed: true, value: { ...source, currentExam: current.value, history, weakPoints, updatedAt: new Date().toISOString() } };
 }
 
+function selfStudyAnswerMatches(step, answer, acceptedAnswers) {
+  if (step && (step.direction === "en-zh" || step.type === "en-zh")) {
+    return chineseAnswerQuality(answer, acceptedAnswers, step.english || step.prompt).gradingStatus === "correct";
+  }
+  const normalized = normalizeChinese(answer);
+  return Boolean(normalized && acceptedAnswers.some(value => normalizeChinese(value) === normalized));
+}
+
+function repairedSelfStudyAttempt(attemptValue, step, acceptedAnswers, { invalidated = false, independent = false } = {}) {
+  const attempt = attemptValue && typeof attemptValue === "object" ? attemptValue : {};
+  if (invalidated) {
+    return {
+      ...attempt,
+      status: "invalidated",
+      correct: null,
+      score: null,
+      gradingStatus: "pending",
+      explanation: "该记录由旧错误答案键诱发，已从学习证据中排除。",
+      detailedExplanation: "该记录保留用于审计，但不再计入订正、错题、能力、单词使用或掌握证据。",
+      problemWords: [],
+      wordResults: [],
+      correction: false,
+      assistance: "",
+      hintLevel: 0,
+      formalEvidence: false,
+      acceptedAnswerVersion: "self-study-answer-repair-v1"
+    };
+  }
+  const correct = selfStudyAnswerMatches(step, attempt.answer, acceptedAnswers);
+  if (!correct) return attempt;
+  const english = step.english || step.prompt || "";
+  return {
+    ...attempt,
+    status: "graded",
+    correct: true,
+    score: 1,
+    gradingStatus: "correct",
+    explanation: attempt.correct === true ? (attempt.explanation || "回答正确，可以继续。") : "答案与题干或短文内容一致，旧判定已定向修正。",
+    detailedExplanation: attempt.correct === true ? (attempt.detailedExplanation || attempt.explanation || "回答正确，可以继续。") : "答案与本题修正后的参考范围一致；本次修复不放宽其他人物、地点、数量或动作差异。",
+    problemWords: [],
+    wordResults: english ? englishSourceWordResults(english, true, []) : [],
+    ...(independent ? { correction: false, assistance: "", hintLevel: 0 } : {}),
+    acceptedAnswerVersion: "self-study-answer-repair-v1"
+  };
+}
+
+function replaceSelfStudyStepAnswers(lesson, repairs) {
+  if (!lesson || !Array.isArray(lesson.stages) || !repairs) return lesson;
+  let changed = false;
+  const stages = lesson.stages.map(stage => ({
+    ...stage,
+    steps: stage.steps.map(step => {
+      const acceptedAnswers = repairs[step.stepId];
+      if (!acceptedAnswers) return step;
+      const next = { ...step, acceptedAnswers: [...acceptedAnswers], referenceAnswer: acceptedAnswers[0] || "" };
+      if (JSON.stringify(next) !== JSON.stringify(step)) changed = true;
+      return next;
+    })
+  }));
+  return changed ? { ...lesson, stages } : lesson;
+}
+
+function repairSelfStudyEvidence(value, wordUsageValue) {
+  const source = value && typeof value === "object" ? value : {};
+  let changed = false;
+  const invalidatedAttemptIds = new Set();
+  const completedAttemptIds = new Set();
+  const lessons = (Array.isArray(source.lessons) ? source.lessons : []).map(lesson => {
+    const repairs = SELF_STUDY_ANSWER_REPAIRS[lesson && lesson.lessonId];
+    const repaired = replaceSelfStudyStepAnswers(lesson, repairs);
+    if (repaired !== lesson) changed = true;
+    return repaired;
+  });
+  const progress = Object.fromEntries(Object.entries(source.progress && typeof source.progress === "object" ? source.progress : {}).map(([lessonId, progressValue]) => {
+    const repairs = SELF_STUDY_ANSWER_REPAIRS[lessonId];
+    if (!repairs || !progressValue || !progressValue.snapshot) return [lessonId, progressValue];
+    const original = progressValue;
+    const snapshot = replaceSelfStudyStepAnswers(original.snapshot, repairs);
+    const stepDefinitions = new Map(snapshot.stages.flatMap(stage => stage.steps).map(step => [step.stepId, step]));
+    const steps = { ...(original.steps && typeof original.steps === "object" ? original.steps : {}) };
+    Object.entries(repairs).forEach(([stepId, acceptedAnswers]) => {
+      const step = stepDefinitions.get(stepId);
+      const stepState = steps[stepId];
+      if (!step || !stepState || !Array.isArray(stepState.attempts)) return;
+      const firstValidIndex = stepState.attempts.findIndex(attempt => selfStudyAnswerMatches(step, attempt && attempt.answer, acceptedAnswers));
+      if (firstValidIndex < 0) return;
+      const attempts = stepState.attempts.map((attempt, index) => {
+        if (index > firstValidIndex) {
+          if (attempt && attempt.attemptId) invalidatedAttemptIds.add(attempt.attemptId);
+          return repairedSelfStudyAttempt(attempt, step, acceptedAnswers, { invalidated: true });
+        }
+        const repaired = repairedSelfStudyAttempt(attempt, step, acceptedAnswers, { independent: index === 0 && index === firstValidIndex });
+        if (index === firstValidIndex && repaired && repaired.attemptId) completedAttemptIds.add(repaired.attemptId);
+        return repaired;
+      });
+      const firstWasValid = firstValidIndex === 0;
+      steps[stepId] = {
+        ...stepState,
+        attempts,
+        ...(firstWasValid ? { firstAttemptId: attempts[0] && attempts[0].attemptId || stepState.firstAttemptId, assistance: "", hintLevel: 0 } : {})
+      };
+    });
+    const next = { ...original, snapshot, steps };
+    const summaryStep = snapshot.stages.flatMap(stage => stage.steps).find(step => step.type === "summary");
+    const summaryState = summaryStep && next.steps[summaryStep.stepId];
+    if (summaryState && summaryState.automaticSummary) {
+      const summaryTime = new Date(summaryState.automaticSummary.generatedAt || original.completedAt || original.updatedAt || 0);
+      const stableTime = Number.isFinite(summaryTime.getTime()) ? summaryTime : new Date(0);
+      next.steps = { ...next.steps, [summaryStep.stepId]: { ...summaryState, automaticSummary: selfStudyAutomaticSummary(next, stableTime) } };
+    }
+    if (JSON.stringify(next) !== JSON.stringify(original)) changed = true;
+    return [lessonId, next];
+  }));
+
+  const usageSource = wordUsageValue && typeof wordUsageValue === "object" ? wordUsageValue : {};
+  const usageEvents = (Array.isArray(usageSource.events) ? usageSource.events : []).filter(event => {
+    const eventId = String(event && event.eventId || "");
+    const invalidated = Array.from(invalidatedAttemptIds).some(attemptId => eventId.startsWith(`self-study:${attemptId}:`));
+    if (invalidated) changed = true;
+    return !invalidated;
+  }).map(event => {
+    const eventId = String(event && event.eventId || "");
+    const repaired = Array.from(completedAttemptIds).some(attemptId => eventId.startsWith(`self-study:${attemptId}:`));
+    if (!repaired || event.result === "completed") return event;
+    changed = true;
+    return { ...event, result: "completed", formalEvidence: false };
+  });
+  const wordUsage = usageEvents.length === (Array.isArray(usageSource.events) ? usageSource.events.length : 0)
+    && usageEvents.every((event, index) => event === usageSource.events[index])
+    ? usageSource
+    : { ...usageSource, events: usageEvents };
+  return { changed, value: changed ? { ...source, lessons, progress } : source, wordUsage };
+}
+
 function repairLearningEvidence(content, stateValue) {
   const review = repairReviewEvidence(content, stateValue);
   const practice = repairAiPractice(review.state.aiPractice, content);
   const exam = repairAiExam(review.state.aiExam, content);
+  const selfStudy = repairSelfStudyEvidence(review.state.selfStudy, review.state.wordUsage);
+  const correctedAiById = new Map((Array.isArray(practice.value && practice.value.history) ? practice.value.history : []).map(item => [String(item && item.id || ""), item]));
+  const sentencePracticeEvents = (Array.isArray(review.state.sentencePracticeEvents) ? review.state.sentencePracticeEvents : []).map(event => {
+    const corrected = correctedAiById.get(String(event && event.id || ""));
+    if (!corrected || event.correct === (corrected.correct === true && corrected.gradingStatus === "correct" && Number(corrected.score) >= 1)) return event;
+    return { ...event, correct: corrected.correct === true && corrected.gradingStatus === "correct" && Number(corrected.score) >= 1 };
+  });
+  const sentenceEventsChanged = sentencePracticeEvents.some((event, index) => event !== review.state.sentencePracticeEvents[index]);
   return {
-    changed: review.changed || practice.changed || exam.changed,
-    state: { ...review.state, aiPractice: practice.value, aiExam: exam.value }
+    changed: review.changed || practice.changed || exam.changed || selfStudy.changed || sentenceEventsChanged,
+    state: { ...review.state, aiPractice: practice.value, aiExam: exam.value, selfStudy: selfStudy.value, wordUsage: selfStudy.wordUsage, sentencePracticeEvents }
   };
 }
 
@@ -302,5 +463,6 @@ module.exports = {
   learningEvidenceRepairSignature,
   repairAiExam,
   repairAiPractice,
+  repairSelfStudyEvidence,
   repairLearningEvidence
 };

@@ -17,11 +17,12 @@ function jsonResponse(status, value) {
 }
 
 function pack(accountId = "account-a") {
+  const generatedAt = new Date(Date.now() - 60 * 60 * 1000);
   return {
     schemaVersion: 1,
     account: { id: accountId, username: accountId },
-    generatedAt: "2026-08-15T00:00:00.000Z",
-    expiresAt: "2026-08-20T00:00:00.000Z",
+    generatedAt: generatedAt.toISOString(),
+    expiresAt: new Date(generatedAt.getTime() + 14 * 86400000).toISOString(),
     revision: "one"
   };
 }
@@ -105,4 +106,59 @@ test("account mismatch blocks replay before reading or mutating queued operation
   const fetch = async () => jsonResponse(200, { authenticated: true, user: { id: "account-b" } });
   await assert.rejects(() => replayOutbox({ store, accountId: "account-a", fetch }), error => error.code === "account_mismatch");
   assert.deepEqual(await store.listOutbox("account-a"), before);
+});
+
+test("a missing remote AI set is classified separately and remains first in FIFO", async () => {
+  const store = await preparedStore();
+  const first = await store.listOutbox("account-a");
+  await store.removeOutbox("one", "account-a");
+  await store.removeOutbox("two", "account-a");
+  await store.enqueue({ ...first[0], id: "ai-draft:set-1:1:q1", path: "/api/ai/questions/batch/draft" }, "account-a");
+  await store.enqueue(operation("later", "/api/self-study/resume", 2), "account-a");
+  const calls = [];
+  const fetch = async path => {
+    calls.push(path);
+    if (path === "/api/auth/status") return jsonResponse(200, { authenticated: true, user: { id: "account-a" } });
+    if (path === "/api/ai/questions/batch/draft") return jsonResponse(404, { error: "AI question set not found" });
+    return jsonResponse(200, {});
+  };
+  await assert.rejects(() => replayOutbox({ store, accountId: "account-a", fetch }), error => error.code === "content_missing");
+  assert.deepEqual(calls, ["/api/auth/status", "/api/ai/questions/batch/draft"]);
+  assert.deepEqual((await store.listOutbox("account-a")).map(item => item.id), ["ai-draft:set-1:1:q1", "later"]);
+
+  const retryCalls = [];
+  const retried = await replayOutbox({
+    store,
+    accountId: "account-a",
+    fetch: async path => {
+      retryCalls.push(path);
+      if (path === "/api/auth/status") return jsonResponse(200, { authenticated: true, user: { id: "account-a" } });
+      if (path === "/api/offline/pack") return jsonResponse(200, pack());
+      return jsonResponse(200, { ok: true });
+    }
+  });
+  assert.equal(retried.replayed, 2);
+  assert.deepEqual(retryCalls, ["/api/auth/status", "/api/ai/questions/batch/draft", "/api/self-study/resume", "/api/offline/pack"]);
+  assert.equal((await store.listOutbox("account-a")).length, 0);
+});
+
+test("two tabs replaying the same stable IDs keep server evidence idempotent and empty the queue", async () => {
+  const store = await preparedStore();
+  const applied = new Set();
+  let evidenceWrites = 0;
+  const fetch = async (path, options = {}) => {
+    if (path === "/api/auth/status") return jsonResponse(200, { authenticated: true, user: { id: "account-a" } });
+    if (path === "/api/offline/pack") return jsonResponse(200, pack());
+    const requestId = JSON.parse(options.body).requestId;
+    if (!applied.has(requestId)) { applied.add(requestId); evidenceWrites += 1; }
+    await new Promise(resolve => setImmediate(resolve));
+    return jsonResponse(200, { reused: applied.has(requestId) });
+  };
+  await Promise.all([
+    replayOutbox({ store, accountId: "account-a", fetch }),
+    replayOutbox({ store, accountId: "account-a", fetch })
+  ]);
+  assert.equal(evidenceWrites, 2);
+  assert.deepEqual(Array.from(applied), ["one", "two"]);
+  assert.equal((await store.listOutbox("account-a")).length, 0);
 });

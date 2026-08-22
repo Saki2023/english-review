@@ -120,6 +120,7 @@
   let currentUser = API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" };
   let offlineSession = false;
   let offlinePack = null;
+  let offlinePackStatus = "missing";
   let offlinePackLoading = false;
   let offlineOutboxCount = 0;
   let offlineReplayInProgress = false;
@@ -231,7 +232,7 @@
   let previewPracticeRetryKey = "";
   let previewPracticeStatusMessage = "";
   let previewPracticeGradingInProgress = false;
-  let selfStudyState = { enabled: false, hasLessons: false, entryVisible: false, lessonCount: 0, completedLessons: 0, current: null, availableLesson: null, waitingUntil: "", updatedAt: "" };
+  let selfStudyState = { enabled: false, hasLessons: false, entryVisible: false, lessonCount: 0, completedLessons: 0, current: null, availableLesson: null, waitingUntil: "", waitingReason: "", schedule: null, serverNow: "", updatedAt: "" };
   let selfStudyLoaded = false;
   let selfStudyLoading = false;
   let selfStudyRequestInProgress = false;
@@ -388,12 +389,20 @@
     remove.hidden = !summary || offlineSession;
     status.classList.toggle("is-offline", offlineSession);
     if (!summary) {
-      status.innerHTML = '<i data-lucide="wifi-off" aria-hidden="true"></i><span><strong>尚未准备离线包</strong><small>联网时点击“准备离线使用”，出门断网后才能进入同一账号。</small></span>';
+      const pending = offlineOutboxCount ? `；${offlineOutboxCount} 项待同步记录仍保留` : "";
+      const title = offlinePackStatus === "corrupt" ? "离线包需要修复" : "尚未准备离线包";
+      const detail = offlinePackStatus === "corrupt"
+        ? `本地离线包损坏，请联网重新准备${pending}。`
+        : `联网时点击“准备离线使用”，出门断网后才能进入同一账号${pending}。`;
+      status.innerHTML = `<i data-lucide="wifi-off" aria-hidden="true"></i><span><strong>${title}</strong><small>${detail}</small></span>`;
     } else {
       const generated = summary.generatedAt ? new Date(summary.generatedAt).toLocaleString("zh-CN") : "未知时间";
       const expires = summary.expiresAt ? new Date(summary.expiresAt).toLocaleDateString("zh-CN") : "未知日期";
       const pending = offlineOutboxCount ? `；${offlineOutboxCount} 项待联网同步` : "";
-      status.innerHTML = `<i data-lucide="${offlineSession ? "cloud-off" : "circle-check"}" aria-hidden="true"></i><span><strong>${offlineSession ? "正在使用当前账号的离线包" : "离线包已准备"}</strong><small>${generated} 生成 · ${summary.lessons} 天课程 · ${summary.words} 个预习词 · ${summary.sentences} 个预习句 · ${summary.aiGroups} 个已生成 AI 题组 · ${expires} 前有效${pending}</small></span>`;
+      const expired = offlinePackStatus === "expired";
+      const title = offlineSession ? (expired ? "正在使用已过期离线包" : "正在使用当前账号的离线包") : (expired ? "离线包已过期" : "离线包已准备");
+      const expiry = expired ? "已过期；当前草稿和队列已保留，请联网续期" : `${expires} 前有效`;
+      status.innerHTML = `<i data-lucide="${offlineSession ? "cloud-off" : (expired ? "triangle-alert" : "circle-check")}" aria-hidden="true"></i><span><strong>${title}</strong><small>${generated} 生成 · ${summary.lessons} 天课程 · ${summary.words} 个预习词 · ${summary.sentences} 个预习句 · ${summary.aiGroups} 个已生成 AI 题组 · ${expiry}${pending}</small></span>`;
     }
     refreshIcons();
   }
@@ -520,10 +529,15 @@
       const localPractice = normalizeClientPreviewPractice(model.previewPractice);
       const packedPractice = normalizeClientPreviewPractice(pack.preview && pack.preview.practice);
       if (localPractice.key === packedPractice.key && localPractice.updatedAt > packedPractice.updatedAt) pack.preview.practice = cloneJson(localPractice);
-      offlinePack = await offlineStore.savePack(pack, currentUser.id);
+      const pending = await offlineStore.listOutbox(currentUser.id);
+      const renewed = typeof OFFLINE_STORAGE.mergeOfflinePackRenewal === "function"
+        ? OFFLINE_STORAGE.mergeOfflinePackRenewal(offlinePack, pack, { preserveLocalProgress: pending.length > 0 })
+        : pack;
+      offlinePack = await offlineStore.savePack(renewed, currentUser.id);
+      offlinePackStatus = "usable";
       offlineStore.activate(currentUser.id);
       await refreshOfflineOutboxCount(currentUser.id);
-      showToast("当前账号离线包已准备，可以在断网后继续学习");
+      showToast(pending.length ? `离线包已续期，${pending.length} 项草稿/记录仍按原顺序待同步` : "当前账号离线包已准备，可以在断网后继续学习");
     } catch (error) {
       showToast(error.message || "离线包准备失败");
     } finally {
@@ -539,6 +553,7 @@
     await offlineStore.removePack(currentUser.id);
     if (offlineStore.activeAccountId() === currentUser.id) offlineStore.clearActive();
     offlinePack = null;
+    offlinePackStatus = "missing";
     offlineOutboxCount = 0;
     renderOfflinePackStatus();
     showToast("当前账号离线包已删除");
@@ -553,16 +568,27 @@
       if (activeView === "ai") renderAiView();
       return false;
     }
-    const pack = await offlineStore.loadPack(accountId).catch(() => null);
-    if (!pack || String(pack.account && pack.account.id || "") !== accountId) {
+    const inspected = await offlineStore.inspectPack(accountId).catch(error => ({ status: "corrupt", pack: null, error: String(error && error.message || "") }));
+    offlinePackStatus = inspected.status || "missing";
+    const pack = inspected.pack;
+    if (inspected.status === "account_mismatch") {
       offlineStore.clearActive();
-      aiStatusMessage = "当前账号离线包已过期或不可用，请联网重新准备。";
+      aiStatusMessage = "当前离线包不属于这个账号，已停止使用；请联网重新准备。";
+      if (activeView === "ai") renderAiView();
+      return false;
+    }
+    if (!pack) {
+      aiStatusMessage = inspected.status === "corrupt"
+        ? "本地离线包损坏；草稿和待同步记录已保留，请联网重新准备。"
+        : "当前账号没有可离线完成的内容；待同步记录仍会保留，联网后可重试。";
+      renderOfflinePackStatus();
       if (activeView === "ai") renderAiView();
       return false;
     }
     offlineSession = true;
     remoteReady = false;
     hydrateOfflinePack(pack);
+    if (offlinePackStatus === "expired") aiStatusMessage = "离线包已过期，但已下载的原题和草稿仍可继续；联网后请重新准备离线包。";
     await refreshOfflineOutboxCount(accountId);
     showAppView();
     renderHome();
@@ -599,7 +625,9 @@
       if (!accountRequestContextIsCurrent(context)) throw staleAccountRequestError();
       offlineSession = false;
       setAccountContext({ ...result.user, role: result.user.role || "user" });
-      offlinePack = result.pack || await offlineStore.loadPack(accountId).catch(() => null);
+      const inspected = await offlineStore.inspectPack(accountId).catch(() => ({ status: "missing", pack: null }));
+      offlinePackStatus = inspected.status || "missing";
+      offlinePack = result.pack || inspected.pack || null;
       offlineOutboxCount = result.remaining;
       remoteReady = false;
       selfStudyLoaded = false;
@@ -622,16 +650,19 @@
         offlineStore.clearActive();
         offlineSession = false;
         offlinePack = null;
+        offlinePackStatus = "missing";
         offlineOutboxCount = 0;
         setAccountContext(null);
         showAuthView();
         setAuthFeedback(error.message);
       } else if (accountRequestContextIsCurrent(context) && !error.silent) {
-        offlineSession = true;
+        offlineSession = Boolean(offlinePack);
         remoteReady = false;
-        aiStatusMessage = `${error.message || "离线记录同步失败"}；队列已保留，可稍后重试。`;
+        aiStatusMessage = error.code === "content_missing"
+          ? "服务器暂时找不到原题组；本机题目、草稿和队列已保留，请稍后重试或联网重新准备离线包。"
+          : `${error.message || "离线记录同步失败"}；队列已保留，可稍后重试。`;
         showAppView();
-        $("#dataStatus").textContent = `词库同步至第 ${DATA.currentDay} 天 · 当前账号离线包`;
+        $("#dataStatus").textContent = offlineSession ? `词库同步至第 ${DATA.currentDay} 天 · 当前账号离线包` : `词库同步至第 ${DATA.currentDay} 天 · 离线队列待重试`;
         renderHome();
         renderAiView();
         renderOfflinePackStatus();
@@ -2189,18 +2220,25 @@
       if (activeId && activeId !== String(data.user.id || "")) offlineStore.clearActive();
       offlineSession = false;
       setAccountContext(data.user);
-      offlinePack = offlineStore ? await offlineStore.loadPack(data.user.id) : null;
+      const inspected = offlineStore ? await offlineStore.inspectPack(data.user.id) : { status: "missing", pack: null };
+      offlinePackStatus = inspected.status || "missing";
+      offlinePack = inspected.pack || null;
       await refreshOfflineOutboxCount(data.user.id);
       return true;
     } catch (_) {
       const accountId = offlineStore?.activeAccountId() || "";
       if (!accountId) return false;
-      const pack = await offlineStore.loadPack(accountId);
-      if (!pack || String(pack.account && pack.account.id || "") !== accountId) {
-        offlineStore.clearActive();
+      const inspected = await offlineStore.inspectPack(accountId).catch(error => ({ status: "corrupt", pack: null, error: String(error && error.message || "") }));
+      if (inspected.status === "account_mismatch") { offlineStore.clearActive(); return false; }
+      const pack = inspected.pack;
+      if (!pack) {
+        setAuthFeedback(inspected.status === "corrupt"
+          ? "本地离线包损坏；待同步记录仍保留，请联网登录后重新准备。"
+          : "没有可用离线内容；请联网登录后准备离线包。");
         return false;
       }
       offlineSession = true;
+      offlinePackStatus = inspected.status || "missing";
       offlinePack = pack;
       remoteReady = false;
       setAccountContext({ id: accountId, username: pack.account.username || "离线账号", role: "offline" });
@@ -2226,7 +2264,9 @@
       resetReviewVariantPoolViewer();
       offlineStore?.clearActive();
       offlineSession = false;
-      offlinePack = offlineStore ? await offlineStore.loadPack(data.user.id) : null;
+      const inspected = offlineStore ? await offlineStore.inspectPack(data.user.id) : { status: "missing", pack: null };
+      offlinePackStatus = inspected.status || "missing";
+      offlinePack = inspected.pack || null;
       setAccountContext(data.user);
       model = loadModel();
       syncPreviewMaskGlobals();
@@ -2264,6 +2304,7 @@
     offlineStore?.clearActive();
     offlineSession = false;
     offlinePack = null;
+    offlinePackStatus = "missing";
     offlineOutboxCount = 0;
     setAccountContext(API_ENABLED ? null : { id: "local", username: "本机模式", role: "local" });
     if (API_ENABLED) showAuthView();
@@ -2405,7 +2446,7 @@
       retryButton.disabled = aiOptionsLoading || offlineReplayInProgress;
       retryButton.innerHTML = offlineReplayInProgress
         ? '<i data-lucide="loader-circle" aria-hidden="true"></i>正在同步'
-        : offlineSession
+        : (offlineSession || offlineOutboxCount)
           ? '<i data-lucide="refresh-cw" aria-hidden="true"></i>重试联网同步'
           : aiOptionsLoading
             ? '<i data-lucide="loader-circle" aria-hidden="true"></i>正在检查'
@@ -2510,7 +2551,7 @@
 
   async function retryAiConnection() {
     if (aiOptionsLoading || offlineReplayInProgress) return;
-    if (offlineSession) {
+    if (offlineSession || offlineOutboxCount) {
       aiStatusMessage = browserIsOnline() ? "正在同步离线学习记录…" : "当前设备已断网；实时 AI 生成需要联网。";
       renderAiView();
       if (browserIsOnline()) await replayOfflineOutbox();
@@ -3504,6 +3545,16 @@
       projectReviewBatchToSession(batch);
     } else applyRetiredReviewBatchResponse(data);
     saveModel({ remote: false });
+    return batch;
+  }
+
+  function applyStartedReviewBatchAndRender(data) {
+    const batch = applyReviewBatchResponse(data);
+    if (!batch || !Array.isArray(batch.questions) || !batch.questions.length) {
+      throw new Error("服务器已响应，但没有返回可显示的题目；请在原位置重试");
+    }
+    reviewAnswerResetRequested = true;
+    if (activeView === "home") renderHome();
     return batch;
   }
 
@@ -6508,7 +6559,7 @@
         recoveryTimeoutMs: REVIEW_BATCH_RECOVERY_TIMEOUT_MS
       });
       if (!accountRequestContextIsCurrent(accountContext)) throw staleAccountRequestError();
-      applyReviewBatchResponse(result.data);
+      applyStartedReviewBatchAndRender(result.data);
     } catch (error) {
       if (accountRequestContextIsCurrent(accountContext) && error && error.data && error.data.code === "review_tasks_already_completed") {
         applyReviewBatchResponse(error.data);
@@ -6674,6 +6725,9 @@
       current,
       availableLesson: source.availableLesson && typeof source.availableLesson === "object" ? source.availableLesson : null,
       waitingUntil: String(source.waitingUntil || ""),
+      waitingReason: String(source.waitingReason || ""),
+      schedule: source.schedule && typeof source.schedule === "object" ? source.schedule : null,
+      serverNow: String(source.serverNow || ""),
       updatedAt: String(source.updatedAt || ""),
       offline: source.offline === true
     };
@@ -6799,6 +6853,10 @@
       status.textContent = `${current.title} · ${stage} · 已完成 ${selfStudyState.completedLessons} 天`;
     } else if (available) {
       status.textContent = `${available.title} 已准备好；共预装 ${selfStudyState.lessonCount} 天，按完成顺序解锁。`;
+    } else if (selfStudyState.waitingReason === "schedule-unknown") {
+      status.textContent = "下一课日期尚未由服务器确认，请联网同步；系统不会按设备时间猜测或自动跳天。";
+    } else if (selfStudyState.waitingReason === "schedule-expired") {
+      status.textContent = "下一课的开放信息已过期，请联网续期；现有历史和草稿保持不变。";
     } else if (selfStudyState.waitingUntil) {
       status.textContent = `下一课将在 ${new Date(selfStudyState.waitingUntil).toLocaleString("zh-CN")} 后开放。`;
     } else {
@@ -6946,6 +7004,8 @@
       start.hidden = !selfStudyState.enabled || !selfStudyState.availableLesson;
       if (!selfStudyState.enabled && selfStudyState.hasLessons) $("#selfStudyEmptyText").textContent = "请先在首页手动开启“出门自学”，正常复习和预习页面不会受影响。";
       else if (selfStudyState.availableLesson) $("#selfStudyEmptyText").textContent = `${selfStudyState.availableLesson.title} 已准备好；完成当天六阶段后才会解锁下一天。`;
+      else if (selfStudyState.waitingReason === "schedule-unknown") $("#selfStudyEmptyText").textContent = "下一课日期尚未由服务器确认，请联网同步后再开始；系统不会按本机日期猜测课程日。";
+      else if (selfStudyState.waitingReason === "schedule-expired") $("#selfStudyEmptyText").textContent = "下一课的开放信息已过期，请联网续期后再开始；已完成历史和当前草稿不会改变。";
       else if (selfStudyState.waitingUntil) $("#selfStudyEmptyText").textContent = `下一课尚未到启用时间：${new Date(selfStudyState.waitingUntil).toLocaleString("zh-CN")}。`;
       else if (selfStudyState.pendingSyncLessons) $("#selfStudyEmptyText").textContent = `${selfStudyState.pendingSyncLessons} 天课程已离线完成，联网同步成功前不会转为正式已学，也不会生成正式错题或能力证据。`;
       else $("#selfStudyEmptyText").textContent = "当前没有待学课程；已完成记录会保留在同步档案中。";
@@ -8438,6 +8498,10 @@
         ? "当前账号还没有同步出门自学课程。"
         : current
           ? `第 ${current.studyDay || current.day || "?"} 天课程${selfStudyState.current ? "正在进行" : "可以开始"}。`
+          : selfStudyState.waitingReason === "schedule-unknown"
+            ? "下一课日期等待服务器确认，不会按设备日期自动跳天。"
+          : selfStudyState.waitingReason === "schedule-expired"
+            ? "下一课开放信息已过期，联网续期前不会自动推进。"
           : selfStudyState.waitingUntil
             ? `下一课将在 ${selfStudyState.waitingUntil} 开放。`
             : "课程已完成，等待下一天内容。";
@@ -8900,13 +8964,13 @@
     window.addEventListener("online", () => {
       aiStatusMessage = "网络已恢复，正在重新检查 AI 连接…";
       if (activeView === "ai") renderAiView();
-      if (offlineSession) void replayOfflineOutbox();
+      if (offlineSession || offlineOutboxCount) void replayOfflineOutbox();
       else void retryAiConnection();
     });
   }
 
   function registerServiceWorker() {
-    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=75", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
+    if (API_ENABLED && "serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js?v=76", { updateViaCache: "none" }).then(registration => registration.update()).catch(() => {});
   }
 
   $("#dataStatus").textContent = API_ENABLED ? `词库同步至第 ${DATA.currentDay} 天 · 正在连接` : `词库同步至第 ${DATA.currentDay} 天`;

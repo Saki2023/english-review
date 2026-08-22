@@ -31,7 +31,7 @@
     return unescape(encodeURIComponent(text)).length;
   }
 
-  function normalizeOfflinePack(value, expectedAccountId = "", now = new Date()) {
+  function normalizeOfflinePack(value, expectedAccountId = "", now = new Date(), options = {}) {
     const source = value && typeof value === "object" ? clone(value) : null;
     if (!source || Number(source.schemaVersion) !== OFFLINE_SCHEMA_VERSION) throw new Error("离线包版本不兼容，请联网重新准备");
     const accountId = cleanId(source.account && source.account.id, 120);
@@ -39,7 +39,7 @@
     const generatedAt = String(source.generatedAt || "");
     const expiresAt = String(source.expiresAt || "");
     if (!Number.isFinite(Date.parse(generatedAt)) || !Number.isFinite(Date.parse(expiresAt))) throw new Error("离线包时间信息无效，请联网重新准备");
-    if (Date.parse(expiresAt) <= now.getTime()) throw new Error("离线包已过期，请联网重新准备");
+    if (!options.allowExpired && Date.parse(expiresAt) <= now.getTime()) throw new Error("离线包已过期，请联网重新准备");
     const bytes = byteLength(source);
     if (bytes > MAX_PACK_BYTES) throw new Error("离线包超过本机容量上限");
     source.account.id = accountId;
@@ -50,6 +50,30 @@
 
   function packIsUsable(value, accountId, now = new Date()) {
     try { normalizeOfflinePack(value, accountId, now); return true; } catch (_) { return false; }
+  }
+
+  function mergeOfflinePackRenewal(localValue, remoteValue, options = {}) {
+    const remote = normalizeOfflinePack(remoteValue, remoteValue && remoteValue.account && remoteValue.account.id);
+    if (!options.preserveLocalProgress || !localValue) return remote;
+    const local = normalizeOfflinePack(localValue, remote.account.id, new Date(), { allowExpired: true });
+    const merged = clone(remote);
+    ["selfStudy", "selfStudyPublic", "aiPractice", "localOutboxSequence", "localUpdatedAt"].forEach(field => {
+      if (Object.hasOwn(local, field)) merged[field] = clone(local[field]);
+    });
+    if (local.preview && typeof local.preview === "object") {
+      merged.preview ||= {};
+      ["practice", "practiceSentences"].forEach(field => {
+        if (Object.hasOwn(local.preview, field)) merged.preview[field] = clone(local.preview[field]);
+      });
+    }
+    merged.recovery = {
+      pendingOutbox: true,
+      renewedAt: remote.generatedAt,
+      sourcePackId: cleanId(local.packId, 220)
+    };
+    merged.byteSize = byteLength(merged);
+    if (merged.byteSize > MAX_PACK_BYTES) throw new Error("续期后的离线包超过本机容量上限，请先联网同步待处理记录");
+    return merged;
   }
 
   function normalizeOutboxOperation(value, expectedAccountId = "") {
@@ -167,10 +191,30 @@
       return Number.isFinite(generated) ? generated : (Number.isFinite(revision) ? revision : 0);
     }
 
-    function usablePackRecord(record, accountId, now, source) {
-      if (!record || !record.pack) return null;
-      try { return { accountId, pack: normalizeOfflinePack(record.pack, accountId, now), savedAt: Number(record.savedAt) || 0, source }; }
-      catch (_) { return null; }
+    function storedPackRecord(record) {
+      if (!record || typeof record !== "object") return null;
+      return record.pack && typeof record.pack === "object"
+        ? { pack: record.pack, savedAt: Number(record.savedAt) || 0 }
+        : { pack: record, savedAt: 0 };
+    }
+
+    function inspectStoredPack(record, accountId, now, source) {
+      const stored = storedPackRecord(record);
+      if (!stored) return null;
+      try {
+        const pack = normalizeOfflinePack(stored.pack, accountId, now, { allowExpired: true });
+        const expired = Date.parse(pack.expiresAt) <= now.getTime();
+        return { status: expired ? "expired" : "usable", accountId, pack, savedAt: stored.savedAt, source };
+      } catch (error) {
+        const rawAccountId = cleanId(stored.pack && stored.pack.account && stored.pack.account.id, 120);
+        return {
+          status: rawAccountId && rawAccountId !== accountId ? "account_mismatch" : "corrupt",
+          accountId,
+          savedAt: stored.savedAt,
+          source,
+          error: String(error && error.message || "离线包损坏")
+        };
+      }
     }
 
     async function writePack(pack) {
@@ -189,7 +233,7 @@
     }
 
     function savePack(value, expectedAccountId = "") {
-      const pack = normalizeOfflinePack(value, expectedAccountId);
+      const pack = normalizeOfflinePack(value, expectedAccountId, new Date(), { allowExpired: true });
       const accountId = pack.account.id;
       const previous = packSaveChains.get(accountId) || Promise.resolve();
       const task = previous.catch(() => {}).then(() => writePack(pack));
@@ -201,27 +245,33 @@
       return task;
     }
 
-    async function loadPack(accountId, now = new Date()) {
+    async function inspectPack(accountId, now = new Date()) {
       const normalizedId = cleanId(accountId, 120);
-      if (!normalizedId) return null;
+      if (!normalizedId) return { status: "missing", accountId: "", pack: null };
       const pendingSave = packSaveChains.get(normalizedId);
       if (pendingSave) await pendingSave;
       const db = await openDatabase();
       const indexed = db ? await idbRequest("packs", "readonly", store => store.get(normalizedId)).catch(() => null) : null;
       const local = localGet(packKey(normalizedId));
-      const candidates = [usablePackRecord(indexed, normalizedId, now, "indexedDB"), usablePackRecord(local, normalizedId, now, "localStorage")].filter(Boolean);
-      if (!candidates.length) {
-        await removePack(normalizedId);
-        return null;
-      }
-      const record = candidates.sort((left, right) => packTimestamp(right) - packTimestamp(left))[0];
+      const candidates = [inspectStoredPack(indexed, normalizedId, now, "indexedDB"), inspectStoredPack(local, normalizedId, now, "localStorage")]
+        .filter(record => record && record.status !== "missing")
+        .sort((left, right) => packTimestamp(right) - packTimestamp(left));
+      if (!candidates.length) return { status: "missing", accountId: normalizedId, pack: null };
+      const record = candidates[0];
+      if (record.status !== "usable" && record.status !== "expired") return { ...record, pack: null };
       if (db && record.source === "localStorage") {
         try {
           await idbRequest("packs", "readwrite", store => store.put({ accountId: normalizedId, pack: record.pack, savedAt: record.savedAt }));
           localRemove(packKey(normalizedId));
         } catch (_) {}
       }
-      return clone(record.pack);
+      return { ...record, pack: clone(record.pack) };
+    }
+
+    async function loadPack(accountId, now = new Date(), options = {}) {
+      const status = await inspectPack(accountId, now);
+      if (status.status === "usable" || (status.status === "expired" && options.allowExpired)) return status.pack;
+      return null;
     }
 
     async function removePack(accountId) {
@@ -308,7 +358,7 @@
     }
 
     async function updatePack(accountId, updater) {
-      const pack = await loadPack(accountId);
+      const pack = await loadPack(accountId, new Date(), { allowExpired: true });
       if (!pack) throw new Error("当前账号没有可用离线包");
       const next = typeof updater === "function" ? updater(clone(pack)) : pack;
       return savePack(next, accountId);
@@ -328,7 +378,7 @@
       localRemove(ACTIVE_ACCOUNT_KEY);
     }
 
-    return { activeAccountId, activate, clearActive, enqueue, listOutbox, loadPack, removeOutbox, removePack, savePack, updatePack };
+    return { activeAccountId, activate, clearActive, enqueue, inspectPack, listOutbox, loadPack, removeOutbox, removePack, savePack, updatePack };
   }
 
   return {
@@ -339,6 +389,7 @@
     byteLength,
     createOfflineStore,
     mergeOutboxRecords,
+    mergeOfflinePackRenewal,
     normalizeOfflinePack,
     normalizeOutboxOperation,
     packIsUsable

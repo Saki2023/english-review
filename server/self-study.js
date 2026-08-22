@@ -25,6 +25,9 @@ const MAX_QUESTIONS_PER_STEP = 50;
 const MAX_HINT_RECEIPTS_PER_STEP = 20;
 const SELF_STUDY_SCHEDULE_ANCHOR_DAY = 12;
 const SELF_STUDY_SCHEDULE_ANCHOR_DATE = "2026-08-18";
+const SELF_STUDY_SCHEDULE_SCHEMA = 1;
+const SELF_STUDY_SCHEDULE_REVISION = "beijing-absolute-v1";
+const SELF_STUDY_TIME_ZONE = "Asia/Shanghai";
 
 function fail(message, statusCode = 400) {
   throw Object.assign(new Error(message), { statusCode });
@@ -105,6 +108,88 @@ function preserveSelfStudyHistorySchedule(lesson, progress) {
         ? { ...lesson.plannedContent.note, date: historicalNoteDate || lesson.plannedContent.note.date }
         : lesson.plannedContent?.note
     }
+  };
+}
+
+function knownLegacyTripLesson(lesson) {
+  return String(lesson && lesson.lessonId || "").startsWith("trip-day-");
+}
+
+function scheduleEntryFromLesson(lesson, source = "lesson") {
+  const enabledFrom = cleanIso(lesson && lesson.enabledFrom);
+  const formalDate = cleanDate(lesson && lesson.formalDate)
+    || (enabledFrom ? new Date(Date.parse(enabledFrom) + 8 * 60 * 60 * 1000).toISOString().slice(0, 10) : "");
+  const expiresAt = cleanIso(lesson && lesson.expiresAt);
+  return {
+    lessonId: cleanInline(lesson && lesson.lessonId, 120),
+    studyDay: Math.max(0, Number(lesson && lesson.studyDay) || 0),
+    formalDate,
+    enabledFrom,
+    expiresAt,
+    status: formalDate && enabledFrom ? "known" : "unknown",
+    source: cleanInline(source, 40) || "lesson"
+  };
+}
+
+function legacyScheduleEntry(lesson, progress) {
+  if (progress && ["completed", "cancelled", "expired"].includes(progress.status) && progress.snapshot) {
+    return scheduleEntryFromLesson(progress.snapshot, "completed-history");
+  }
+  const migrated = knownLegacyTripLesson(lesson) && Number(lesson.studyDay) >= SELF_STUDY_SCHEDULE_ANCHOR_DAY
+    ? alignSelfStudyLessonSchedule(lesson)
+    : lesson;
+  return scheduleEntryFromLesson(migrated, migrated === lesson ? "lesson" : "legacy-trip-migration");
+}
+
+function sanitizeScheduleEntry(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const lessonId = cleanInline(source.lessonId, 120);
+  const studyDay = Number(source.studyDay);
+  if (!lessonId || !Number.isInteger(studyDay) || studyDay < 1) return null;
+  const entry = scheduleEntryFromLesson({ ...source, lessonId, studyDay }, source.source || "stored");
+  return { ...entry, status: source.status === "unknown" || entry.status === "unknown" ? "unknown" : "known" };
+}
+
+function applyScheduleEntry(lesson, entry) {
+  if (!lesson || !entry || entry.lessonId !== lesson.lessonId || Number(entry.studyDay) !== Number(lesson.studyDay)) return lesson;
+  return {
+    ...lesson,
+    formalDate: entry.formalDate,
+    enabledFrom: entry.enabledFrom,
+    expiresAt: entry.expiresAt,
+    plannedContent: {
+      ...(lesson.plannedContent || {}),
+      note: lesson.plannedContent && lesson.plannedContent.note
+        ? { ...lesson.plannedContent.note, date: entry.formalDate || lesson.plannedContent.note.date }
+        : lesson.plannedContent?.note
+    }
+  };
+}
+
+function buildSelfStudySchedule(sourceValue, lessons, progress, options = {}) {
+  const source = sourceValue && typeof sourceValue === "object" ? sourceValue : {};
+  const stored = new Map((Array.isArray(source.entries) ? source.entries : [])
+    .map(sanitizeScheduleEntry)
+    .filter(Boolean)
+    .map(entry => [entry.lessonId, entry]));
+  const overrides = options.overrides instanceof Map ? options.overrides : new Map();
+  const entries = lessons.map(lesson => {
+    const progressItem = progress[lesson.lessonId];
+    if (progressItem && ["completed", "cancelled", "expired"].includes(progressItem.status) && progressItem.snapshot) {
+      return scheduleEntryFromLesson(progressItem.snapshot, "completed-history");
+    }
+    const override = sanitizeScheduleEntry(overrides.get(lesson.lessonId));
+    if (override && Number(override.studyDay) === Number(lesson.studyDay)) return override;
+    const existing = stored.get(lesson.lessonId);
+    if (existing && Number(existing.studyDay) === Number(lesson.studyDay)) return existing;
+    return legacyScheduleEntry(lesson, progressItem);
+  }).sort((left, right) => left.studyDay - right.studyDay || left.lessonId.localeCompare(right.lessonId));
+  return {
+    schema: SELF_STUDY_SCHEDULE_SCHEMA,
+    revision: cleanInline(options.revision || source.revision, 120) || SELF_STUDY_SCHEDULE_REVISION,
+    timeZone: SELF_STUDY_TIME_ZONE,
+    synchronizedAt: cleanIso(options.synchronizedAt || source.synchronizedAt),
+    entries
   };
 }
 
@@ -428,7 +513,7 @@ function sanitizeAttempt(value) {
   return {
     attemptId,
     answer: cleanText(source.answer, 2000),
-    status: ["pending", "graded"].includes(source.status) ? source.status : "graded",
+    status: ["pending", "graded", "invalidated"].includes(source.status) ? source.status : "graded",
     correct: typeof source.correct === "boolean" ? source.correct : null,
     score: Number.isFinite(Number(source.score)) ? Math.max(0, Math.min(1, Number(source.score))) : null,
     gradingStatus: ["correct", "partial", "incorrect", "pending"].includes(source.gradingStatus) ? source.gradingStatus : "pending",
@@ -575,17 +660,18 @@ function sanitizeSelfStudyState(value) {
     const normalized = sanitizeProgress(value);
     if (normalized && normalized.lessonId === lessonId) progress[lessonId] = normalized;
   });
-  const lessons = Array.from(lessonMap.values()).sort((left, right) => left.studyDay - right.studyDay || left.lessonId.localeCompare(right.lessonId)).map(lesson => {
-    const progressItem = progress[lesson.lessonId];
-    return progressItem && ["completed", "cancelled", "expired"].includes(progressItem.status)
-      ? preserveSelfStudyHistorySchedule(lesson, progressItem)
-      : alignSelfStudyLessonSchedule(lesson);
+  const rawLessons = Array.from(lessonMap.values()).sort((left, right) => left.studyDay - right.studyDay || left.lessonId.localeCompare(right.lessonId));
+  const schedule = buildSelfStudySchedule(source.schedule, rawLessons, progress, {
+    synchronizedAt: source.schedule && source.schedule.synchronizedAt || source.updatedAt
   });
+  const scheduleById = new Map(schedule.entries.map(entry => [entry.lessonId, entry]));
+  const lessons = rawLessons.map(lesson => applyScheduleEntry(lesson, scheduleById.get(lesson.lessonId)));
   return {
-    schema: 1,
+    schema: 2,
     enabled: source.enabled === true,
     lessons,
     progress,
+    schedule,
     updatedAt: cleanIso(source.updatedAt)
   };
 }
@@ -640,7 +726,7 @@ function offlineStep(step, lessonSalt) {
   };
 }
 
-function offlineLesson(lesson, nonce) {
+function offlineLesson(lesson, nonce, availability = "unknown") {
   const lessonSalt = crypto.createHash("sha256").update(`${nonce}:${lesson.lessonId}:${lesson.version}`, "utf8").digest("hex");
   return {
     lessonId: lesson.lessonId,
@@ -651,6 +737,7 @@ function offlineLesson(lesson, nonce) {
     enabledFrom: lesson.enabledFrom,
     expiresAt: lesson.expiresAt,
     publishedAt: lesson.publishedAt,
+    availability: ["available", "waiting", "expired", "unknown"].includes(availability) ? availability : "unknown",
     stages: lesson.stages.map(stage => ({
       stageId: stage.stageId,
       type: stage.type,
@@ -672,7 +759,17 @@ function offlineSelfStudyPackage(value, options = {}) {
   Object.values(state.progress).forEach(progress => {
     if (activeIds.has(progress.lessonId) && !selected.some(lesson => lesson.lessonId === progress.lessonId)) selected.unshift(progress.snapshot);
   });
-  const lessons = selected.slice(0, limit).map(lesson => offlineLesson(lesson, nonce));
+  const preparedAt = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  const scheduleById = new Map(state.schedule.entries.map(entry => [entry.lessonId, entry]));
+  const lessons = selected.slice(0, limit).map(lesson => {
+    const schedule = scheduleById.get(lesson.lessonId);
+    const availability = !schedule || schedule.status !== "known"
+      ? "unknown"
+      : lessonExpired(lesson, preparedAt)
+        ? "expired"
+        : lessonEnabled(lesson, preparedAt) ? "available" : "waiting";
+    return offlineLesson(lesson, nonce, availability);
+  });
   const lessonMap = new Map(lessons.map(lesson => [lesson.lessonId, lesson]));
   const progress = {};
   Object.values(state.progress).filter(item => activeIds.has(item.lessonId) && lessonMap.has(item.lessonId)).forEach(item => {
@@ -689,10 +786,12 @@ function offlineSelfStudyPackage(value, options = {}) {
     };
   });
   return {
-    schema: 1,
+    schema: 2,
     enabled: state.enabled,
     lessons,
     progress,
+    schedule: clone(state.schedule),
+    clock: { timeZone: SELF_STUDY_TIME_ZONE, serverNow: preparedAt.toISOString() },
     updatedAt: state.updatedAt,
     answerDigest: "sha256-answer-key-v1"
   };
@@ -707,7 +806,9 @@ function mergeSelfStudyLessons(value, packageValue, options = {}) {
       const progress = state.progress[lesson.lessonId];
       return progress && ["completed", "cancelled", "expired"].includes(progress.status)
         ? preserveSelfStudyHistorySchedule(lesson, progress)
-        : alignSelfStudyLessonSchedule(lesson);
+        : source.scheduleRevision || source.schedule && source.schedule.revision
+          ? lesson
+          : applyScheduleEntry(lesson, legacyScheduleEntry(lesson, progress));
     })
     .sort((left, right) => left.studyDay - right.studyDay || left.lessonId.localeCompare(right.lessonId));
   if (!incoming.length) fail("self-study package requires at least one lesson");
@@ -732,6 +833,14 @@ function mergeSelfStudyLessons(value, packageValue, options = {}) {
   });
   state.lessons = Array.from(map.values()).sort((left, right) => left.studyDay - right.studyDay || left.lessonId.localeCompare(right.lessonId)).slice(0, MAX_LESSONS);
   state.updatedAt = cleanIso(source.updatedAt) || new Date().toISOString();
+  const scheduleOverrides = new Map(incoming.map(lesson => [lesson.lessonId, scheduleEntryFromLesson(lesson, "teaching-sync")]));
+  state.schedule = buildSelfStudySchedule(state.schedule, state.lessons, state.progress, {
+    overrides: scheduleOverrides,
+    revision: source.scheduleRevision || source.schedule && source.schedule.revision || state.schedule.revision,
+    synchronizedAt: state.updatedAt
+  });
+  const scheduleById = new Map(state.schedule.entries.map(entry => [entry.lessonId, entry]));
+  state.lessons = state.lessons.map(lesson => applyScheduleEntry(lesson, scheduleById.get(lesson.lessonId)));
   return {
     state,
     result: {
@@ -774,8 +883,10 @@ function currentLessonCandidate(value, now = new Date()) {
   for (const lesson of state.lessons) {
     const progress = state.progress[lesson.lessonId];
     if (progress && ["completed", "cancelled", "expired"].includes(progress.status)) continue;
-    if (lessonExpired(lesson, now)) continue;
-    if (!lessonEnabled(lesson, now)) return { state, lesson: null, progress: null, waitingLesson: lesson };
+    const schedule = state.schedule.entries.find(entry => entry.lessonId === lesson.lessonId);
+    if (!schedule || schedule.status !== "known") return { state, lesson: null, progress: null, waitingLesson: lesson, waitingReason: "schedule-unknown" };
+    if (lessonExpired(lesson, now)) return { state, lesson: null, progress: null, waitingLesson: lesson, waitingReason: "schedule-expired" };
+    if (!lessonEnabled(lesson, now)) return { state, lesson: null, progress: null, waitingLesson: lesson, waitingReason: "not-enabled" };
     return { state, lesson, progress: null };
   }
   return { state, lesson: null, progress: null };
@@ -804,6 +915,8 @@ function selfStudyPreviewContent(value, now = new Date()) {
     nextDay: Number(lesson.studyDay),
     updatedAt: candidate.progress?.updatedAt || candidate.state.updatedAt || lesson.publishedAt || "",
     formalEvidence: false,
+    scheduleStatus: candidate.waitingReason === "schedule-unknown" ? "unknown" : "authoritative",
+    waitingReason: String(candidate.waitingReason || ""),
     words: clone(lesson.plannedContent.words).map(item => ({
       ...item,
       status: "planned",
@@ -850,7 +963,14 @@ function initializeProgress(lesson, now = new Date()) {
 
 function startSelfStudyLesson(value, now = new Date()) {
   const candidate = currentLessonCandidate(value, now);
-  if (!candidate.lesson) fail(candidate.waitingLesson ? "next self-study lesson is not available yet" : "no self-study lesson is available", 409);
+  if (!candidate.lesson) {
+    const message = candidate.waitingReason === "schedule-unknown"
+      ? "self-study lesson date is unknown; sync with the server before starting"
+      : candidate.waitingReason === "schedule-expired"
+        ? "self-study lesson schedule expired; sync with the server before starting"
+        : candidate.waitingLesson ? "next self-study lesson is not available yet" : "no self-study lesson is available";
+    fail(message, 409);
+  }
   if (candidate.progress) {
     if (candidate.progress.status === "paused") {
       candidate.progress.status = "in-progress";
@@ -1442,6 +1562,15 @@ function publicSelfStudyState(value, now = new Date()) {
       expiresAt: candidate.lesson.expiresAt
     } : null,
     waitingUntil: candidate.waitingLesson ? candidate.waitingLesson.enabledFrom : "",
+    waitingReason: String(candidate.waitingReason || ""),
+    schedule: {
+      schema: state.schedule.schema,
+      revision: state.schedule.revision,
+      timeZone: state.schedule.timeZone,
+      synchronizedAt: state.schedule.synchronizedAt,
+      status: state.schedule.entries.some(entry => entry.status !== "known") ? "incomplete" : "authoritative"
+    },
+    serverNow: now.toISOString(),
     updatedAt: state.updatedAt
   };
 }
@@ -1556,6 +1685,7 @@ function selfStudyHistory(value) {
       pending: allSteps.filter(step => step.status === "pending").length,
       lastStudiedAt: histories.map(item => item.updatedAt).filter(Boolean).sort().at(-1) || ""
     },
+    schedule: clone(state.schedule),
     lessons: histories,
     plannedLessons
   };
@@ -1565,6 +1695,8 @@ module.exports = {
   QUESTION_STEP_TYPES,
   SELF_STUDY_SCHEDULE_ANCHOR_DATE,
   SELF_STUDY_SCHEDULE_ANCHOR_DAY,
+  SELF_STUDY_SCHEDULE_REVISION,
+  SELF_STUDY_TIME_ZONE,
   SELF_STUDY_STAGE_TYPES,
   SELF_STUDY_STEP_TYPES,
   TEST_BLUEPRINT,
@@ -1572,6 +1704,7 @@ module.exports = {
   continueSelfStudyStep,
   currentLessonCandidate,
   alignSelfStudyLessonSchedule,
+  buildSelfStudySchedule,
   isQuestionStep,
   localStepGrade,
   markLessonCompleted,

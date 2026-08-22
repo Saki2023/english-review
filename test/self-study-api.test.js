@@ -385,6 +385,15 @@ test("anchored future lesson dates flow through preview, offline, sync, and rest
     const selfStudy = await request(baseUrl, travelerCookie, "/api/self-study");
     assert.equal(selfStudy.data.availableLesson, null);
     assert.equal(selfStudy.data.waitingUntil, "2026-08-17T16:00:00.000Z");
+    assert.equal(selfStudy.data.waitingReason, "not-enabled");
+    assert.deepEqual(selfStudy.data.schedule, {
+      schema: 1,
+      revision: "beijing-absolute-v1",
+      timeZone: "Asia/Shanghai",
+      synchronizedAt: "2026-08-17T00:00:00.000Z",
+      status: "authoritative"
+    });
+    assert.equal(selfStudy.data.serverNow, "2026-08-17T15:59:59.000Z");
     const previewWords = await request(baseUrl, travelerCookie, "/api/preview/words");
     assert.equal(previewWords.data.nextDay, 12);
     assert.equal(previewWords.data.formalDate, "2026-08-18");
@@ -396,6 +405,10 @@ test("anchored future lesson dates flow through preview, offline, sync, and rest
     assert.equal(offline.data.preview.formalDate, "2026-08-18");
     assert.equal(offline.data.selfStudy.lessons[0].formalDate, "2026-08-18");
     assert.equal(offline.data.selfStudy.lessons[0].enabledFrom, "2026-08-17T16:00:00.000Z");
+    assert.equal(offline.data.selfStudy.lessons[0].availability, "waiting");
+    assert.equal(offline.data.selfStudy.clock.timeZone, "Asia/Shanghai");
+    assert.equal(offline.data.selfStudy.clock.serverNow, "2026-08-17T15:59:59.000Z");
+    assert.equal(offline.data.selfStudy.schedule.revision, "beijing-absolute-v1");
     const profile = await fetch(`${baseUrl}/api/sync/profile?username=date-traveler`, { headers: { Authorization: `Bearer ${readToken}` } });
     const profileData = await profile.json();
     assert.equal(profile.status, 200);
@@ -404,12 +417,23 @@ test("anchored future lesson dates flow through preview, offline, sync, and rest
     assert.equal(profileData.selfStudyPlannedLessons[0].plannedContent.status, "planned");
     const other = await request(baseUrl, otherCookie, "/api/preview/words");
     assert.deepEqual(other.data.words, []);
+    const otherSelfStudy = await request(baseUrl, otherCookie, "/api/self-study");
+    assert.deepEqual(otherSelfStudy.data.schedule, {
+      schema: 1,
+      revision: "beijing-absolute-v1",
+      timeZone: "Asia/Shanghai",
+      synchronizedAt: "",
+      status: "authoritative"
+    });
 
+    const scheduleBeforeRestart = selfStudy.data.schedule;
     await stopServer(child);
     child = startServer(dataDir, port, apiToken, fixedClock);
     await waitForHealth(baseUrl, child);
     const restored = await request(baseUrl, travelerCookie, "/api/self-study");
     assert.equal(restored.data.waitingUntil, "2026-08-17T16:00:00.000Z");
+    assert.deepEqual(restored.data.schedule, scheduleBeforeRestart);
+    assert.equal(restored.data.serverNow, "2026-08-17T15:59:59.000Z");
     const restoredPreview = await request(baseUrl, travelerCookie, "/api/preview/words");
     assert.equal(restoredPreview.data.formalDate, "2026-08-18");
     assert.equal((await request(baseUrl, otherCookie, "/api/self-study")).data.hasLessons, false);
